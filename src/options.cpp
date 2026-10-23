@@ -94,9 +94,9 @@ Options ParseOptions(const wchar_t* commandLine) {
                                     &options.height) == 4 &&
                           options.width > 0 && options.height > 0;
     } else if (arg == L"--rt") {
-      options.renderTarget = next() == L"sw" ? RenderTargetKind::kSoftware : RenderTargetKind::kHardware;
+      options.renderTarget = next() == L"hw" ? RenderTargetKind::kHardware : RenderTargetKind::kSoftware;
     } else if (arg == L"--warm-d3d") {
-      options.warmD3D = next() != L"0";
+      options.warmD3D = next() != L"0" ? 1 : 0;
     } else if (arg == L"--env") {
       options.envStart = next() == L"late" ? EnvStart::kLate : EnvStart::kEarly;
     } else if (arg == L"--ntp") {
@@ -116,6 +116,9 @@ Options ParseOptions(const wchar_t* commandLine) {
   }
   if (options.userDataFolder.empty()) {
     options.userDataFolder = DefaultUserDataFolder();
+  }
+  if (options.warmD3D < 0) {
+    options.warmD3D = options.renderTarget == RenderTargetKind::kSoftware ? 1 : 0;
   }
   return options;
 }

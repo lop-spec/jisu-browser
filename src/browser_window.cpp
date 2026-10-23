@@ -215,7 +215,6 @@ void BrowserWindow::ShowFirstFrame(int showCmd) {
   if (warmup_.d2d) {
     painter_.CreateTarget(warmup_, hwnd_, options_.renderTarget, dpi_);
   }
-  warmup_.d3dWarm.Reset();  // 显卡驱动已由渲染目标的设备持有，预热设备用完即放
   metrics.Mark("renderTargetCreated");
 
   ShowWindow(hwnd_, options_.noActivate ? SW_SHOWNOACTIVATE : showCmd);

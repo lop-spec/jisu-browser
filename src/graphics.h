@@ -15,7 +15,7 @@
 
 namespace jisu {
 
-// 后台线程预先准备首帧要用的对象（D2D/DWrite 工厂、字体、显卡驱动），与建窗、发起内核环境并行。
+// 后台线程预先准备首帧要用的对象（D2D/DWrite 工厂、字体，以及 WARP 或显卡驱动），与建窗、发起内核环境并行。
 // 这些 DLL 在链接时设为延迟加载，第一次调用发生在这个线程上，不占 UI 线程。
 class GraphicsWarmup {
  public:
@@ -34,18 +34,20 @@ class GraphicsWarmup {
   ComPtr<IDWriteFactory> dwrite;
   ComPtr<IDWriteTextFormat> tabTitle;
   ComPtr<IDWriteTextFormat> message;
-  ComPtr<ID3D11Device> d3dWarm;  // 只为提前加载显卡驱动，渲染目标建好后释放
 
  private:
   static DWORD WINAPI ThreadMain(void* param);
-  void Prepare();
+  static DWORD WINAPI WarmDeviceMain(void* param);
+  bool Prepare();
   HRESULT CreateTextFormats();
 
   bool warmD3D_ = true;
+  bool warp_ = true;  // 软件渲染目标走 WARP，预热也建 WARP 设备
   bool painted_ = false;  // 在 SetEvent(firstPaint_) 之前写、等到事件之后读，由事件保证可见性
   HANDLE ready_ = nullptr;
   HANDLE firstPaint_ = nullptr;
   HANDLE thread_ = nullptr;
+  HANDLE warmThread_ = nullptr;
 };
 
 struct ChromeHit {

@@ -19,8 +19,8 @@ C++20 + Win32 + 官方 WebView2 SDK。标签条、工具栏用 Direct2D 自绘�
 | `--exit-after-metrics` | 写完时间线即退出 |
 | `--no-activate` | 显示窗口但不激活 |
 | `--bounds x,y,w,h` | 窗口位置与大小（物理像素） |
-| `--rt hw\|sw` | Direct2D 硬件 / 软件渲染目标，默认 hw |
-| `--warm-d3d 0\|1` | 后台线程提前建 D3D 设备加载显卡驱动，默认 1 |
+| `--rt sw\|hw` | Direct2D 软件 / 硬件渲染目标，默认 sw（硬件路径建 D3D 设备太慢，首帧过不了 70ms） |
+| `--warm-d3d 0\|1` | 后台线程提前建一个 D3D 设备（软件为 WARP，硬件为显卡）；默认软件预热、硬件不预热 |
 | `--env early\|late` | WebView2 环境在首帧前 / 首帧后发起，默认 early |
 | `--ntp folder\|inline` | 新标签页走随包 `ntp/` 目录 / 内置字符串，默认 folder |
 | `--no-spare` | 不预建备用控件 |
@@ -33,10 +33,11 @@ C++20 + Win32 + 官方 WebView2 SDK。标签条、工具栏用 Direct2D 自绘�
 ## 测量 G1 / G2
 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -File measure\run-g1g2.ps1 -Exe <jisu-browser.exe> -OutDir <结果目录> [-Runs 20] [-Preheat] [-ShellArgs "--rt sw"]
+powershell -NoProfile -ExecutionPolicy Bypass -File measure\run-g1g2.ps1 -Exe <jisu-browser.exe> -OutDir <结果目录> [-Runs 20] [-Preheat] [-ShellArgs "--rt hw"]
 ```
 
 外部计时复用可行性原型（不在本仓库）里 `jisu-probe.exe` 的 launch 模式（CreateProcess 前打点，WinEventHook 捕获窗口显示），用 `-Probe` 指定路径；内部时间线零点为进程创建时间。
 
 - G1：`firstFramePresented`，首帧 EndDraw 后由后台线程 DwmFlush 等到 DWM 合成的时刻，≤ 70ms。
-- G2：`ntpFirstFrameHost`，新标签页在 rAF 之后的下一个任务里回报、外壳收到的时刻（与可行性原型的 `webFirstFrameMs` 同口径），≤ 500ms，预热时 ≤ 300ms。另记页面 FCP（`ntpFcp`）作对照。
+- G2：新标签页内容首帧，≤ 500ms，预热时 ≤ 300ms。每轮取较晚者：`ntpFirstFrameHost`（rAF 之后的下一个任务里回报、外壳收到的时刻，与可行性原型的 `webFirstFrameMs` 同口径）与 `ntpFcp`（Chromium 记录的首个内容帧呈现时刻）。
+- `-WaitUserIdle <秒>`：每轮都等键鼠空闲满这么久再跑，有人在用机器时不弹测试窗口；`-AbortOnInput`：开跑后一有输入就整批放弃（采 ETW 用）。

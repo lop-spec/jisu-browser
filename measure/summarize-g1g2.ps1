@@ -2,7 +2,9 @@
 汇总 run-g1g2.ps1 的结果：G1/G2 中位数与判定、外部计时对照、启动时间线各阶段中位数。
 输出同时写到 <OutDir>\<Label>-summary.txt 与 <Label>-summary.json。
   G1：进程创建 → 窗口首帧上屏（外壳内部 firstFramePresented，DwmFlush 之后）≤ 70ms
-  G2：进程创建 → 新标签页内容首帧（ntpFirstFrameHost，口径同可行性原型的 webFirstFrameMs）≤ 500ms；预热时 ≤ 300ms
+  G2：进程创建 → 新标签页内容首帧 ≤ 500ms；预热时 ≤ 300ms。判定按每轮取较晚者：
+      ntpFirstFrameHost（rAF 后下一个任务回报、外壳收到，口径同可行性原型的 webFirstFrameMs）
+      ntpFcp（Chromium 记录的首个内容帧呈现时刻；rAF 回报时这一帧往往还没上屏）
 #>
 param(
     [Parameter(Mandatory = $true)][string]$OutDir,
@@ -65,7 +67,12 @@ function Format-Row([string]$name, [double[]]$values) {
 }
 
 $g1 = Get-Mark "firstFramePresented"
-$g2 = Get-Mark "ntpFirstFrameHost"
+$g2Host = Get-Mark "ntpFirstFrameHost"
+$g2 = @()  # 每轮取 ntpFirstFrameHost 与 ntpFcp 中较晚者（缺一个就用另一个）
+foreach ($row in $rows) {
+    $candidates = @($row.Inner.t.ntpFirstFrameHost, $row.Inner.t.ntpFcp) | Where-Object { $null -ne $_ } | ForEach-Object { [double]$_ }
+    if ($candidates.Count -gt 0) { $g2 += ($candidates | Measure-Object -Maximum).Maximum }
+}
 $external = @()
 $clockGap = @()
 foreach ($row in $rows) {
@@ -83,6 +90,7 @@ $g2Limit = 500
 if ($Preheat) { $g2Limit = 300 }
 $g1Pass = ($g1.Count -gt 0) -and ($g1Median -le 70)
 $g2Pass = ($g2.Count -gt 0) -and ($g2Median -le $g2Limit)
+$g2HostMedian = Get-Median $g2Host
 $first = $rows[0].Inner
 $missing = @($rows | Where-Object { $null -eq $_.Inner.t.firstFramePresented -or $null -eq $_.Inner.t.ntpFirstFrameHost } | ForEach-Object { $_.Name })
 $forced = @($rows | Where-Object { $_.Inner.forced -eq 1 } | ForEach-Object { $_.Name })
@@ -91,10 +99,11 @@ $lines = @()
 $lines += "== $Label  （$($rows.Count) 轮，预热=$([bool]$Preheat)）"
 $lines += "运行时 $($first.runtimeVersion)  SDK $($first.sdkVersion)  提交 $($first.commit)  DPI $($first.dpi)  刷新率 $($first.refreshHz)Hz  硬件渲染目标 $($first.rtHardware)  主题 $($first.theme)"
 $lines += ("G1 窗口首帧上屏（≤70ms）            中位 {0:N1} ms → {1}" -f $g1Median, $(if ($g1Pass) { "通过" } else { "不通过" }))
-$lines += ("G2 新标签页内容首帧（≤{0}ms）       中位 {1:N1} ms → {2}" -f $g2Limit, $g2Median, $(if ($g2Pass) { "通过" } else { "不通过" }))
+$lines += ("G2 新标签页内容首帧（≤{0}ms）       中位 {1:N1} ms → {2}（每轮取 rAF 回报与 FCP 较晚者；仅按 rAF 回报为 {3:N1} ms）" -f $g2Limit, $g2Median, $(if ($g2Pass) { "通过" } else { "不通过" }), $g2HostMedian)
 $lines += ""
 $lines += Format-Row "G1 firstFramePresented" $g1
-$lines += Format-Row "G2 ntpFirstFrameHost" $g2
+$lines += Format-Row "G2 较晚者" $g2
+$lines += Format-Row "G2 ntpFirstFrameHost（rAF 回报）" $g2Host
 $lines += Format-Row "外部：CreateProcess→窗口显示" $external
 $lines += Format-Row "对时：外部显示−内部 windowShown" $clockGap
 $lines += Format-Row "ntpFcp（页面 FCP 呈现时刻）" (Get-Mark "ntpFcp")
@@ -110,7 +119,7 @@ $lines += Format-Row "首帧 EndDraw→上屏" (Get-Delta "firstPaint" "firstFra
 $lines += Format-Row "备用控件 spareBegin→Ready" (Get-Delta "spareBegin" "spareReady")
 $lines += ""
 $lines += "-- 时间线（距进程创建，ms）"
-$keys = @("mainEnter", "warmupBegin", "d2dFactoryReady", "dwriteReady", "d3dWarmReady", "comReady", "addressBarCreated",
+$keys = @("mainEnter", "warmupBegin", "d2dFactoryReady", "dwriteReady", "d3dWarmBegin", "d3dWarmReady", "comReady", "addressBarCreated",
     "windowCreated", "envBegin", "envCallReturned", "warmupJoined", "renderTargetCreated", "windowShown", "firstPaint",
     "firstFramePresented", "envReady", "controllerBegin", "controllerReady", "ntpNavigate", "ntpTimeOrigin",
     "ntpNavCompleted", "ntpFcp", "ntpFirstFramePage", "ntpFirstFrameHost", "spareBegin", "spareReady")
@@ -127,6 +136,7 @@ $summary = [ordered]@{
     runtimeVersion = $first.runtimeVersion; sdkVersion = $first.sdkVersion; commit = $first.commit
     g1MedianMs = $g1Median; g1Pass = $g1Pass; g1Values = $g1
     g2MedianMs = $g2Median; g2LimitMs = $g2Limit; g2Pass = $g2Pass; g2Values = $g2
+    g2HostMedianMs = $g2HostMedian; g2HostValues = $g2Host; g2FcpMedianMs = (Get-Median (Get-Mark "ntpFcp"))
     externalWindowShownMedianMs = (Get-Median $external); externalValues = $external
     clockGapMedianMs = (Get-Median $clockGap)
 }

@@ -29,10 +29,14 @@ bool IsTabHover(const ChromeHit& hover, int index) {
 // GraphicsWarmup
 
 GraphicsWarmup::~GraphicsWarmup() {
-  if (thread_) {
+  if (firstPaint_) {
     SetEvent(firstPaint_);  // 没画出首帧就退出时也让线程收尾
-    WaitForSingleObject(thread_, 2000);
-    CloseHandle(thread_);
+  }
+  for (HANDLE thread : {thread_, warmThread_}) {
+    if (thread) {
+      WaitForSingleObject(thread, 2000);
+      CloseHandle(thread);
+    }
   }
   if (ready_) {
     CloseHandle(ready_);
@@ -43,13 +47,18 @@ GraphicsWarmup::~GraphicsWarmup() {
 }
 
 void GraphicsWarmup::Start(const Options& options) {
-  warmD3D_ = options.warmD3D && options.renderTarget == RenderTargetKind::kHardware;
+  warmD3D_ = options.warmD3D != 0;
+  warp_ = options.renderTarget == RenderTargetKind::kSoftware;
   ready_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   firstPaint_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   thread_ = CreateThread(nullptr, 0, &GraphicsWarmup::ThreadMain, this, 0, nullptr);
   if (!thread_) {
-    Prepare();  // 建线程失败：退回 UI 线程同步准备
+    Prepare();  // 建线程失败：退回 UI 线程同步准备，不做设备预热
     SetEvent(ready_);
+    return;
+  }
+  if (warmD3D_) {
+    warmThread_ = CreateThread(nullptr, 0, &GraphicsWarmup::WarmDeviceMain, this, 0, nullptr);
   }
 }
 
@@ -80,7 +89,23 @@ DWORD WINAPI GraphicsWarmup::ThreadMain(void* param) {
   return 0;
 }
 
-void GraphicsWarmup::Prepare() {
+// 设备预热单独一个线程：UI 线程不等它，它只让 WARP / 显卡驱动的 DLL 加载与一次性初始化提前开始，
+// 和建窗、建渲染目标重叠；最坏情况是没收益，不会拖慢首帧，也不耽误上面那个线程按时 DwmFlush 打点
+DWORD WINAPI GraphicsWarmup::WarmDeviceMain(void* param) {
+  auto* self = static_cast<GraphicsWarmup*>(param);
+  static constexpr D3D_FEATURE_LEVEL kLevels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
+                                                  D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
+  Metrics::Get().Mark("d3dWarmBegin");
+  ComPtr<ID3D11Device> device;
+  D3D11CreateDevice(nullptr, self->warp_ ? D3D_DRIVER_TYPE_WARP : D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT, kLevels, static_cast<UINT>(ARRAYSIZE(kLevels)),
+                    D3D11_SDK_VERSION, device.GetAddressOf(), nullptr, nullptr);
+  Metrics::Get().Mark("d3dWarmReady");
+  WaitForSingleObject(self->firstPaint_, 60000);  // 首帧画完再放掉预热设备
+  return 0;
+}
+
+bool GraphicsWarmup::Prepare() {
   Metrics& metrics = Metrics::Get();
   metrics.Mark("warmupBegin");
   HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, d2d.GetAddressOf());
@@ -103,14 +128,7 @@ void GraphicsWarmup::Prepare() {
     }
   }
   metrics.Mark("dwriteReady");
-  if (SUCCEEDED(hr) && warmD3D_) {
-    static constexpr D3D_FEATURE_LEVEL kLevels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
-                                                    D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
-    D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, kLevels,
-                      static_cast<UINT>(ARRAYSIZE(kLevels)), D3D11_SDK_VERSION, d3dWarm.GetAddressOf(), nullptr,
-                      nullptr);
-    metrics.Mark("d3dWarmReady");
-  }
+  return SUCCEEDED(hr);
 }
 
 HRESULT GraphicsWarmup::CreateTextFormats() {
