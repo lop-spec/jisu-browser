@@ -1,0 +1,76 @@
+name: build
+
+# 可执行产物只由云端 CI 生成（本机没有编译工具链）。
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      WEBVIEW2_VERSION: "1.0.4314.35"
+      WEBVIEW2_SHA256: "90778deb1b77e36292828b4b5833c9255c27533f40e0ddd55891ae718944edc4"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 获取 Microsoft.Web.WebView2（nuget.org，校验 SHA256）
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "webview2.zip"   # Expand-Archive 只认 .zip 扩展名
+          $url = "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$env:WEBVIEW2_VERSION/microsoft.web.webview2.$env:WEBVIEW2_VERSION.nupkg"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLowerInvariant()
+          if ($hash -ne $env:WEBVIEW2_SHA256) { throw "WebView2 包 SHA256 不符：$hash" }
+          $dir = Join-Path $env:RUNNER_TEMP "webview2"
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          "WEBVIEW2_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: 配置
+        shell: pwsh
+        run: cmake -S . -B build -A x64 "-DWEBVIEW2_DIR=$env:WEBVIEW2_DIR" "-DWEBVIEW2_VERSION=$env:WEBVIEW2_VERSION" "-DJISU_COMMIT=$env:GITHUB_SHA"
+
+      - name: 构建
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: 打包（exe + ntp/ 为运行包；PDB 单独放 symbols/）
+        shell: pwsh
+        run: |
+          $dist = Join-Path (Get-Location) "dist"
+          New-Item -ItemType Directory -Force -Path "$dist/jisu-browser", "$dist/symbols" | Out-Null
+          Copy-Item build/Release/jisu-browser.exe "$dist/jisu-browser/"
+          Copy-Item -Recurse build/Release/ntp "$dist/jisu-browser/ntp"
+          Copy-Item build/Release/jisu-browser.pdb "$dist/symbols/"
+          $lines = Get-ChildItem -Recurse -File $dist | Sort-Object FullName | ForEach-Object {
+            $rel = $_.FullName.Substring($dist.Length + 1).Replace('\', '/')
+            "{0}  {1,9}  {2}" -f (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant(), $_.Length, $rel
+          }
+          $lines | Set-Content -Path "$dist/SHA256SUMS.txt" -Encoding utf8
+          Get-Content "$dist/SHA256SUMS.txt"
+
+      - name: 冒烟（CI 机器上起一次并写出启动时间线；没有显卡或运行时只告警）
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $json = Join-Path $env:RUNNER_TEMP "ci-smoke.json"
+          $udf = Join-Path $env:RUNNER_TEMP "udf"
+          $exe = Resolve-Path dist/jisu-browser/jisu-browser.exe
+          $p = Start-Process -FilePath $exe -ArgumentList "--metrics `"$json`" --udf `"$udf`" --exit-after-metrics" -PassThru
+          if (-not $p.WaitForExit(90000)) { Stop-Process -Id $p.Id -Force; throw "90 秒未退出" }
+          "exit code: $($p.ExitCode)"
+          Get-Content $json
+          Copy-Item $json dist/ci-smoke.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jisu-browser-win-x64-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30

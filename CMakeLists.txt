@@ -1,0 +1,71 @@
+cmake_minimum_required(VERSION 3.21)
+project(jisu_browser VERSION 0.1.0 LANGUAGES CXX RC)
+
+if(NOT MSVC)
+  message(FATAL_ERROR "只支持 MSVC 构建（GitHub Actions windows-latest）")
+endif()
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+# 静态 CRT：不依赖 VC++ 运行库，启动时也少加载两个 DLL
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+set(WEBVIEW2_DIR "" CACHE PATH "解压后的 Microsoft.Web.WebView2 NuGet 包目录")
+set(WEBVIEW2_VERSION "unknown" CACHE STRING "WebView2 SDK 版本，写进启动时间线")
+set(JISU_COMMIT "local" CACHE STRING "构建所用提交，写进启动时间线")
+
+set(WEBVIEW2_NATIVE "${WEBVIEW2_DIR}/build/native")
+if(NOT EXISTS "${WEBVIEW2_NATIVE}/include/WebView2.h")
+  message(FATAL_ERROR "WEBVIEW2_DIR 没有指向 Microsoft.Web.WebView2 包：${WEBVIEW2_DIR}")
+endif()
+if(CMAKE_GENERATOR_PLATFORM MATCHES "^[Aa][Rr][Mm]64$")
+  set(WEBVIEW2_ARCH arm64)
+else()
+  set(WEBVIEW2_ARCH x64)
+endif()
+
+# 新标签页内置一份进 exe（--ntp inline 用）；默认走随包的 ntp\ 目录
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/ntp/index.html" JISU_NTP_HTML)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/ntp/index.html")
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/ntp_html.h"
+     CONTENT "#pragma once\n// 由 CMake 从 ntp/index.html 生成，不要手改。\ninline constexpr char kNtpHtml[] = R\"JISU_NTP(@JISU_NTP_HTML@)JISU_NTP\";\n"
+     @ONLY)
+
+add_executable(jisu-browser WIN32
+  src/main.cpp
+  src/common.cpp
+  src/options.cpp
+  src/metrics.cpp
+  src/palette.cpp
+  src/graphics.cpp
+  src/browser_window.cpp
+  res/app.rc
+  res/app.manifest)
+
+target_include_directories(jisu-browser PRIVATE
+  src
+  "${WEBVIEW2_NATIVE}/include"
+  "${CMAKE_CURRENT_BINARY_DIR}/generated")
+
+target_compile_definitions(jisu-browser PRIVATE
+  UNICODE _UNICODE NOMINMAX
+  _WIN32_WINNT=0x0A00 WINVER=0x0A00
+  JISU_COMMIT="${JISU_COMMIT}"
+  JISU_WEBVIEW2_SDK="${WEBVIEW2_VERSION}")
+
+# /Zi + /DEBUG：生成 PDB，采 ETW 时用来解析外壳自己的调用栈（PDB 不随包分发）
+target_compile_options(jisu-browser PRIVATE /W4 /permissive- /utf-8 /Zc:__cplusplus /EHsc /Zi /Gy /Gw)
+
+target_link_libraries(jisu-browser PRIVATE
+  "${WEBVIEW2_NATIVE}/${WEBVIEW2_ARCH}/WebView2LoaderStatic.lib"
+  version d2d1 dwrite d3d11 dwmapi delayimp)
+
+# 首帧路径之外的图形 DLL 延迟到第一次调用才加载：D2D/DWrite/D3D 由后台预热线程触发，与建窗并行，
+# 不在 wWinMain 之前由加载器串行装入。WebView2 加载器静态链接，不需要 WebView2Loader.dll。
+target_link_options(jisu-browser PRIVATE
+  /DELAYLOAD:d2d1.dll /DELAYLOAD:dwrite.dll /DELAYLOAD:d3d11.dll /DELAYLOAD:dwmapi.dll
+  /DEBUG /OPT:REF /OPT:ICF)
+
+add_custom_command(TARGET jisu-browser POST_BUILD
+  COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/ntp" "$<TARGET_FILE_DIR:jisu-browser>/ntp")

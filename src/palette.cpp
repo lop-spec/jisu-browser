@@ -1,0 +1,46 @@
+#include "palette.h"
+
+namespace jisu {
+namespace {
+
+constexpr Palette kLight{
+    .dark = false,
+    .frame = {0xE8, 0xEA, 0xED},
+    .tabHover = {0xDA, 0xDC, 0xE0},
+    .toolbar = {0xFF, 0xFF, 0xFF},
+    .buttonHover = {0xEC, 0xED, 0xEF},
+    .omnibox = {0xF1, 0xF3, 0xF4},
+    .omniboxBorder = {0xDA, 0xDC, 0xE0},
+    .separator = {0xDA, 0xDC, 0xE0},
+    .text = {0x1F, 0x1F, 0x1F},
+    .textMuted = {0x5F, 0x63, 0x68},
+    .accent = {0x1A, 0x73, 0xE8},
+    .content = {0xFF, 0xFF, 0xFF},
+};
+
+constexpr Palette kDark{
+    .dark = true,
+    .frame = {0x1C, 0x1C, 0x1C},
+    .tabHover = {0x2A, 0x2A, 0x2A},
+    .toolbar = {0x2B, 0x2B, 0x2B},
+    .buttonHover = {0x3A, 0x3A, 0x3A},
+    .omnibox = {0x1F, 0x1F, 0x1F},
+    .omniboxBorder = {0x3C, 0x3C, 0x3C},
+    .separator = {0x3A, 0x3A, 0x3A},
+    .text = {0xE8, 0xE8, 0xE8},
+    .textMuted = {0xA0, 0xA0, 0xA0},
+    .accent = {0x4C, 0x8B, 0xF5},
+    .content = {0x20, 0x20, 0x20},
+};
+
+}  // namespace
+
+Palette LoadPalette() {
+  DWORD light = 1;
+  DWORD size = sizeof(light);
+  RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+               L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size);
+  return light ? kLight : kDark;
+}
+
+}  // namespace jisu

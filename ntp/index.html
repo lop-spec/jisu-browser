@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>新标签页</title>
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:,">
+<style>
+/* 底色必须与外壳 palette.cpp 的 content 一致（浅 #ffffff / 深 #202020），否则首屏会闪 */
+:root { --bg: #ffffff; --fg: #1f1f1f; --muted: #5f6368; }
+@media (prefers-color-scheme: dark) { :root { --bg: #202020; --fg: #e8e8e8; --muted: #a0a0a0; } }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); }
+body {
+  font: 14px "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  user-select: none;
+}
+h1 { margin: 0; font-size: 30px; font-weight: 600; letter-spacing: 4px; }
+p { margin: 0; color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>极速浏览器</h1>
+<p>在上方地址栏输入网址或搜索</p>
+<script>
+// 向外壳回报首帧（口径同可行性原型：rAF 之后的下一个任务）与 FCP。时间都是 Unix 毫秒，外壳换算到进程创建零点。
+(function () {
+  var wv = window.chrome && window.chrome.webview;
+  if (!wv) return;
+  requestAnimationFrame(function () {
+    setTimeout(function () {
+      wv.postMessage("ntp-frame " + (performance.timeOrigin + performance.now()) + " " + performance.timeOrigin);
+    }, 0);
+  });
+  try {
+    new PerformanceObserver(function (list) {
+      list.getEntries().forEach(function (entry) {
+        if (entry.name === "first-contentful-paint") {
+          wv.postMessage("ntp-fcp " + (performance.timeOrigin + entry.startTime));
+        }
+      });
+    }).observe({ type: "paint", buffered: true });
+  } catch (e) {}
+})();
+</script>
+</body>
+</html>
