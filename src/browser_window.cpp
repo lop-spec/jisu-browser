@@ -274,7 +274,10 @@ void BrowserWindow::OnEnvironmentCreated(HRESULT result, ICoreWebView2Environmen
                static_cast<unsigned>(result));
     message_ = text;
     InvalidateChrome();
-    WriteMetrics(true);
+    // 延后写出：默认 early 模式下这里可能早于首帧，首帧相关时间点还没记
+    if (!options_.metricsPath.empty()) {
+      SetTimer(hwnd_, kTimerMetrics, 500, nullptr);
+    }
     return;
   }
   metrics.Mark("envReady");
@@ -325,7 +328,7 @@ void BrowserWindow::CreateController(Tab& tab) {
   }
   if (FAILED(hr)) {
     tab.creating = false;
-    metrics.Mark("controllerCallFailed");
+    OnControllerFailed(tab, hr);  // 可能销毁 tab（备用控件），之后不能再用
   }
 }
 
@@ -340,12 +343,7 @@ void BrowserWindow::OnControllerCreated(uint32_t id, HRESULT result, ICoreWebVie
   }
   tab->creating = false;
   if (FAILED(result) || !controller) {
-    metrics.Mark(id == firstTabId_ ? "controllerFailed" : "tabControllerFailed");
-    if (tab->newWindowDeferral) {
-      tab->newWindowDeferral->Complete();
-      tab->newWindowDeferral.Reset();
-      tab->newWindowArgs.Reset();
-    }
+    OnControllerFailed(*tab, FAILED(result) ? result : E_UNEXPECTED);
     return;
   }
 
@@ -368,6 +366,7 @@ void BrowserWindow::OnControllerCreated(uint32_t id, HRESULT result, ICoreWebVie
     tab->visible = true;
   }
   if (!tab->webview) {
+    AbandonNewWindow(*tab);
     return;
   }
   ConfigureWebView(*tab);
@@ -379,10 +378,13 @@ void BrowserWindow::OnControllerCreated(uint32_t id, HRESULT result, ICoreWebVie
   }
 
   if (tab->newWindowArgs) {
-    tab->newWindowArgs->put_NewWindow(tab->webview.Get());
-    tab->newWindowDeferral->Complete();
-    tab->newWindowArgs.Reset();
-    tab->newWindowDeferral.Reset();
+    if (FAILED(tab->newWindowArgs->put_NewWindow(tab->webview.Get()))) {
+      AbandonNewWindow(*tab);
+    } else {
+      tab->newWindowDeferral->Complete();
+      tab->newWindowArgs.Reset();
+      tab->newWindowDeferral.Reset();
+    }
   } else if (!tab->pendingUrl.empty()) {
     tab->webview->Navigate(tab->pendingUrl.c_str());
     tab->pendingUrl.clear();
@@ -399,6 +401,42 @@ void BrowserWindow::OnControllerCreated(uint32_t id, HRESULT result, ICoreWebVie
   if (spare) {
     MaybeWriteMetrics();
   }
+}
+
+void BrowserWindow::OnControllerFailed(Tab& tab, HRESULT result) {
+  const bool first = tab.id == firstTabId_;
+  const bool popup = tab.newWindowArgs != nullptr;  // window.open 的目标：请求一旦放弃就不再重试
+  Metrics::Get().Mark(first ? "controllerFailed" : "tabControllerFailed");
+  AbandonNewWindow(tab);
+  if (IsSpare(tab)) {
+    spare_.reset();  // 备用控件建不出来就不备了，新标签页现建
+    return;
+  }
+  // 官方建议失败后重试；ERROR_INVALID_STATE（同一数据目录的环境选项冲突）与 E_ABORT（父窗口已销毁）除外
+  if (!popup && !tab.retried && result != HRESULT_FROM_WIN32(ERROR_INVALID_STATE) && result != E_ABORT) {
+    tab.retried = true;
+    CreateController(tab);
+    return;
+  }
+  wchar_t text[160];
+  swprintf_s(text, L"无法创建网页控件（0x%08X）。", static_cast<unsigned>(result));
+  message_ = text;
+  InvalidateChrome();
+  if (first && !options_.metricsPath.empty()) {
+    SetTimer(hwnd_, kTimerMetrics, 500, nullptr);
+  }
+}
+
+// 放弃 window.open 请求：标记已处理，内核就不会自己再弹一个外壳管不到的窗口
+void BrowserWindow::AbandonNewWindow(Tab& tab) {
+  if (tab.newWindowArgs) {
+    tab.newWindowArgs->put_Handled(TRUE);
+  }
+  if (tab.newWindowDeferral) {
+    tab.newWindowDeferral->Complete();
+  }
+  tab.newWindowArgs.Reset();
+  tab.newWindowDeferral.Reset();
 }
 
 void BrowserWindow::ConfigureWebView(Tab& tab) {
@@ -654,9 +692,7 @@ void BrowserWindow::CloseTab(size_t index) {
   }
   std::unique_ptr<Tab> closing = std::move(tabs_[index]);
   tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(index));
-  if (closing->newWindowDeferral) {
-    closing->newWindowDeferral->Complete();
-  }
+  AbandonNewWindow(*closing);
   if (closing->controller) {
     closing->controller->Close();
   }
@@ -1149,8 +1185,8 @@ void BrowserWindow::OnCreate() {
   // 第一个标签先有，控件等环境就绪再建
   auto first = std::make_unique<Tab>();
   first->id = nextTabId_++;
-  first->pendingUrl = options_.startUrl;
-  first->url = options_.startUrl;
+  first->pendingUrl = options_.startUrl.empty() ? std::wstring() : ToNavigableUrl(options_.startUrl);
+  first->url = first->pendingUrl;
   firstTabId_ = first->id;
   tabs_.push_back(std::move(first));
   active_ = 0;
@@ -1162,9 +1198,7 @@ void BrowserWindow::OnDestroy() {
   WriteMetrics(true);  // 测量中被关掉也留下已有的时间线（已写过则不重复）
   destroyed_ = true;
   for (auto& tab : tabs_) {
-    if (tab->newWindowDeferral) {
-      tab->newWindowDeferral->Complete();
-    }
+    AbandonNewWindow(*tab);
     if (tab->controller) {
       tab->controller->Close();
     }

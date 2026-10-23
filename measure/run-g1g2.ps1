@@ -56,7 +56,10 @@ function Invoke-Run([string]$name) {
 
 $holder = $null
 if ($Preheat) {
-    $holder = Start-Process -FilePath $Exe -ArgumentList ('--preheat 1800 --udf "' + $udf + '"') -PassThru
+    # 持有进程带上同样的 -ShellArgs：同一用户数据目录的环境选项必须一致，否则被测进程建环境会报 ERROR_INVALID_STATE
+    $holderArgs = '--preheat 1800 --udf "' + $udf + '"'
+    if ($ShellArgs) { $holderArgs += " " + $ShellArgs }
+    $holder = Start-Process -FilePath $Exe -ArgumentList $holderArgs -PassThru
     Start-Sleep -Seconds 8
 }
 try {

@@ -28,6 +28,11 @@ endif()
 # 新标签页内置一份进 exe（--ntp inline 用）；默认走随包的 ntp\ 目录
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/ntp/index.html" JISU_NTP_HTML)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/ntp/index.html")
+string(LENGTH "${JISU_NTP_HTML}" JISU_NTP_HTML_BYTES)
+if(JISU_NTP_HTML_BYTES GREATER 15000)
+  # MSVC 单个字符串字面量上限约 16KB（C2026），页面再大就要换内置方式
+  message(FATAL_ERROR "ntp/index.html 有 ${JISU_NTP_HTML_BYTES} 字节，超出内置字面量的安全上限 15000")
+endif()
 file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/ntp_html.h"
      CONTENT "#pragma once\n// 由 CMake 从 ntp/index.html 生成，不要手改。\ninline constexpr char kNtpHtml[] = R\"JISU_NTP(@JISU_NTP_HTML@)JISU_NTP\";\n"
      @ONLY)

@@ -18,7 +18,7 @@ jobs:
       WEBVIEW2_VERSION: "1.0.4314.35"
       WEBVIEW2_SHA256: "90778deb1b77e36292828b4b5833c9255c27533f40e0ddd55891ae718944edc4"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 获取 Microsoft.Web.WebView2（nuget.org，校验 SHA256）
         shell: pwsh
@@ -68,7 +68,7 @@ jobs:
           Get-Content $json
           Copy-Item $json dist/ci-smoke.json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: jisu-browser-win-x64-${{ github.sha }}
           path: dist/

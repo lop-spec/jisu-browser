@@ -36,6 +36,7 @@ class BrowserWindow {
     std::wstring url;
     std::wstring pendingUrl;  // 控件建好后要打开的网址；空 = 新标签页
     bool creating = false;
+    bool retried = false;     // 控件创建失败后已重试过一次
     bool visible = true;      // 控件新建时默认可见
     bool loading = false;
     bool canBack = false;
@@ -65,6 +66,8 @@ class BrowserWindow {
   void OnEnvironmentCreated(HRESULT result, ICoreWebView2Environment* environment);
   void CreateController(Tab& tab);
   void OnControllerCreated(uint32_t id, HRESULT result, ICoreWebView2Controller* controller);
+  void OnControllerFailed(Tab& tab, HRESULT result);
+  void AbandonNewWindow(Tab& tab);
   void ConfigureWebView(Tab& tab);
   void NavigateNewTabPage(Tab& tab);
   void OnWebMessage(uint32_t id, ICoreWebView2WebMessageReceivedEventArgs* args);
