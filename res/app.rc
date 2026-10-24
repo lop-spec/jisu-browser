@@ -1,9 +1,11 @@
-// Version resource. Keep this file ASCII: rc.exe reads it with the build machine's code page.
+// Version and icon resources. Keep this file ASCII: rc.exe reads it with the build machine's code page.
 #include <winresrc.h>
 
+1 ICON "app.ico"
+
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,1,0,0
- PRODUCTVERSION 0,1,0,0
+ FILEVERSION 0,2,0,0
+ PRODUCTVERSION 0,2,0,0
  FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -16,11 +18,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Jisu Browser"
             VALUE "FileDescription", "Jisu Browser"
-            VALUE "FileVersion", "0.1.0"
+            VALUE "FileVersion", "0.2.0"
             VALUE "InternalName", "jisu-browser"
             VALUE "OriginalFilename", "jisu-browser.exe"
             VALUE "ProductName", "Jisu Browser"
-            VALUE "ProductVersion", "0.1.0"
+            VALUE "ProductVersion", "0.2.0"
         END
     END
     BLOCK "VarFileInfo"

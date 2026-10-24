@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(jisu_browser VERSION 0.1.0 LANGUAGES CXX RC)
+project(jisu_browser VERSION 0.2.0 LANGUAGES CXX RC)
 
 if(NOT MSVC)
   message(FATAL_ERROR "只支持 MSVC 构建（GitHub Actions windows-latest）")
@@ -44,6 +44,10 @@ add_executable(jisu-browser WIN32
   src/metrics.cpp
   src/palette.cpp
   src/graphics.cpp
+  src/json.cpp
+  src/net.cpp
+  src/bookmarks.cpp
+  src/agent_bridge.cpp
   src/browser_window.cpp
   res/app.rc
   res/app.manifest)
@@ -57,6 +61,7 @@ target_compile_definitions(jisu-browser PRIVATE
   UNICODE _UNICODE NOMINMAX
   _WIN32_WINNT=0x0A00 WINVER=0x0A00
   JISU_COMMIT="${JISU_COMMIT}"
+  JISU_VERSION="${PROJECT_VERSION}"
   JISU_WEBVIEW2_SDK="${WEBVIEW2_VERSION}")
 
 # /Zi + /DEBUG：生成 PDB，采 ETW 时用来解析外壳自己的调用栈（PDB 不随包分发）
@@ -64,12 +69,14 @@ target_compile_options(jisu-browser PRIVATE /W4 /permissive- /utf-8 /Zc:__cplusp
 
 target_link_libraries(jisu-browser PRIVATE
   "${WEBVIEW2_NATIVE}/${WEBVIEW2_ARCH}/WebView2LoaderStatic.lib"
-  version d2d1 dwrite d3d11 dwmapi delayimp)
+  version d2d1 dwrite d3d11 dwmapi winhttp shell32 ole32 advapi32 delayimp)
 
-# 首帧路径之外的图形 DLL 延迟到第一次调用才加载：D2D/DWrite/D3D 由后台预热线程触发，与建窗并行，
-# 不在 wWinMain 之前由加载器串行装入。WebView2 加载器静态链接，不需要 WebView2Loader.dll。
+# 首帧路径之外的 DLL 延迟到第一次调用才加载：D2D/DWrite/D3D 由后台预热线程触发，与建窗并行；
+# WinHTTP（智能体桥）在内核就绪后才用，shell32 只在菜单「设为默认浏览器」时用。
+# 都不在 wWinMain 之前由加载器串行装入。WebView2 加载器静态链接，不需要 WebView2Loader.dll。
 target_link_options(jisu-browser PRIVATE
   /DELAYLOAD:d2d1.dll /DELAYLOAD:dwrite.dll /DELAYLOAD:d3d11.dll /DELAYLOAD:dwmapi.dll
+  /DELAYLOAD:winhttp.dll /DELAYLOAD:shell32.dll
   /DEBUG /OPT:REF /OPT:ICF)
 
 add_custom_command(TARGET jisu-browser POST_BUILD

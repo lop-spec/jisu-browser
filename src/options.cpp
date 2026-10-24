@@ -61,13 +61,13 @@ std::vector<std::wstring> SplitCommandLine(std::wstring_view line) {
   return args;
 }
 
-std::wstring DefaultUserDataFolder() {
+std::wstring AppDataRoot() {
   wchar_t buffer[MAX_PATH];
   const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", buffer, MAX_PATH);
   if (length == 0 || length >= MAX_PATH) {
     return {};  // 交给 WebView2 用默认位置
   }
-  return std::wstring(buffer, length) + L"\\JisuBrowser\\User Data";
+  return std::wstring(buffer, length) + L"\\JisuBrowser";
 }
 
 }  // namespace
@@ -76,12 +76,19 @@ Options ParseOptions(const wchar_t* commandLine) {
   Options options;
   options.commandLine = commandLine ? commandLine : L"";
   const std::vector<std::wstring> args = SplitCommandLine(options.commandLine);
+  bool agentConfigExplicit = false;
   // args[0] 是程序路径
   for (size_t i = 1; i < args.size(); ++i) {
     const std::wstring& arg = args[i];
     auto next = [&]() -> std::wstring { return i + 1 < args.size() ? args[++i] : std::wstring(); };
     if (arg == L"--udf") {
       options.userDataFolder = next();
+      options.defaultUserData = false;
+    } else if (arg == L"--agent-config") {
+      options.agentConfigPath = next();
+      agentConfigExplicit = true;
+    } else if (arg == L"--no-agent") {
+      options.noAgent = true;
     } else if (arg == L"--metrics") {
       options.metricsPath = next();
     } else if (arg == L"--exit-after-metrics") {
@@ -114,8 +121,15 @@ Options ParseOptions(const wchar_t* commandLine) {
       options.startUrl = arg;
     }
   }
-  if (options.userDataFolder.empty()) {
-    options.userDataFolder = DefaultUserDataFolder();
+  const std::wstring root = AppDataRoot();
+  if (options.userDataFolder.empty() && !root.empty()) {
+    options.userDataFolder = root + L"\\User Data";
+  }
+  if (options.agentConfigPath.empty() && !root.empty()) {
+    options.agentConfigPath = root + L"\\agent-bridge.json";
+  }
+  if (!options.metricsPath.empty() && !agentConfigExplicit) {
+    options.noAgent = true;  // 测量运行与日常实例隔离：不去抢 broker 的连接票据
   }
   if (options.warmD3D < 0) {
     options.warmD3D = options.renderTarget == RenderTargetKind::kSoftware ? 1 : 0;

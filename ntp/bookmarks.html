@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>书签管理器</title>
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:,">
+<style>
+/* 底色与外壳 palette.cpp 的 content 一致（浅 #ffffff / 深 #202020） */
+:root {
+  --bg: #ffffff; --fg: #1f1f1f; --muted: #5f6368; --line: #e3e5e8; --hover: #f1f3f4;
+  --sel: #e8f0fe; --accent: #1a73e8; --danger: #c5221f; --input: #f1f3f4;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #202020; --fg: #e8e8e8; --muted: #a0a0a0; --line: #3a3a3a; --hover: #2b2b2b;
+    --sel: #263a55; --accent: #4c8bf5; --danger: #f28b82; --input: #2b2b2b;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); }
+body { font: 14px "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif; display: flex; flex-direction: column; }
+header { display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
+header h1 { margin: 0 12px 0 0; font-size: 17px; font-weight: 600; white-space: nowrap; }
+#search { flex: 1; max-width: 560px; height: 34px; padding: 0 12px; border: 1px solid transparent; border-radius: 8px;
+  background: var(--input); color: var(--fg); font: inherit; outline: none; }
+#search:focus { border-color: var(--accent); }
+button { height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: transparent;
+  color: var(--fg); font: inherit; cursor: pointer; white-space: nowrap; }
+button:hover { background: var(--hover); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { color: var(--danger); }
+main { flex: 1; display: flex; min-height: 0; }
+nav { width: 260px; flex: none; overflow: auto; padding: 8px 8px 24px; border-right: 1px solid var(--line); }
+.folder { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 8px; border-radius: 6px; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; user-select: none; }
+.folder:hover { background: var(--hover); }
+.folder.selected { background: var(--sel); }
+.folder.drop { outline: 2px solid var(--accent); outline-offset: -2px; }
+.folder .count { margin-left: auto; color: var(--muted); font-size: 12px; }
+section { flex: 1; overflow: auto; padding: 8px 20px 40px; }
+.crumb { color: var(--muted); margin: 8px 0 10px; font-size: 13px; }
+.row { display: flex; align-items: center; gap: 10px; min-height: 38px; padding: 4px 8px; border-radius: 6px; }
+.row:hover { background: var(--hover); }
+.row.drop { box-shadow: inset 0 2px 0 var(--accent); }
+.row .icon { width: 16px; text-align: center; color: var(--muted); flex: none; }
+.row .title { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.row .title:hover { text-decoration: underline; }
+.row .url { flex: 1; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .actions { visibility: hidden; display: flex; gap: 4px; }
+.row:hover .actions { visibility: visible; }
+.row .actions button { height: 26px; padding: 0 8px; font-size: 12px; }
+.empty { color: var(--muted); padding: 24px 8px; }
+dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--fg); padding: 20px; width: 460px; }
+dialog::backdrop { background: rgba(0, 0, 0, 0.3); }
+dialog h2 { margin: 0 0 14px; font-size: 16px; }
+dialog label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 12px; }
+dialog input, dialog select { width: 100%; height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--input); color: var(--fg); font: inherit; outline: none; }
+dialog input:focus { border-color: var(--accent); }
+dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+#importList .row { justify-content: space-between; }
+#status { color: var(--muted); font-size: 13px; min-height: 18px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>书签</h1>
+  <input id="search" type="search" placeholder="搜索书签" autocomplete="off">
+  <button id="addBookmark">添加书签</button>
+  <button id="addFolder">新建文件夹</button>
+  <button id="openImport">导入</button>
+  <button id="export">导出</button>
+</header>
+<main>
+  <nav id="tree"></nav>
+  <section>
+    <div class="crumb" id="crumb"></div>
+    <div id="list"></div>
+  </section>
+</main>
+
+<dialog id="editDialog">
+  <form method="dialog" id="editForm">
+    <h2 id="editTitle">编辑书签</h2>
+    <label for="editName">名称</label>
+    <input id="editName" autocomplete="off">
+    <div id="editUrlBlock">
+      <label for="editUrl">网址</label>
+      <input id="editUrl" autocomplete="off">
+    </div>
+    <div class="buttons">
+      <button type="button" id="editCancel">取消</button>
+      <button type="submit" class="primary" id="editSave">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="importDialog">
+  <h2>导入书签</h2>
+  <div id="importList"><div class="empty">正在查找本机浏览器…</div></div>
+  <div id="status"></div>
+  <div class="buttons"><button type="button" id="importClose">关闭</button></div>
+</dialog>
+
+<script>
+(function () {
+  "use strict";
+  var wv = window.chrome && window.chrome.webview;
+  var tree = null, selected = 1, editing = null, pendingEdit = null;
+  var $ = function (id) { return document.getElementById(id); };
+  function send(message) { if (wv) wv.postMessage(JSON.stringify(message)); }
+
+  function walk(node, fn, parent) {
+    fn(node, parent);
+    (node.children || []).forEach(function (child) { walk(child, fn, node); });
+  }
+  function roots() { return tree ? [tree.bar, tree.other, tree.mobile] : []; }
+  function find(id) {
+    var hit = null;
+    roots().forEach(function (root) { walk(root, function (n, p) { if (n.id === id) hit = { node: n, parent: p }; }); });
+    return hit;
+  }
+  function countUrls(folder) {
+    var c = 0;
+    walk(folder, function (n) { if (!n.children) c++; });
+    return c;
+  }
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  function renderTree() {
+    var nav = $("tree");
+    nav.textContent = "";
+    roots().forEach(function (root) {
+      if (root === tree.mobile && !root.children.length) return;  // 空的「移动设备书签」不显示
+      (function add(folder, depth) {
+        var item = el("div", "folder" + (folder.id === selected ? " selected" : ""));
+        item.style.paddingLeft = (8 + depth * 16) + "px";
+        item.appendChild(el("span", "", depth === 0 ? "▣" : "▸"));
+        item.appendChild(el("span", "", folder.title || "（无标题）"));
+        item.appendChild(el("span", "count", String(countUrls(folder))));
+        item.onclick = function () { selected = folder.id; $("search").value = ""; render(); };
+        dropTarget(item, function (id) { send({ type: "bm.move", id: id, parent: folder.id, index: 1e9 }); });
+        nav.appendChild(item);
+        folder.children.forEach(function (child) { if (child.children) add(child, depth + 1); });
+      })(root, 0);
+    });
+  }
+
+  function dropTarget(elem, onDrop) {
+    elem.addEventListener("dragover", function (e) { e.preventDefault(); elem.classList.add("drop"); });
+    elem.addEventListener("dragleave", function () { elem.classList.remove("drop"); });
+    elem.addEventListener("drop", function (e) {
+      e.preventDefault();
+      elem.classList.remove("drop");
+      var id = Number(e.dataTransfer.getData("text/x-bookmark-id"));
+      if (id) onDrop(id);
+    });
+  }
+
+  function row(node, parent, index) {
+    var r = el("div", "row");
+    r.draggable = true;
+    r.addEventListener("dragstart", function (e) { e.dataTransfer.setData("text/x-bookmark-id", String(node.id)); });
+    if (parent) {
+      dropTarget(r, function (id) { if (id !== node.id) send({ type: "bm.move", id: id, parent: parent.id, index: index }); });
+    }
+    r.appendChild(el("span", "icon", node.children ? "▣" : "•"));
+    var title = el("span", "title", node.title || node.url || "（无标题）");
+    title.title = node.title || "";
+    title.onclick = function () {
+      if (node.children) { selected = node.id; $("search").value = ""; render(); }
+      else send({ type: "open", url: node.url, newTab: true });
+    };
+    r.appendChild(title);
+    r.appendChild(el("span", "url", node.children ? countUrls(node) + " 个书签" : node.url));
+    var actions = el("span", "actions");
+    var edit = el("button", "", node.children ? "重命名" : "编辑");
+    edit.onclick = function () { openEdit(node); };
+    var del = el("button", "danger", "删除");
+    del.onclick = function () {
+      var what = node.children ? "文件夹「" + (node.title || "") + "」及其中 " + countUrls(node) + " 个书签" : "「" + (node.title || node.url) + "」";
+      if (confirm("删除" + what + "？")) send({ type: "bm.remove", id: node.id });
+    };
+    actions.appendChild(edit);
+    actions.appendChild(del);
+    r.appendChild(actions);
+    return r;
+  }
+
+  function render() {
+    if (!tree) return;
+    renderTree();
+    var list = $("list"), q = $("search").value.trim().toLowerCase();
+    list.textContent = "";
+    if (q) {
+      $("crumb").textContent = "搜索结果";
+      var hits = 0;
+      roots().forEach(function (root) {
+        walk(root, function (n, p) {
+          if (n.children || hits >= 500) return;
+          if ((n.title || "").toLowerCase().indexOf(q) >= 0 || (n.url || "").toLowerCase().indexOf(q) >= 0) {
+            list.appendChild(row(n, null, 0));
+            hits++;
+          }
+        });
+      });
+      if (!hits) list.appendChild(el("div", "empty", "没有匹配的书签"));
+      return;
+    }
+    var hit = find(selected);
+    if (!hit || !hit.node.children) { selected = tree.bar.id; hit = find(selected); }
+    var path = [], cur = hit;
+    while (cur) { path.unshift(cur.node.title || "（无标题）"); cur = cur.parent ? find(cur.parent.id) : null; }
+    $("crumb").textContent = path.join(" / ");
+    hit.node.children.forEach(function (child, i) { list.appendChild(row(child, hit.node, i)); });
+    if (!hit.node.children.length) list.appendChild(el("div", "empty", "这个文件夹是空的"));
+    var tail = el("div", "row");
+    tail.style.minHeight = "24px";
+    dropTarget(tail, function (id) { send({ type: "bm.move", id: id, parent: hit.node.id, index: 1e9 }); });
+    list.appendChild(tail);
+  }
+
+  function openEdit(node, folderMode) {
+    editing = node;
+    var isFolder = folderMode || (node && node.children);
+    $("editTitle").textContent = node ? (isFolder ? "重命名文件夹" : "编辑书签") : (isFolder ? "新建文件夹" : "添加书签");
+    $("editName").value = node ? node.title : "";
+    $("editUrl").value = node && !node.children ? node.url : "";
+    $("editUrlBlock").style.display = isFolder ? "none" : "";
+    $("editForm").dataset.folder = isFolder ? "1" : "";
+    $("editDialog").showModal();
+    $("editName").focus();
+  }
+
+  $("editForm").addEventListener("submit", function () {
+    var name = $("editName").value, url = $("editUrl").value.trim(), folder = $("editForm").dataset.folder === "1";
+    if (editing) {
+      var message = { type: "bm.update", id: editing.id, title: name };
+      if (!folder && url) message.url = url;
+      send(message);
+    } else if (folder) {
+      send({ type: "bm.addFolder", parent: selected, title: name });
+    } else if (url) {
+      send({ type: "bm.add", parent: selected, title: name || url, url: url });
+    }
+    editing = null;
+  });
+  $("editCancel").onclick = function () { editing = null; $("editDialog").close(); };
+  $("addBookmark").onclick = function () { openEdit(null, false); };
+  $("addFolder").onclick = function () { openEdit(null, true); };
+  $("search").addEventListener("input", render);
+
+  function openImport() {
+    $("status").textContent = "";
+    $("importList").innerHTML = '<div class="empty">正在查找本机浏览器…</div>';
+    $("importDialog").showModal();
+    send({ type: "bm.sources" });
+  }
+  $("openImport").onclick = openImport;
+  $("importClose").onclick = function () { $("importDialog").close(); };
+  $("export").onclick = function () { send({ type: "bm.export" }); };
+
+  function onMessage(data) {
+    if (!data || typeof data !== "object") return;
+    if (data.type === "bm.tree") {
+      tree = data.tree;
+      if (!find(selected)) selected = tree.bar.id;
+      if (pendingEdit) {
+        var hit = find(pendingEdit);
+        pendingEdit = null;
+        if (hit) { if (hit.parent) selected = hit.parent.id; render(); openEdit(hit.node); return; }
+      }
+      render();
+    } else if (data.type === "bm.sources") {
+      var list = $("importList");
+      list.textContent = "";
+      if (!data.sources.length) list.appendChild(el("div", "empty", "没有找到可导入的浏览器书签"));
+      data.sources.forEach(function (source) {
+        var r = el("div", "row");
+        r.appendChild(el("span", "title", source.name));
+        r.appendChild(el("span", "url", source.urls + " 个书签"));
+        var go = el("button", "primary", "导入");
+        go.onclick = function () {
+          go.disabled = true;
+          $("status").textContent = "正在从 " + source.name + " 导入…";
+          send({ type: "bm.import", file: source.file, name: source.name });
+        };
+        r.appendChild(go);
+        list.appendChild(r);
+      });
+    } else if (data.type === "bm.imported") {
+      $("status").textContent = data.count >= 0 ? "已导入 " + data.count + " 个书签" : "导入失败：" + data.error;
+    } else if (data.type === "bm.exported") {
+      var blob = new Blob([data.html], { type: "text/html" });
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      var d = new Date();
+      a.download = "bookmarks_" + d.getFullYear() + String(d.getMonth() + 1).padStart(2, "0") + String(d.getDate()).padStart(2, "0") + ".html";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    }
+  }
+
+  function applyHash() {
+    var h = location.hash;
+    if (h.indexOf("#edit=") === 0) {
+      pendingEdit = Number(h.slice(6));
+      send({ type: "bm.get" });
+    } else if (h === "#import") {
+      openImport();
+    }
+  }
+
+  if (wv) {
+    wv.addEventListener("message", function (e) { onMessage(e.data); });
+    send({ type: "bm.get" });
+    applyHash();
+    window.addEventListener("hashchange", applyHash);
+  } else {
+    $("list").appendChild(el("div", "empty", "请在极速浏览器中打开此页"));
+  }
+})();
+</script>
+</body>
+</html>

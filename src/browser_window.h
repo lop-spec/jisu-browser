@@ -1,6 +1,9 @@
-// 浏览器主窗口：原生标签条 + 地址栏，每个标签一个 WebView2 控件，另预建一个隐藏的备用控件。
+// 浏览器主窗口：原生标签条 + 地址栏 + 书签栏，每个标签一个 WebView2 控件，另预建一个隐藏的备用控件。
+// 智能体标签（Pi 的 browser 工具经 AgentBridge 驱动）也在标签条里，平时放在屏幕外宿主窗口，用户点开时移进主窗口。
 #pragma once
 
+#include "agent_bridge.h"
+#include "bookmarks.h"
 #include "common.h"
 #include "graphics.h"
 #include "options.h"
@@ -15,17 +18,27 @@
 
 namespace jisu {
 
-class BrowserWindow {
+class BrowserWindow : public AgentHost {
  public:
   BrowserWindow(const Options& options, GraphicsWarmup& warmup);
-  ~BrowserWindow();
+  ~BrowserWindow() override;
   BrowserWindow(const BrowserWindow&) = delete;
   BrowserWindow& operator=(const BrowserWindow&) = delete;
 
-  bool Create(HINSTANCE instance);    // 建窗（暂不显示）与地址栏
+  bool Create(HINSTANCE instance);    // 建窗（暂不显示）与地址栏；后台读书签与设置
   void ShowFirstFrame(int showCmd);   // 建渲染目标，显示窗口并同步画出首帧
   void StartEnvironment();            // 异步创建 WebView2 环境，不阻塞首帧
   bool PreTranslate(const MSG& msg);  // 地址栏回车/Esc 与外壳快捷键
+
+  // AgentHost
+  void LeaseAgentTab(LeaseCallback done) override;
+  void ReturnAgentTab(uint32_t tabId) override;
+  void SetAgentTabAwake(uint32_t tabId, bool awake) override;
+  std::string AgentTabInfo(uint32_t tabId) override;
+
+  static constexpr ULONG_PTR kCopyDataOpenUrl = 0x4A495355;  // 'JISU'：另一个实例转来的网址
+  // 同一用户数据目录已经开着的主窗口（没有返回 nullptr）
+  static HWND FindRunningWindow(const std::wstring& profileDir);
 
  private:
   struct Tab {
@@ -41,12 +54,25 @@ class BrowserWindow {
     bool loading = false;
     bool canBack = false;
     bool canForward = false;
+    HWND parent = nullptr;    // 控件当前的父窗口：主窗口或屏幕外宿主
+    // 智能体标签
+    bool agent = false;
+    bool leased = false;
+    bool agentAwake = false;
+    LeaseCallback leaseDone;  // 新建的智能体标签首次导航完成后交给桥
     // window.open 等新窗口请求：控件建好后交给它
     ComPtr<ICoreWebView2NewWindowRequestedEventArgs> newWindowArgs;
     ComPtr<ICoreWebView2Deferral> newWindowDeferral;
   };
 
+  struct Settings {
+    bool bookmarkBar = true;
+    bool importedDefaultBrowser = false;
+  };
+
   static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+  static LRESULT CALLBACK AgentHostProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+  static DWORD WINAPI ProfileThreadMain(void* param);
   LRESULT WndProc(UINT msg, WPARAM wParam, LPARAM lParam);
   void OnCreate();
   void OnDestroy();
@@ -54,6 +80,7 @@ class BrowserWindow {
   void OnThemeChanged();
   void UpdateEditFont();
   void Relayout();
+  void LayoutBookmarkBar();
   RECT ContentRect() const;
   ChromeState BuildChromeState() const;
   ChromeHit HitTest(POINT point) const;
@@ -62,8 +89,10 @@ class BrowserWindow {
   void OnLButtonDown(POINT point);
   void OnLButtonUp(POINT point);
   void OnMButtonUp(POINT point);
+  void OnRButtonUp(POINT point);
 
   void OnEnvironmentCreated(HRESULT result, ICoreWebView2Environment* environment);
+  void StartAgentBridge();
   void CreateController(Tab& tab);
   void OnControllerCreated(uint32_t id, HRESULT result, ICoreWebView2Controller* controller);
   void OnControllerFailed(Tab& tab, HRESULT result);
@@ -71,18 +100,25 @@ class BrowserWindow {
   void ConfigureWebView(Tab& tab);
   void NavigateNewTabPage(Tab& tab);
   void OnWebMessage(uint32_t id, ICoreWebView2WebMessageReceivedEventArgs* args);
-  void OpenNewWindowAsTab(ICoreWebView2NewWindowRequestedEventArgs* args);
+  void OnPageMessage(Tab& tab, const std::string& json);
+  void PostToPage(Tab& tab, const std::string& json);
+  void OpenNewWindowAsTab(ICoreWebView2NewWindowRequestedEventArgs* args, bool activate);
   void CreateSpare();
 
-  void NewTab(const std::wstring& url);
+  void NewTab(const std::wstring& url, bool activate = true);
   void CloseTab(size_t index);
   void Activate(size_t index);
+  void PlaceTab(Tab& tab);
+  void PlaceAllTabs();
   void SetTabVisible(Tab& tab, bool visible);
   Tab* FindTab(uint32_t id);
+  size_t IndexOf(const Tab& tab) const;
   Tab* ActiveTab();
   const Tab* ActiveTab() const;
   bool IsActive(const Tab& tab) const;
   bool IsSpare(const Tab& tab) const;
+  HWND EnsureAgentHost();
+  RECT AgentHostRect() const;
 
   bool DispatchShortcut(UINT key, bool repeat);
   void ExecuteCommand(WPARAM command);
@@ -90,6 +126,24 @@ class BrowserWindow {
   void UpdateAddressBar();
   void UpdateWindowTitle();
   void NavigateFromAddressBar();
+  void OpenUrl(const std::wstring& url, bool newTab);
+
+  // 书签
+  void ToggleBookmark(bool fromKeyboard);
+  void ShowBookmarkFolderMenu(BookmarkNode& folder, POINT screen);
+  void ShowBookmarkContextMenu(BookmarkNode& node, POINT screen);
+  void ShowOverflowMenu(POINT screen);
+  void ShowBookmarkMenu(const std::vector<BookmarkNode*>& nodes, BookmarkNode* openAllFolder, POINT screen,
+                        bool alignRight);
+  void ShowMainMenu(POINT screen);
+  void OpenBookmarkManager(const std::wstring& fragment);
+  void OnBookmarksChanged();
+  void BroadcastBookmarks();
+  void LoadSettings();
+  void SaveSettings();
+  void RegisterAsDefaultBrowser();
+  void ShowAbout();
+  void OnCopyData(const COPYDATASTRUCT& data);
 
   void MaybeWriteMetrics();
   void WriteMetrics(bool forced);
@@ -102,6 +156,7 @@ class BrowserWindow {
   HINSTANCE instance_ = nullptr;
   HWND hwnd_ = nullptr;
   HWND edit_ = nullptr;
+  HWND agentHost_ = nullptr;
   HFONT editFont_ = nullptr;
   HBRUSH omniboxBrush_ = nullptr;
   int editHeightPx_ = 20;
@@ -115,6 +170,16 @@ class BrowserWindow {
   uint32_t firstTabId_ = 0;
   std::wstring inlineNtp_;
   std::wstring message_;
+  std::unique_ptr<AgentBridge> bridge_;
+
+  // 书签与设置：Create 时起后台线程读，首帧前等它读完
+  BookmarkStore bookmarks_;
+  Settings settings_;
+  HANDLE profileThread_ = nullptr;
+  std::wstring profileDir_;     // 用户数据目录（书签、设置文件所在）
+  bool profileLoaded_ = false;
+  std::vector<BookmarkNode*> barItems_;  // 书签栏上排出来的项（与 layout_.bookmarks 对应）
+  std::vector<BookmarkNode*> overflowItems_;
 
   ChromeHit hover_;
   ChromeHit pressed_;

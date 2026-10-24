@@ -26,6 +26,12 @@ class ProcessClock {
 std::string ToUtf8(std::wstring_view text);
 std::wstring FromUtf8(std::string_view text);
 
+// 小文件读写：读出原始字节（去掉 UTF-8 BOM）；写入先写临时文件再替换，读取方不会读到半截
+bool ReadFileBytes(const std::wstring& path, std::string& out);
+bool WriteFileAtomic(const std::wstring& path, const std::string& bytes);
+bool EnsureDirectory(const std::wstring& path);  // 逐级创建
+std::wstring ParentDirectory(const std::wstring& path);
+
 // WebView2 getter 返回的 CoTaskMem 字符串。
 class CoTaskString {
  public:

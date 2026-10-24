@@ -4,6 +4,7 @@
 
 #include <dwmapi.h>
 
+#include <algorithm>
 #include <cmath>
 
 namespace jisu {
@@ -160,6 +161,7 @@ HRESULT GraphicsWarmup::CreateTextFormats() {
 
 HRESULT ChromePainter::CreateTarget(const GraphicsWarmup& graphics, HWND hwnd, RenderTargetKind kind, UINT dpi) {
   factory_ = graphics.d2d;
+  dwrite_ = graphics.dwrite;
   tabTitle_ = graphics.tabTitle;
   message_ = graphics.message;
   hwnd_ = hwnd;
@@ -259,6 +261,31 @@ HRESULT ChromePainter::EnsureGeometry() {
   }
   reloadArc_ = arc;
   reloadHead_ = head;
+
+  // 书签星标：外径 7、内径 3.1 的五角星，原点为中心，尖朝上
+  ComPtr<ID2D1PathGeometry> star;
+  sink.Reset();
+  hr = factory_->CreatePathGeometry(star.GetAddressOf());
+  if (SUCCEEDED(hr)) {
+    hr = star->Open(sink.GetAddressOf());
+  }
+  if (SUCCEEDED(hr)) {
+    for (int i = 0; i < 10; ++i) {
+      const float r = (i % 2 == 0) ? 7.0f : 3.1f;
+      const float a = -0.5f * kPi + static_cast<float>(i) * kPi / 5.0f;
+      const D2D1_POINT_2F p = D2D1::Point2F(r * cosf(a), r * sinf(a));
+      if (i == 0) {
+        sink->BeginFigure(p, D2D1_FIGURE_BEGIN_FILLED);
+      } else {
+        sink->AddLine(p);
+      }
+    }
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    hr = sink->Close();
+  }
+  if (SUCCEEDED(hr)) {
+    star_ = star;
+  }
   return S_OK;
 }
 
@@ -306,7 +333,7 @@ void ChromePainter::Paint(const Palette& palette, const ChromeLayout& layout, co
 
   const float width = layout.width;
   const float stripBottom = layout.tabStripHeight;
-  const float toolbarBottom = static_cast<float>(layout.separatorPx) / layout.scale;
+  const float toolbarBottom = static_cast<float>(layout.separatorPx) / layout.scale;  // 含书签栏
 
   // 标签条：当前标签与工具栏同色并向下延伸，两者连成一体
   Fill(D2D1::RectF(0, 0, width, stripBottom), palette.frame);
@@ -336,6 +363,15 @@ void ChromePainter::Paint(const Palette& palette, const ChromeLayout& layout, co
 
   // 地址框：底和边框在这里画，文字与光标归系统 EDIT 控件
   FillRounded(layout.omnibox, 6.0f, palette.omnibox);
+  if (state.canStar) {
+    if (state.hover.kind == ChromeHit::kStar) {
+      FillRounded(layout.star, 5.0f, palette.buttonHover);
+    }
+    SetColor(state.starred ? palette.accent : palette.text);
+    DrawStar(Center(layout.star), state.starred);
+  }
+  DrawToolbarButton(palette, layout.menu, state.hover.kind == ChromeHit::kMenu, true);
+  DrawMenuDots(Center(layout.menu));
   const float hairline = 1.0f / layout.scale;
   const float inset = state.omniboxFocused ? 0.75f : hairline * 0.5f;
   const D2D1_RECT_F border = D2D1::RectF(layout.omnibox.left + inset, layout.omnibox.top + inset,
@@ -344,7 +380,11 @@ void ChromePainter::Paint(const Palette& palette, const ChromeLayout& layout, co
   target_->DrawRoundedRectangle(D2D1::RoundedRect(border, 6.0f, 6.0f), brush_.Get(),
                                 state.omniboxFocused ? 1.5f : hairline);
 
-  // 工具栏与网页区之间 1 物理像素的分隔线
+  if (layout.bookmarkBarHeight > 0) {
+    DrawBookmarkBar(palette, layout, state);
+  }
+
+  // 工具栏（及书签栏）与网页区之间 1 物理像素的分隔线
   Fill(D2D1::RectF(0, toolbarBottom, width, toolbarBottom + hairline), palette.separator);
 
   if (!state.message.empty() && message_) {
@@ -378,10 +418,19 @@ void ChromePainter::DrawTab(const Palette& palette, const ChromeLayout& layout, 
   }
 
   float textLeft = r.left + 12.0f;
-  if (tab.loading) {
+  const D2D1_POINT_2F dot = D2D1::Point2F(r.left + 15.0f, (r.top + r.bottom) * 0.5f - 1.0f);
+  if (tab.agent) {
+    // 智能体标签：空心圈；正在执行命令或加载中：实心
     SetColor(palette.accent);
-    target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(r.left + 15.0f, (r.top + r.bottom) * 0.5f - 1.0f), 3.0f, 3.0f),
-                         brush_.Get());
+    if (tab.agentAwake || tab.loading) {
+      target_->FillEllipse(D2D1::Ellipse(dot, 4.0f, 4.0f), brush_.Get());
+    } else {
+      target_->DrawEllipse(D2D1::Ellipse(dot, 3.5f, 3.5f), brush_.Get(), 1.5f);
+    }
+    textLeft += 12.0f;
+  } else if (tab.loading) {
+    SetColor(palette.accent);
+    target_->FillEllipse(D2D1::Ellipse(dot, 3.0f, 3.0f), brush_.Get());
     textLeft += 12.0f;
   }
   const bool showClose = tab.active || hovered;
@@ -422,6 +471,98 @@ void ChromePainter::DrawArrow(D2D1_POINT_2F center, bool left) {
 void ChromePainter::DrawCross(D2D1_POINT_2F center, float half) {
   Stroke(D2D1::Point2F(center.x - half, center.y - half), D2D1::Point2F(center.x + half, center.y + half));
   Stroke(D2D1::Point2F(center.x - half, center.y + half), D2D1::Point2F(center.x + half, center.y - half));
+}
+
+float ChromePainter::MeasureBookmark(const std::wstring& title, bool folder) const {
+  constexpr float kPadding = 8.0f;  // 左右各一份
+  constexpr float kIcon = 20.0f;    // 图标 14 + 间距 6
+  constexpr float kMaxText = 150.0f;
+  if (title.empty()) {
+    return kPadding * 2.0f + 14.0f;  // 只有图标
+  }
+  float textWidth = 7.5f * static_cast<float>(title.size());  // 估算：还没有排版对象时
+  if (dwrite_ && tabTitle_) {
+    ComPtr<IDWriteTextLayout> textLayout;
+    if (SUCCEEDED(dwrite_->CreateTextLayout(title.c_str(), static_cast<UINT32>(title.size()), tabTitle_.Get(), 1000.0f,
+                                            30.0f, textLayout.GetAddressOf()))) {
+      DWRITE_TEXT_METRICS metrics{};
+      if (SUCCEEDED(textLayout->GetMetrics(&metrics))) {
+        textWidth = metrics.widthIncludingTrailingWhitespace;
+      }
+    }
+  }
+  (void)folder;  // 文件夹与网页图标同宽
+  return kPadding * 2.0f + kIcon + std::min(textWidth, kMaxText);
+}
+
+void ChromePainter::DrawBookmarkBar(const Palette& palette, const ChromeLayout& layout, const ChromeState& state) {
+  for (size_t i = 0; i < layout.bookmarks.size() && i < state.bookmarks.size(); ++i) {
+    const D2D1_RECT_F r = layout.bookmarks[i];
+    const ChromeBookmark& item = state.bookmarks[i];
+    if (state.hover.kind == ChromeHit::kBookmark && state.hover.index == static_cast<int>(i)) {
+      FillRounded(r, 5.0f, palette.buttonHover);
+    }
+    const D2D1_POINT_2F icon = D2D1::Point2F(r.left + 8.0f + 7.0f, (r.top + r.bottom) * 0.5f);
+    SetColor(palette.textMuted);
+    if (item.folder) {
+      DrawFolderGlyph(icon);
+    } else {
+      DrawPageGlyph(icon);
+    }
+    if (!item.title.empty() && tabTitle_) {
+      SetColor(palette.text);
+      target_->DrawText(item.title.c_str(), static_cast<UINT32>(item.title.size()), tabTitle_.Get(),
+                        D2D1::RectF(r.left + 8.0f + 20.0f, r.top, r.right - 8.0f, r.bottom), brush_.Get(),
+                        D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
+  }
+  if (layout.hasOverflow) {
+    const D2D1_RECT_F r = layout.bookmarkOverflow;
+    if (state.hover.kind == ChromeHit::kBookmarkOverflow) {
+      FillRounded(r, 5.0f, palette.buttonHover);
+    }
+    SetColor(palette.text);
+    const D2D1_POINT_2F c = Center(r);
+    for (const float dx : {-3.0f, 2.0f}) {
+      Stroke(D2D1::Point2F(c.x + dx - 2.0f, c.y - 4.0f), D2D1::Point2F(c.x + dx + 2.0f, c.y), 1.3f);
+      Stroke(D2D1::Point2F(c.x + dx + 2.0f, c.y), D2D1::Point2F(c.x + dx - 2.0f, c.y + 4.0f), 1.3f);
+    }
+  }
+}
+
+void ChromePainter::DrawStar(D2D1_POINT_2F center, bool filled) {
+  if (!star_) {
+    return;
+  }
+  target_->SetTransform(D2D1::Matrix3x2F::Translation(center.x, center.y));
+  if (filled) {
+    target_->FillGeometry(star_.Get(), brush_.Get());
+  } else {
+    target_->DrawGeometry(star_.Get(), brush_.Get(), 1.3f, roundStroke_.Get());
+  }
+  target_->SetTransform(D2D1::Matrix3x2F::Identity());
+}
+
+void ChromePainter::DrawMenuDots(D2D1_POINT_2F center) {
+  for (const float dy : {-5.0f, 0.0f, 5.0f}) {
+    target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(center.x, center.y + dy), 1.6f, 1.6f), brush_.Get());
+  }
+}
+
+void ChromePainter::DrawFolderGlyph(D2D1_POINT_2F c) {
+  // 文件夹：带页签的圆角矩形轮廓
+  const D2D1_RECT_F body = D2D1::RectF(c.x - 7.0f, c.y - 3.5f, c.x + 7.0f, c.y + 5.5f);
+  target_->DrawRoundedRectangle(D2D1::RoundedRect(body, 1.5f, 1.5f), brush_.Get(), 1.2f);
+  Stroke(D2D1::Point2F(c.x - 7.0f, c.y - 3.5f), D2D1::Point2F(c.x - 7.0f, c.y - 5.5f), 1.2f);
+  Stroke(D2D1::Point2F(c.x - 7.0f, c.y - 5.5f), D2D1::Point2F(c.x - 2.0f, c.y - 5.5f), 1.2f);
+  Stroke(D2D1::Point2F(c.x - 2.0f, c.y - 5.5f), D2D1::Point2F(c.x - 0.5f, c.y - 3.5f), 1.2f);
+}
+
+void ChromePainter::DrawPageGlyph(D2D1_POINT_2F c) {
+  // 网页：地球轮廓（一圈 + 一道经线 + 一道纬线）
+  target_->DrawEllipse(D2D1::Ellipse(c, 6.0f, 6.0f), brush_.Get(), 1.2f);
+  target_->DrawEllipse(D2D1::Ellipse(c, 2.6f, 6.0f), brush_.Get(), 1.0f);
+  Stroke(D2D1::Point2F(c.x - 6.0f, c.y), D2D1::Point2F(c.x + 6.0f, c.y), 1.0f);
 }
 
 void ChromePainter::DrawReload(D2D1_POINT_2F center) {

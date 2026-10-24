@@ -51,7 +51,7 @@ class GraphicsWarmup {
 };
 
 struct ChromeHit {
-  enum Kind { kNone, kTab, kTabClose, kNewTab, kBack, kForward, kReload };
+  enum Kind { kNone, kTab, kTabClose, kNewTab, kBack, kForward, kReload, kStar, kMenu, kBookmark, kBookmarkOverflow };
   Kind kind = kNone;
   int index = -1;
   bool operator==(const ChromeHit&) const = default;
@@ -63,6 +63,7 @@ struct ChromeLayout {
   float width = 0;
   float tabStripHeight = 38;
   float toolbarHeight = 40;
+  float bookmarkBarHeight = 0;  // 书签栏隐藏时为 0
   std::vector<D2D1_RECT_F> tabs;
   std::vector<D2D1_RECT_F> tabCloses;
   D2D1_RECT_F newTab{};
@@ -70,6 +71,11 @@ struct ChromeLayout {
   D2D1_RECT_F forward{};
   D2D1_RECT_F reload{};
   D2D1_RECT_F omnibox{};
+  D2D1_RECT_F star{};  // 地址框右端的书签星标
+  D2D1_RECT_F menu{};  // 工具栏最右的菜单钮
+  std::vector<D2D1_RECT_F> bookmarks;  // 书签栏里放得下的项
+  D2D1_RECT_F bookmarkOverflow{};       // 「»」：放不下的项收进这里
+  bool hasOverflow = false;
   int separatorPx = 0;
   int contentTopPx = 0;
 };
@@ -78,6 +84,13 @@ struct ChromeTab {
   std::wstring title;
   bool active = false;
   bool loading = false;
+  bool agent = false;       // 智能体标签：标题前画一个圈
+  bool agentAwake = false;  // 正在执行命令：圈填实
+};
+
+struct ChromeBookmark {
+  std::wstring title;
+  bool folder = false;
 };
 
 struct ChromeState {
@@ -87,6 +100,9 @@ struct ChromeState {
   bool canForward = false;
   bool loading = false;
   bool omniboxFocused = false;
+  bool canStar = false;  // 当前页能加书签（http/https）
+  bool starred = false;  // 当前页已在书签里
+  std::vector<ChromeBookmark> bookmarks;  // 书签栏各项，与 ChromeLayout::bookmarks 一一对应
   std::wstring message;  // 内容区提示，例如没有 WebView2 运行时
 };
 
@@ -97,6 +113,8 @@ class ChromePainter {
   void SetDpi(UINT dpi);
   void Paint(const Palette& palette, const ChromeLayout& layout, const ChromeState& state);
   bool IsHardware() const;
+  // 书签栏一项的宽度（DIP，含内边距与图标）；渲染目标建好之前返回估算值
+  float MeasureBookmark(const std::wstring& title, bool folder) const;
 
  private:
   HRESULT EnsureTarget();
@@ -110,8 +128,14 @@ class ChromePainter {
   void DrawArrow(D2D1_POINT_2F center, bool left);
   void DrawCross(D2D1_POINT_2F center, float half);
   void DrawReload(D2D1_POINT_2F center);
+  void DrawStar(D2D1_POINT_2F center, bool filled);
+  void DrawMenuDots(D2D1_POINT_2F center);
+  void DrawFolderGlyph(D2D1_POINT_2F center);
+  void DrawPageGlyph(D2D1_POINT_2F center);
+  void DrawBookmarkBar(const Palette& palette, const ChromeLayout& layout, const ChromeState& state);
 
   ComPtr<ID2D1Factory> factory_;
+  ComPtr<IDWriteFactory> dwrite_;
   ComPtr<IDWriteTextFormat> tabTitle_;
   ComPtr<IDWriteTextFormat> message_;
   ComPtr<ID2D1HwndRenderTarget> target_;
@@ -119,6 +143,7 @@ class ChromePainter {
   ComPtr<ID2D1StrokeStyle> roundStroke_;
   ComPtr<ID2D1PathGeometry> reloadArc_;
   ComPtr<ID2D1PathGeometry> reloadHead_;
+  ComPtr<ID2D1PathGeometry> star_;
   HWND hwnd_ = nullptr;
   RenderTargetKind kind_ = RenderTargetKind::kHardware;
   UINT dpi_ = 96;

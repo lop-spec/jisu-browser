@@ -11,6 +11,7 @@ enum class NtpSource { kFolder, kInline };
 
 struct Options {
   std::wstring userDataFolder;     // --udf <目录>，默认 %LOCALAPPDATA%\JisuBrowser\User Data
+  bool defaultUserData = true;     // 没给 --udf：日常配置（首次启动导入书签）
   std::wstring metricsPath;        // --metrics <文件>：写启动时间线 JSON
   bool exitAfterMetrics = false;   // --exit-after-metrics：写完时间线即退出
   bool noActivate = false;         // --no-activate：显示窗口但不激活、不抢焦点
@@ -31,6 +32,10 @@ struct Options {
   bool trackingPrevention = true;  // --tracking-prevention 0|1
   std::wstring browserArgs;        // --browser-args "<参数>"：传给内核的附加参数
   int preheatSeconds = 0;          // --preheat <秒>：不显示窗口，只持有内核进程（模拟开机预热）
+  // --agent-config <文件>：智能体桥配置，默认 %LOCALAPPDATA%\JisuBrowser\agent-bridge.json；
+  // --no-agent 关掉。带 --metrics 的测量运行不开桥，除非显式给了 --agent-config
+  std::wstring agentConfigPath;
+  bool noAgent = false;
   std::wstring startUrl;           // 第一个非选项参数：启动时打开的网址
   std::wstring commandLine;        // 原始命令行，写进时间线
 };
