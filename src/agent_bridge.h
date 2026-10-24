@@ -49,8 +49,8 @@ struct AgentBridgeConfig {
   bool renderOnDemand = false;
   DWORD renderWaitMs = 200;
   // 隐藏后再过多久用 CDP 冻结页面（Page.setWebLifecycleState frozen：脚本、定时器停住，网络照收），
-  // 下一条命令前先解冻；0 = 不冻结。比 TrySuspend 便宜（不回收内存）
-  DWORD pageFreezeMs = 0;
+  // 下一条命令前先解冻并等页面把积下的任务跑完；0 = 不冻结。比 TrySuspend 便宜（不回收内存）
+  DWORD pageFreezeMs = 1000;
   std::vector<std::string> blockedUrls;  // 智能体会话上的 Network.setBlockedURLs 模式（广告、统计）
 };
 
@@ -127,6 +127,16 @@ class AgentBridge {
     std::map<std::string, ULONGLONG> renderWatch;  // 按需出帧：隐藏时发出、等待 Promise 的 evaluate（id → 发出时刻）
     ULONGLONG sleptAt = 0;      // 进入休眠的时刻（冻结计时）
     bool frozen = false;        // 已用 CDP 冻结
+    // 唤醒后先等页面出一帧再转发命令：休眠期间积下的 rAF 更新、解冻后积下的网络回调先跑完，读到的 DOM 才是新的
+    bool settling = false;
+    ULONGLONG settleSince = 0;
+    struct Held {
+      std::string idJson;
+      std::string session;
+      std::string method;
+      std::string paramsJson;
+    };
+    std::vector<Held> held;
   };
   struct BrokerState;
 
@@ -149,6 +159,11 @@ class AgentBridge {
   void Sleep(Connection& connection);
   void EnsureIdleTimer();
   void Thaw(Connection& connection);
+  void StartSettle(Connection& connection, bool frame);
+  void FinishSettle(uint32_t connectionId);
+  // 转发给页面（含开启网络域后补上网址拦截）
+  void Forward(Connection& connection, const std::string& idJson, const std::string& session,
+               const std::string& method, const std::string& paramsJson);
   void OnIdleTimer();
   void OnCdpEvent(uint32_t connectionId, const std::string& method,
                   ICoreWebView2DevToolsProtocolEventReceivedEventArgs* args);

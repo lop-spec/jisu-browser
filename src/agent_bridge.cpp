@@ -610,12 +610,16 @@ void AgentBridge::OnRelayMessage(uint32_t connectionId, const std::string& text)
   const bool needsRender = cdpMethod.rfind("Input.", 0) == 0 || cdpMethod == "Page.captureScreenshot" ||
                            cdpMethod == "Page.startScreencast" || cdpMethod == "Page.screencastFrameAck" ||
                            cdpMethod == "Page.printToPDF";
+  const bool wasFrozen = connection.frozen;
   Thaw(connection);  // 冻结的页面先解冻：同一会话上按顺序执行，解冻一定先于这条命令
   if (!config_.renderOnDemand || needsRender || connection.awake) {
     Wake(connection);
   } else {
     host_.ResumeAgentTab(connection.tabId);  // 隐藏执行：挂起了就先恢复，但不显示
     connection.lastActivity = GetTickCount64();
+    if (wasFrozen) {
+      StartSettle(connection, false);  // 隐藏页面没有 rAF：让解冻后积下的任务先跑一轮
+    }
     const bool awaitsPromise = (cdpMethod == "Runtime.evaluate" || cdpMethod == "Runtime.callFunctionOn") &&
                                cdpParams["awaitPromise"].AsBool();
     if (awaitsPromise) {
@@ -624,10 +628,60 @@ void AgentBridge::OnRelayMessage(uint32_t connectionId, const std::string& text)
       EnsureIdleTimer();
     }
   }
-  Execute(connection, idJson, session, cdpMethod, cdpParams.IsObject() ? json::Serialize(cdpParams) : "{}");
-  if (cdpMethod == "Network.enable") {
+  const std::string paramsJson = cdpParams.IsObject() ? json::Serialize(cdpParams) : "{}";
+  if (connection.settling) {
+    connection.held.push_back(Connection::Held{idJson, session, cdpMethod, paramsJson});  // 等这一帧出来再发
+    return;
+  }
+  Forward(connection, idJson, session, cdpMethod, paramsJson);
+}
+
+void AgentBridge::Forward(Connection& connection, const std::string& idJson, const std::string& session,
+                          const std::string& method, const std::string& paramsJson) {
+  Execute(connection, idJson, session, method, paramsJson);
+  if (method == "Network.enable") {
     // 同一会话上按顺序执行：网址拦截紧跟在开启网络域之后生效（iframe 子会话各自开启，各自补上）
     ApplyBlockedUrls(connection, session);
+  }
+}
+
+// 唤醒（或解冻）之后、转发下一条命令之前：在页面里等一帧再加一个任务（rAF → setTimeout 0）。
+// 休眠时没跑的 rAF 批量更新、冻结时积下的网络回调先处理完，智能体读到的内容和一直在渲染的浏览器一样新。
+// 最多等 300ms（页面在跳转、没有执行上下文时不会回来）
+void AgentBridge::StartSettle(Connection& connection, bool frame) {
+  if (connection.settling || !connection.attached || connection.rootSession.empty()) {
+    return;
+  }
+  connection.settling = true;
+  connection.settleSince = GetTickCount64();
+  const uint32_t connectionId = connection.id;
+  std::weak_ptr<int> alive = alive_;
+  // 可见时等一帧再加一个任务；隐藏时（定时器被节流、没有 rAF）用 MessageChannel 让出一个任务
+  const char* params =
+      frame ? "{\"expression\":\"new Promise(r=>requestAnimationFrame(()=>setTimeout(r,0)))\","
+              "\"awaitPromise\":true,\"returnByValue\":true}"
+            : "{\"expression\":\"new Promise(r=>{const c=new MessageChannel();c.port1.onmessage=()=>r();"
+              "c.port2.postMessage(0)})\",\"awaitPromise\":true,\"returnByValue\":true}";
+  Internal(connection, connection.rootSession, "Runtime.evaluate", params,
+           [this, alive, connectionId](HRESULT, const std::string&) {
+             if (!alive.expired()) {
+               FinishSettle(connectionId);
+             }
+           });
+  EnsureIdleTimer();
+}
+
+void AgentBridge::FinishSettle(uint32_t connectionId) {
+  Connection* found = Find(connectionId);
+  if (!found || !found->settling) {
+    return;
+  }
+  Connection& connection = *found;
+  connection.settling = false;
+  std::vector<Connection::Held> held;
+  held.swap(connection.held);
+  for (const Connection::Held& command : held) {
+    Forward(connection, command.idJson, command.session, command.method, command.paramsJson);
   }
 }
 
@@ -832,8 +886,12 @@ void AgentBridge::OnAgentTabShown(uint32_t tabId) {
 
 void AgentBridge::Wake(Connection& connection) {
   connection.lastActivity = GetTickCount64();
+  const bool wasFrozen = connection.frozen;
   Thaw(connection);
   if (connection.awake) {
+    if (wasFrozen) {
+      StartSettle(connection, true);
+    }
     return;
   }
   connection.awake = true;
@@ -843,6 +901,7 @@ void AgentBridge::Wake(Connection& connection) {
     Internal(connection, connection.rootSession, "Emulation.setFocusEmulationEnabled", "{\"enabled\":true}");
     connection.focusApplied = true;
   }
+  StartSettle(connection, true);  // 刚恢复可见：先等一帧，再转发
   EnsureIdleTimer();
 }
 
@@ -874,8 +933,16 @@ void AgentBridge::Sleep(Connection& connection) {
 void AgentBridge::OnIdleTimer() {
   const ULONGLONG now = GetTickCount64();
   bool anyAwake = false;
+  std::vector<uint32_t> settled;
   for (auto& item : connections_) {
     Connection& connection = *item.second;
+    if (connection.settling) {
+      if (now - connection.settleSince >= 300) {
+        settled.push_back(connection.id);  // 等不到这一帧（跳转中）：不再等
+      } else {
+        anyAwake = true;
+      }
+    }
     if (!connection.awake && !connection.renderWatch.empty()) {
       bool stuck = false;
       for (const auto& [id, since] : connection.renderWatch) {
@@ -903,11 +970,15 @@ void AgentBridge::OnIdleTimer() {
     if (!connection.awake) {
       continue;
     }
-    if (connection.pending == 0 && !connection.screencast && now - connection.lastActivity >= config_.graceMs) {
+    if (connection.pending == 0 && !connection.screencast && !connection.settling && connection.held.empty() &&
+        now - connection.lastActivity >= config_.graceMs) {
       Sleep(connection);
     } else {
       anyAwake = true;
     }
+  }
+  for (const uint32_t id : settled) {
+    FinishSettle(id);
   }
   if (!anyAwake && idleTimerRunning_) {
     KillTimer(hwnd_, kIdleTimer);
