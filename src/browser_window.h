@@ -59,6 +59,9 @@ class BrowserWindow : public AgentHost {
     bool agent = false;
     bool leased = false;
     bool agentAwake = false;
+    bool suspended = false;     // 已 TrySuspend
+    bool suspending = false;    // TrySuspend 进行中
+    ULONGLONG hiddenSince = 0;  // 智能体标签在宿主里隐藏的起点（挂起计时）
     LeaseCallback leaseDone;  // 新建的智能体标签首次导航完成后交给桥
     // window.open 等新窗口请求：控件建好后交给它
     ComPtr<ICoreWebView2NewWindowRequestedEventArgs> newWindowArgs;
@@ -110,6 +113,9 @@ class BrowserWindow : public AgentHost {
   void Activate(size_t index);
   void PlaceTab(Tab& tab);
   void PlaceAllTabs();
+  void ApplyAgentScale(Tab& tab, bool inHost);
+  void ResumeTab(Tab& tab);
+  void SuspendIdleAgentTabs();
   void SetTabVisible(Tab& tab, bool visible);
   Tab* FindTab(uint32_t id);
   size_t IndexOf(const Tab& tab) const;
@@ -119,6 +125,8 @@ class BrowserWindow : public AgentHost {
   bool IsSpare(const Tab& tab) const;
   HWND EnsureAgentHost();
   RECT AgentHostRect() const;
+  SIZE AgentViewport() const;   // 智能体标签的 CSS 视口
+  SIZE AgentHostSize() const;   // 宿主窗口物理像素 = CSS 视口 × 光栅化比例
 
   bool DispatchShortcut(UINT key, bool repeat);
   void ExecuteCommand(WPARAM command);
@@ -171,6 +179,8 @@ class BrowserWindow : public AgentHost {
   std::wstring inlineNtp_;
   std::wstring message_;
   std::unique_ptr<AgentBridge> bridge_;
+  AgentBridgeConfig agentConfig_;  // 智能体标签的省电设置（桥启用时从配置读入）
+  bool freezeTimerRunning_ = false;
 
   // 书签与设置：Create 时起后台线程读，首帧前等它读完
   BookmarkStore bookmarks_;

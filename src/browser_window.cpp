@@ -51,6 +51,18 @@ constexpr UINT_PTR kTimerSpare = 1;
 constexpr UINT_PTR kTimerMetrics = 2;
 constexpr UINT_PTR kTimerWatchdog = 3;
 constexpr UINT_PTR kTimerPreheat = 4;
+constexpr UINT_PTR kTimerAgentFreeze = 5;
+
+// 智能体标签里媒体不自动播放：play() 像被浏览器自动播放策略拒绝一样返回 NotAllowedError，autoplay 属性起播的立即暂停。
+// 只装在智能体标签上；window.__jisuAllowMedia = true 可放行
+constexpr wchar_t kAgentMediaScript[] =
+    L"(()=>{if(window.__jisuAgentMedia)return;window.__jisuAgentMedia=1;"
+    L"const p=HTMLMediaElement.prototype,play=p.play;"
+    L"Object.defineProperty(p,'play',{configurable:true,writable:true,value:function(){"
+    L"if(window.__jisuAllowMedia)return play.call(this);"
+    L"return Promise.reject(new DOMException('play() is blocked in agent tabs','NotAllowedError'));}});"
+    L"document.addEventListener('play',e=>{const t=e.target;"
+    L"if(!window.__jisuAllowMedia&&t&&t.pause)t.pause();},true);})();";
 constexpr int kAddressBarId = 100;
 
 // 弹出菜单命令号
@@ -452,6 +464,8 @@ void BrowserWindow::StartAgentBridge() {
   if (!config.enabled) {
     return;
   }
+  agentConfig_ = config;
+  agentConfig_.token.clear();  // 窗口只用省电设置，令牌只留在桥里
   bridge_ = std::make_unique<AgentBridge>(hwnd_, *this, std::move(config));
   bridge_->Start();
 }
@@ -532,8 +546,8 @@ void BrowserWindow::OnControllerCreated(uint32_t id, HRESULT result, ICoreWebVie
     controller2->put_DefaultBackgroundColor(ToWebViewColor(palette_.content));
   }
   tab->controller->put_Bounds(tab->parent == agentHost_ && agentHost_ ? AgentHostRect() : ContentRect());
-  if (show) {
-    PlaceTab(*tab);
+  if (show || tab->agent) {
+    PlaceTab(*tab);  // 智能体标签：套上宿主里的光栅化比例，开始挂起计时
   }
   if (!tab->webview) {
     AbandonNewWindow(*tab);
@@ -631,16 +645,49 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
     const std::wstring folder = ExeDirectory() + L"\\ntp";
     webview3->SetVirtualHostNameToFolderMapping(kNtpHost, folder.c_str(), COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY);
   }
+  const uint32_t id = tab.id;
+  EventRegistrationToken token{};
   if (tab.agent) {
     // 智能体标签在屏幕外：内核自带的弹框和权限气泡会落在看不见的地方，改由外壳处理
     ComPtr<ICoreWebView2Settings> settings;
     if (SUCCEEDED(tab.webview->get_Settings(settings.GetAddressOf()))) {
       settings->put_AreDefaultScriptDialogsEnabled(FALSE);
     }
+    if (agentConfig_.blockAutoplay) {
+      tab.webview->AddScriptToExecuteOnDocumentCreated(
+          kAgentMediaScript,
+          Callback<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler>(
+              [](HRESULT, LPCWSTR) -> HRESULT { return S_OK; })
+              .Get());
+    }
+    if (agentConfig_.blockImages) {
+      // 图片请求（含 iframe、worker 发起的）交给外壳：用户正看着这个标签时放行，否则回 404
+      ComPtr<ICoreWebView2_22> webview22;
+      if (SUCCEEDED(tab.webview.As(&webview22))) {
+        webview22->AddWebResourceRequestedFilterWithRequestSourceKinds(
+            L"*", COREWEBVIEW2_WEB_RESOURCE_CONTEXT_IMAGE, COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_ALL);
+      } else {
+        tab.webview->AddWebResourceRequestedFilter(L"*", COREWEBVIEW2_WEB_RESOURCE_CONTEXT_IMAGE);
+      }
+      tab.webview->add_WebResourceRequested(
+          Callback<ICoreWebView2WebResourceRequestedEventHandler>(
+              [this, id](ICoreWebView2*, ICoreWebView2WebResourceRequestedEventArgs* args) -> HRESULT {
+                const Tab* t = FindTab(id);
+                if (!t || !t->agent || IsActive(*t) || !environment_) {
+                  return S_OK;
+                }
+                ComPtr<ICoreWebView2WebResourceResponse> response;
+                if (SUCCEEDED(environment_->CreateWebResourceResponse(nullptr, 404, L"Blocked", L"",
+                                                                      response.GetAddressOf()))) {
+                  args->put_Response(response.Get());
+                }
+                return S_OK;
+              })
+              .Get(),
+          &token);
+    }
   }
 
-  const uint32_t id = tab.id;
-  EventRegistrationToken token{};
   tab.webview->add_WebMessageReceived(
       Callback<ICoreWebView2WebMessageReceivedEventHandler>(
           [this, id](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
@@ -1057,6 +1104,80 @@ void BrowserWindow::ReturnAgentTab(uint32_t tabId) {
   }
 }
 
+// 智能体标签在宿主里按配置的光栅化比例出图（CSS 视口不变，像素更少）；回到主窗口时跟随显示器
+void BrowserWindow::ApplyAgentScale(Tab& tab, bool inHost) {
+  ComPtr<ICoreWebView2Controller3> controller3;
+  if (!tab.controller || FAILED(tab.controller.As(&controller3))) {
+    return;
+  }
+  const bool fixed = inHost && agentConfig_.rasterScale > 0;
+  const double target = fixed ? agentConfig_.rasterScale : static_cast<double>(dpi_) / 96.0;
+  double current = 0;
+  controller3->get_RasterizationScale(&current);
+  controller3->put_ShouldDetectMonitorScaleChanges(fixed ? FALSE : TRUE);
+  if (std::fabs(current - target) > 0.001) {
+    controller3->put_RasterizationScale(target);
+  }
+}
+
+void BrowserWindow::ResumeTab(Tab& tab) {
+  if (!tab.suspended && !tab.suspending) {
+    return;
+  }
+  tab.suspended = false;
+  tab.suspending = false;
+  ComPtr<ICoreWebView2_3> webview3;
+  if (tab.webview && SUCCEEDED(tab.webview.As(&webview3))) {
+    webview3->Resume();
+  }
+}
+
+// 隐藏够 freezeMs 的智能体标签挂起：定时器、脚本全停，下次有命令时先恢复
+void BrowserWindow::SuspendIdleAgentTabs() {
+  bool waiting = false;
+  const ULONGLONG now = GetTickCount64();
+  for (auto& item : tabs_) {
+    Tab& tab = *item;
+    if (!tab.agent || tab.agentAwake || IsActive(tab) || tab.visible || tab.suspended || tab.suspending ||
+        !tab.webview) {
+      continue;
+    }
+    if (now - tab.hiddenSince < agentConfig_.freezeMs) {
+      waiting = true;
+      continue;
+    }
+    ComPtr<ICoreWebView2_3> webview3;
+    if (FAILED(tab.webview.As(&webview3))) {
+      continue;
+    }
+    tab.suspending = true;
+    const uint32_t id = tab.id;
+    webview3->TrySuspend(Callback<ICoreWebView2TrySuspendCompletedHandler>(
+                             [this, id](HRESULT result, BOOL ok) -> HRESULT {
+                               Tab* t = FindTab(id);
+                               if (!t) {
+                                 return S_OK;
+                               }
+                               if (t->suspending) {
+                                 t->suspending = false;
+                                 t->suspended = SUCCEEDED(result) && ok;
+                               } else if (SUCCEEDED(result) && ok) {
+                                 // 挂起途中已经被唤醒：补一次恢复，免得页面停在挂起状态
+                                 ComPtr<ICoreWebView2_3> again;
+                                 if (t->webview && SUCCEEDED(t->webview.As(&again))) {
+                                   again->Resume();
+                                 }
+                               }
+                               return S_OK;
+                             })
+                             .Get());
+  }
+  if (!waiting && freezeTimerRunning_) {
+    KillTimer(hwnd_, kTimerAgentFreeze);
+    freezeTimerRunning_ = false;
+  }
+}
+
 void BrowserWindow::SetAgentTabAwake(uint32_t tabId, bool awake) {
   Tab* tab = FindTab(tabId);
   if (!tab || tab->agentAwake == awake) {
@@ -1070,13 +1191,12 @@ void BrowserWindow::SetAgentTabAwake(uint32_t tabId, bool awake) {
 std::string BrowserWindow::AgentTabInfo(uint32_t tabId) {
   const Tab* tab = FindTab(tabId);
   const size_t index = tab ? IndexOf(*tab) : 0;
-  const RECT bounds = AgentHostRect();
+  const SIZE viewport = AgentViewport();
   std::string out = "{\"id\":" + std::to_string(tabId) + ",\"index\":" + std::to_string(index) +
                     ",\"windowId\":1,\"groupId\":-1,\"active\":false,\"highlighted\":false,\"pinned\":false,"
                     "\"audible\":false,\"discarded\":false,\"autoDiscardable\":true,\"frozen\":false,"
                     "\"incognito\":false,\"mutedInfo\":{\"muted\":false},\"status\":\"complete\",\"width\":" +
-                    std::to_string(bounds.right - bounds.left) + ",\"height\":" +
-                    std::to_string(bounds.bottom - bounds.top) + ",\"url\":";
+                    std::to_string(viewport.cx) + ",\"height\":" + std::to_string(viewport.cy) + ",\"url\":";
   json::AppendQuoted(out, tab ? ToUtf8(tab->url) : std::string("about:blank"));
   out += ",\"title\":";
   json::AppendQuoted(out, tab ? ToUtf8(tab->title) : std::string());
@@ -1110,21 +1230,34 @@ HWND BrowserWindow::EnsureAgentHost() {
     hostClass.lpszClassName = kAgentHostClass;
     registered = RegisterClassExW(&hostClass) != 0;
   }
-  RECT content = ContentRect();
-  int width = content.right - content.left;
-  int height = content.bottom - content.top;
-  if (width < 200 || height < 200) {
-    width = MulDiv(1280, static_cast<int>(dpi_), 96);
-    height = MulDiv(800, static_cast<int>(dpi_), 96);
-  }
-  const int x = GetSystemMetrics(SM_XVIRTUALSCREEN) - width - 4000;
+  const SIZE size = AgentHostSize();
+  const int x = GetSystemMetrics(SM_XVIRTUALSCREEN) - size.cx - 4000;
   const int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
   agentHost_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kAgentHostClass, L"极速浏览器 · 智能体",
-                               WS_POPUP | WS_CLIPCHILDREN, x, y, width, height, nullptr, nullptr, instance_, nullptr);
+                               WS_POPUP | WS_CLIPCHILDREN, x, y, size.cx, size.cy, nullptr, nullptr, instance_, nullptr);
   if (agentHost_) {
     ShowWindow(agentHost_, SW_SHOWNOACTIVATE);
   }
   return agentHost_;
+}
+
+// 智能体标签的 CSS 视口：与主窗口网页区相同（主窗口太小或最小化时用 1280×800）
+SIZE BrowserWindow::AgentViewport() const {
+  const RECT content = ContentRect();
+  const double scale = static_cast<double>(dpi_) / 96.0;
+  SIZE viewport{static_cast<LONG>(std::lround((content.right - content.left) / scale)),
+                static_cast<LONG>(std::lround((content.bottom - content.top) / scale))};
+  if (viewport.cx < 320 || viewport.cy < 240) {
+    viewport = SIZE{1280, 800};
+  }
+  return viewport;
+}
+
+// 宿主窗口的物理像素：CSS 视口 × 光栅化比例
+SIZE BrowserWindow::AgentHostSize() const {
+  const SIZE viewport = AgentViewport();
+  const double scale = agentConfig_.rasterScale > 0 ? agentConfig_.rasterScale : static_cast<double>(dpi_) / 96.0;
+  return SIZE{static_cast<LONG>(std::lround(viewport.cx * scale)), static_cast<LONG>(std::lround(viewport.cy * scale))};
 }
 
 RECT BrowserWindow::AgentHostRect() const {
@@ -1132,8 +1265,9 @@ RECT BrowserWindow::AgentHostRect() const {
   if (agentHost_) {
     GetClientRect(agentHost_, &rect);
   } else {
-    rect.right = MulDiv(1280, static_cast<int>(dpi_), 96);
-    rect.bottom = MulDiv(800, static_cast<int>(dpi_), 96);
+    const SIZE size = AgentHostSize();
+    rect.right = size.cx;
+    rect.bottom = size.cy;
   }
   return rect;
 }
@@ -1234,8 +1368,13 @@ void BrowserWindow::PlaceTab(Tab& tab) {
       tab.controller->put_ParentWindow(hwnd_);
       tab.parent = hwnd_;
     }
+    if (tab.agent) {
+      ApplyAgentScale(tab, false);
+    }
     tab.controller->put_Bounds(ContentRect());
     SetTabVisible(tab, true);
+    tab.suspended = false;  // 控件可见时内核自动恢复
+    tab.suspending = false;
     return;
   }
   if (tab.agent) {
@@ -1246,9 +1385,20 @@ void BrowserWindow::PlaceTab(Tab& tab) {
       tab.parent = host;
     }
     if (host) {
+      ApplyAgentScale(tab, true);
       tab.controller->put_Bounds(AgentHostRect());
     }
+    if (tab.agentAwake) {
+      ResumeTab(tab);  // 先恢复再显示：命令到达时页面已经在跑
+    }
+    const bool wasVisible = tab.visible;
     SetTabVisible(tab, tab.agentAwake);
+    if (!tab.agentAwake && (wasVisible || tab.hiddenSince == 0)) {
+      tab.hiddenSince = GetTickCount64();
+      if (agentConfig_.freezeMs > 0 && !freezeTimerRunning_) {
+        freezeTimerRunning_ = SetTimer(hwnd_, kTimerAgentFreeze, 1000, nullptr) != 0;
+      }
+    }
     return;
   }
   SetTabVisible(tab, false);
@@ -1844,8 +1994,9 @@ void BrowserWindow::ShowAbout() {
   std::wstring text = std::wstring(kAppName) + L" " + FromUtf8(JISU_VERSION) + L"\n提交 " + FromUtf8(JISU_COMMIT) +
                       L"\nWebView2 运行时 " + runtime + L"\nWebView2 SDK " + FromUtf8(JISU_WEBVIEW2_SDK) +
                       L"\n\n智能体桥：" +
-                      (bridge_ ? L"已启用（" + std::to_wstring(bridge_->ConnectionCount()) + L" 个连接）"
-                               : std::wstring(L"未启用"));
+                      (!bridge_            ? std::wstring(L"未启用")
+                       : bridge_->Yielding() ? std::wstring(L"让行中（Thorium 等配置里的浏览器在运行，关掉后自动接手）")
+                                             : L"已启用（" + std::to_wstring(bridge_->ConnectionCount()) + L" 个连接）");
   MessageBoxW(hwnd_, text.c_str(), kAppName, MB_OK | MB_ICONINFORMATION);
 }
 
@@ -1960,15 +2111,12 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
         spare_->controller->put_Bounds(ContentRect());
       }
       if (agentHost_) {
-        // 智能体标签的视口跟主窗口网页区一样大
-        const RECT content = ContentRect();
-        if (content.right - content.left >= 200 && content.bottom - content.top >= 200) {
-          SetWindowPos(agentHost_, nullptr, 0, 0, content.right - content.left, content.bottom - content.top,
-                       SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-          for (auto& tab : tabs_) {
-            if (tab->agent && tab->controller && tab->parent == agentHost_) {
-              tab->controller->put_Bounds(AgentHostRect());
-            }
+        // 智能体标签的 CSS 视口跟主窗口网页区一样大
+        const SIZE size = AgentHostSize();
+        SetWindowPos(agentHost_, nullptr, 0, 0, size.cx, size.cy, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        for (auto& tab : tabs_) {
+          if (tab->agent && tab->controller && tab->parent == agentHost_) {
+            tab->controller->put_Bounds(AgentHostRect());
           }
         }
       }
@@ -2079,6 +2227,10 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       if (wParam == kTimerPreheat) {
         DestroyWindow(hwnd_);
+        return 0;
+      }
+      if (wParam == kTimerAgentFreeze) {
+        SuspendIdleAgentTabs();
         return 0;
       }
       break;

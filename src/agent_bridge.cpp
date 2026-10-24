@@ -4,6 +4,9 @@
 #include "json.h"
 #include "net.h"
 
+#include <tlhelp32.h>
+
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -17,6 +20,38 @@ namespace jisu {
 namespace {
 
 const json::Value kNull;
+
+// 智能体会话默认拦截的网址：广告投放与统计上报。只收「拦了页面照常工作」的，登录、验证码、风控、支付一概不碰
+constexpr const char* kDefaultBlockedUrls[] = {
+    "*://*.doubleclick.net/*",
+    "*://*.googlesyndication.com/*",
+    "*://*.googleadservices.com/*",
+    "*://*.google-analytics.com/*",
+    "*://*.googletagmanager.com/*",
+    "*://*.googletagservices.com/*",
+    "*://*.adnxs.com/*",
+    "*://*.criteo.com/*",
+    "*://*.criteo.net/*",
+    "*://*.taboola.com/*",
+    "*://*.outbrain.com/*",
+    "*://*.amazon-adsystem.com/*",
+    "*://*.scorecardresearch.com/*",
+    "*://*.hotjar.com/*",
+    "*://*.clarity.ms/*",
+    "*://bat.bing.com/*",
+    "*://hm.baidu.com/*",
+    "*://pos.baidu.com/*",
+    "*://cpro.baidustatic.com/*",
+    "*://*.cnzz.com/*",
+    "*://*.umeng.com/*",
+    "*://*.umengcloud.com/*",
+    "*://mcs.zijieapi.com/*",
+    "*://mon.zijieapi.com/*",
+    "*://*.ibytedapm.com/*",
+    "*://*.mediav.com/*",
+    "*://*.tanx.com/*",
+    "*://*.mmstat.com/*",
+};
 
 bool IsValidToken(const std::string& token) {
   if (token.size() != 43) {
@@ -113,6 +148,30 @@ std::string HresultText(const std::string& prefix, HRESULT hr) {
   return prefix + text;
 }
 
+// 有没有正在运行的进程叫这些名字（不区分大小写）
+bool AnyProcessRunning(const std::vector<std::wstring>& names) {
+  if (names.empty()) {
+    return false;
+  }
+  const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snapshot == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+  PROCESSENTRY32W entry{};
+  entry.dwSize = static_cast<DWORD>(sizeof(entry));
+  bool found = false;
+  for (BOOL ok = Process32FirstW(snapshot, &entry); ok && !found; ok = Process32NextW(snapshot, &entry)) {
+    for (const std::wstring& name : names) {
+      if (_wcsicmp(entry.szExeFile, name.c_str()) == 0) {
+        found = true;
+        break;
+      }
+    }
+  }
+  CloseHandle(snapshot);
+  return found;
+}
+
 }  // namespace
 
 struct AgentBridge::BrokerState {
@@ -120,6 +179,7 @@ struct AgentBridge::BrokerState {
   std::condition_variable wake;
   std::deque<std::string> acks;
   bool stopping = false;
+  std::atomic<bool> yielding{false};
 };
 
 AgentBridgeConfig LoadAgentBridgeConfig(const std::wstring& file, std::string* error) {
@@ -153,6 +213,32 @@ AgentBridgeConfig LoadAgentBridgeConfig(const std::wstring& file, std::string* e
   }
   if (root["graceMs"].IsNumber()) {
     config.graceMs = ClampMs(root["graceMs"].AsNumber(), 200, 600000);
+  }
+  for (const json::Value& name : root["yieldTo"].Items()) {
+    if (name.IsString() && !name.AsString().empty()) {
+      config.yieldTo.push_back(FromUtf8(name.AsString()));
+    }
+  }
+  if (root["freezeMs"].IsNumber()) {
+    config.freezeMs = root["freezeMs"].AsNumber() <= 0 ? 0 : ClampMs(root["freezeMs"].AsNumber(), 500, 3600000);
+  }
+  if (root["rasterScale"].IsNumber()) {
+    const double scale = root["rasterScale"].AsNumber();
+    config.rasterScale = scale <= 0 ? 0 : (scale < 0.5 ? 0.5 : (scale > 4 ? 4 : scale));
+  }
+  config.blockAutoplay = root["blockAutoplay"].AsBool(config.blockAutoplay);
+  config.blockImages = root["blockImages"].AsBool(config.blockImages);
+  if (root["blockedUrls"].IsArray()) {
+    for (const json::Value& pattern : root["blockedUrls"].Items()) {
+      if (pattern.IsString() && !pattern.AsString().empty()) {
+        config.blockedUrls.push_back(pattern.AsString());
+      }
+    }
+  } else {
+    // 默认只拦广告与统计上报：不拦登录、验证码、风控、支付相关的域名
+    for (const char* pattern : kDefaultBlockedUrls) {
+      config.blockedUrls.push_back(pattern);
+    }
   }
   std::string token;
   if (root["tokenFile"].IsString()) {
@@ -207,6 +293,7 @@ void AgentBridge::Start() {
     std::map<std::string, ULONGLONG> seen;
     const std::wstring pollUrl = config.brokerUrl + L"/poll";
     const std::wstring ackUrl = config.brokerUrl + L"/ack";
+    ULONGLONG lastYieldCheck = 0;
     for (;;) {
       std::deque<std::string> acks;
       {
@@ -219,10 +306,21 @@ void AgentBridge::Start() {
       for (const std::string& body : acks) {
         net::Request(L"POST", ackUrl, body, config.token, 3000);
       }
-      const net::HttpResult poll = net::Request(L"GET", pollUrl, std::string(), config.token, 3000);
+      // 让行：配置里列出的浏览器（例如装着 Pi Background 扩展的 Thorium）在运行时不领邀请，
+      // 免得两边抢同一张票、落败方的失败确认把已建立的连接标成失败
+      if (!config.yieldTo.empty() && GetTickCount64() - lastYieldCheck >= 5000) {
+        state->yielding = AnyProcessRunning(config.yieldTo);
+        lastYieldCheck = GetTickCount64();
+      }
+      net::HttpResult poll;
+      if (!state->yielding) {
+        poll = net::Request(L"GET", pollUrl, std::string(), config.token, 3000);
+      }
       json::Value root;
       DWORD wait = config.pollMs;
-      if (poll.status == 200 && json::Parse(poll.body, root)) {
+      if (state->yielding) {
+        wait = 5000;
+      } else if (poll.status == 200 && json::Parse(poll.body, root)) {
         const ULONGLONG now = GetTickCount64();
         for (const json::Value& ticket : root["tickets"].Items()) {
           const std::string& id = ticket["id"].AsString();
@@ -287,6 +385,8 @@ bool AgentBridge::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
       return false;
   }
 }
+
+bool AgentBridge::Yielding() const { return broker_ && broker_->yielding.load(); }
 
 AgentBridge::Connection* AgentBridge::Find(uint32_t connectionId) {
   const auto it = connections_.find(connectionId);
@@ -498,6 +598,25 @@ void AgentBridge::OnRelayMessage(uint32_t connectionId, const std::string& text)
   }
   Wake(connection);
   Execute(connection, idJson, session, cdpMethod, cdpParams.IsObject() ? json::Serialize(cdpParams) : "{}");
+  if (cdpMethod == "Network.enable") {
+    // 同一会话上按顺序执行：网址拦截紧跟在开启网络域之后生效（iframe 子会话各自开启，各自补上）
+    ApplyBlockedUrls(connection, session);
+  }
+}
+
+void AgentBridge::ApplyBlockedUrls(Connection& connection, const std::string& session) {
+  if (config_.blockedUrls.empty() || session.empty()) {
+    return;
+  }
+  std::string params = "{\"urls\":[";
+  for (size_t i = 0; i < config_.blockedUrls.size(); ++i) {
+    if (i) {
+      params += ',';
+    }
+    json::AppendQuoted(params, config_.blockedUrls[i]);
+  }
+  params += "]}";
+  Internal(connection, session, "Network.setBlockedURLs", params);
 }
 
 void AgentBridge::Attach(Connection& connection, const std::string& idJson) {

@@ -65,11 +65,36 @@ Pi 的 `browser` 工具走 Playwright MCP 的扩展模式：MCP 起一个本机 
   "broker": "http://127.0.0.1:18773",
   "tokenFile": "<Pi 数据目录>\\browser-agent\\extension-auth.json",
   "pollMs": 1000,
-  "graceMs": 1500
+  "graceMs": 1500,
+  "yieldTo": ["thorium.exe"]
 }
 ```
 
-令牌只在内存里用。与装了 Pi Background 扩展的 Thorium 同时开着时，两边都会去领同一张邀请，日常只开其中一个。
+令牌只在内存里用。`yieldTo`：列出的进程（例如装着 Pi Background 扩展的 Thorium）在运行时桥暂停领邀请，关掉它后几秒内自动接手——两边同时领同一张邀请时，落败方的失败确认会把已经建立的连接标成失败。
+
+智能体标签的省电设置（同一个文件里，括号内为默认值）：
+
+| 键 | 作用 |
+|---|---|
+| `freezeMs`（3000） | 隐藏后再过多久挂起页面（定时器、脚本全停），下一条命令到达时先恢复；0 关闭 |
+| `rasterScale`（1.0） | 在宿主里的光栅化比例：CSS 视口不变、像素更少，`srcset` 也会挑小图；0 跟随显示器 |
+| `blockAutoplay`（true） | 媒体不自动播放：`play()` 像被浏览器自动播放策略拒绝一样返回 `NotAllowedError` |
+| `blockImages`（false） | 不加载图片；用户点开这个标签看时不拦 |
+| `blockedUrls`（内置清单） | 在智能体的 CDP 会话上用 `Network.setBlockedURLs` 拦截的网址模式，默认只含广告投放与统计上报；给 `[]` 关闭 |
+
+## 安装
+
+用 CI 运行包安装到当前用户（不需要管理员）：
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\install.ps1 -Package <运行包里的 jisu-browser 目录> -ShortcutDir <快捷方式目录> -StartMenu -AgentTokenFile <Pi 的 extension-auth.json> -YieldTo thorium.exe
+```
+
+程序装到 `%LOCALAPPDATA%\Programs\JisuBrowser`，覆盖前旧程序留在 `_历史版本\`；目标程序正在运行时脚本会停下，不会结束它。
+
+## 智能体 CPU 对比
+
+`measure/agent-bench.mjs` 用 Pi 同一套 Playwright MCP 扩展模式（进程内测试 broker + relay，打 Pi 的两个补丁）在同一组站点上按「执行一步 → 等待」驱动浏览器；`measure/jobrun.cs` 把浏览器整棵进程树放进 Job Object 记账 CPU（已退出的渲染进程也算）。两边都用临时配置目录，窗口放在屏幕外不激活。
 
 ## 测量 G1 / G2
 

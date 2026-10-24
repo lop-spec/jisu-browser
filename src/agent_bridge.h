@@ -35,9 +35,18 @@ struct AgentBridgeConfig {
   std::string token;      // 43 位配对令牌，只在内存里用
   DWORD pollMs = 1000;    // broker 轮询间隔（Pi 判定扩展在线要求 6 秒内有轮询）
   DWORD graceMs = 1500;   // 最后一条命令完成后保持可见多久，之后隐藏
+  // 让行：这些进程（例如装着 Pi Background 扩展的 thorium.exe）在运行时不领邀请，两边不抢同一张票
+  std::vector<std::wstring> yieldTo;
+  // 智能体标签的省电手段（由浏览器窗口执行，桥只负责会话上的网址拦截）
+  DWORD freezeMs = 3000;      // 隐藏后再过多久挂起页面（TrySuspend，定时器与脚本全停）；0 = 不挂起
+  double rasterScale = 1.0;   // 在宿主里的光栅化比例（CSS 视口不变，像素少）；0 = 跟随显示器
+  bool blockAutoplay = true;  // 媒体不自动播放：play() 按浏览器自动播放策略的方式被拒绝
+  bool blockImages = false;   // 不加载图片（用户点开这个标签看时不拦）
+  std::vector<std::string> blockedUrls;  // 智能体会话上的 Network.setBlockedURLs 模式（广告、统计）
 };
 
-// 读取 agent-bridge.json：{"broker": "...", "tokenFile": "...", "pollMs": 1000, "graceMs": 1500, "enabled": true}
+// 读取 agent-bridge.json：{"broker": "...", "tokenFile": "...", "pollMs": 1000, "graceMs": 1500,
+// "yieldTo": ["thorium.exe"], "enabled": true}
 // tokenFile 指向 Pi 的 extension-auth.json（{"token": "..."}）。文件不存在时 enabled=false 且无错误。
 AgentBridgeConfig LoadAgentBridgeConfig(const std::wstring& file, std::string* error);
 
@@ -73,6 +82,7 @@ class AgentBridge {
   // 智能体标签被关掉或渲染进程退出
   void OnAgentTabGone(uint32_t tabId);
   size_t ConnectionCount() const { return connections_.size(); }
+  bool Yielding() const;  // 正在给 yieldTo 里的浏览器让行
 
  private:
   struct Connection {
@@ -113,6 +123,7 @@ class AgentBridge {
                const std::string& method, const std::string& paramsJson);
   void OnCommandDone(uint32_t connectionId, const std::string& idJson, const std::string& method, HRESULT result,
                      LPCWSTR resultJson);
+  void ApplyBlockedUrls(Connection& connection, const std::string& session);
   // 桥自己发的 CDP 命令（不回给 relay）
   void Internal(Connection& connection, const std::string& session, const char* method, const std::string& paramsJson,
                 std::function<void(HRESULT, const std::string&)> done = nullptr);
