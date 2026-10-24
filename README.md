@@ -65,7 +65,7 @@ Pi 的 `browser` 工具走 Playwright MCP 的扩展模式：MCP 起一个本机 
   "broker": "http://127.0.0.1:18773",
   "tokenFile": "<Pi 数据目录>\\browser-agent\\extension-auth.json",
   "pollMs": 1000,
-  "graceMs": 1500,
+  "graceMs": 400,
   "yieldTo": ["thorium.exe"]
 }
 ```
@@ -76,7 +76,9 @@ Pi 的 `browser` 工具走 Playwright MCP 的扩展模式：MCP 起一个本机 
 
 | 键 | 作用 |
 |---|---|
-| `freezeMs`（3000） | 隐藏后再过多久挂起页面（定时器、脚本全停），下一条命令到达时先恢复；0 关闭 |
+| `graceMs`（400） | 最后一条命令完成后保持可见多久，之后关焦点模拟并隐藏 |
+| `freezeMs`（30000） | 隐藏后再过多久挂起页面（定时器、脚本全停），下一条命令到达时先恢复；每次挂起约有 150–400ms 的 CPU 尖峰，只在长间隔里划算；0 关闭 |
+| `renderOnDemand`（false） | 按需出帧：只在截图、输入事件前唤醒；导航、读页面、快照在隐藏状态下执行（同后台标签），等待 Promise 的 evaluate 超过 `renderWaitMs`（200）仍未返回才唤醒 |
 | `rasterScale`（1.0） | 在宿主里的光栅化比例：CSS 视口不变、像素更少，`srcset` 也会挑小图；0 跟随显示器 |
 | `blockAutoplay`（true） | 媒体不自动播放：`play()` 像被浏览器自动播放策略拒绝一样返回 `NotAllowedError` |
 | `blockImages`（false） | 不加载图片；用户点开这个标签看时不拦 |

@@ -130,6 +130,9 @@ bool IsBookmarksPageUrl(const std::wstring& url) { return url.starts_with(kBookm
 
 bool IsWebUrl(const std::wstring& url) { return url.starts_with(L"http://") || url.starts_with(L"https://"); }
 
+// 能收藏的页面：网页，不含外壳自己的新标签页与书签管理页
+bool IsStarrable(const std::wstring& url) { return IsWebUrl(url) && !url.starts_with(kNtpOrigin); }
+
 std::wstring DisplayUrl(const std::wstring& url) {
   if (IsBookmarksPageUrl(url)) {
     return kBookmarksDisplay;
@@ -1104,6 +1107,20 @@ void BrowserWindow::ReturnAgentTab(uint32_t tabId) {
   }
 }
 
+void BrowserWindow::ResumeAgentTab(uint32_t tabId) {
+  Tab* tab = FindTab(tabId);
+  if (!tab || !tab->agent) {
+    return;
+  }
+  ResumeTab(*tab);
+  if (!tab->visible) {
+    tab->hiddenSince = GetTickCount64();  // 刚有过活动：挂起计时从现在重新算
+    if (agentConfig_.freezeMs > 0 && !freezeTimerRunning_) {
+      freezeTimerRunning_ = SetTimer(hwnd_, kTimerAgentFreeze, 1000, nullptr) != 0;
+    }
+  }
+}
+
 // 智能体标签在宿主里按配置的光栅化比例出图（CSS 视口不变，像素更少）；回到主窗口时跟随显示器
 void BrowserWindow::ApplyAgentScale(Tab& tab, bool inHost) {
   ComPtr<ICoreWebView2Controller3> controller3;
@@ -1706,7 +1723,7 @@ void BrowserWindow::OpenUrl(const std::wstring& url, bool newTab) {
 
 void BrowserWindow::ToggleBookmark(bool fromKeyboard) {
   Tab* tab = ActiveTab();
-  if (!tab || !profileLoaded_ || !IsWebUrl(tab->url)) {
+  if (!tab || !profileLoaded_ || !IsStarrable(tab->url)) {
     return;
   }
   BookmarkNode* existing = bookmarks_.FindByUrl(tab->url);
@@ -2460,7 +2477,7 @@ ChromeState BrowserWindow::BuildChromeState() const {
     state.canBack = tab->canBack;
     state.canForward = tab->canForward;
     state.loading = tab->loading;
-    state.canStar = profileLoaded_ && IsWebUrl(tab->url);
+    state.canStar = profileLoaded_ && IsStarrable(tab->url);
     if (state.canStar) {
       state.starred = const_cast<BookmarkStore&>(bookmarks_).FindByUrl(tab->url) != nullptr;
     }
@@ -2500,7 +2517,7 @@ ChromeHit BrowserWindow::HitTest(POINT point) const {
   }
   if (inside(layout_.star)) {
     const Tab* tab = ActiveTab();
-    if (tab && profileLoaded_ && IsWebUrl(tab->url)) {
+    if (tab && profileLoaded_ && IsStarrable(tab->url)) {
       return ChromeHit{ChromeHit::kStar, -1};
     }
   }

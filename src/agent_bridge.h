@@ -34,14 +34,20 @@ struct AgentBridgeConfig {
   std::wstring brokerUrl = L"http://127.0.0.1:18773";
   std::string token;      // 43 位配对令牌，只在内存里用
   DWORD pollMs = 1000;    // broker 轮询间隔（Pi 判定扩展在线要求 6 秒内有轮询）
-  DWORD graceMs = 1500;   // 最后一条命令完成后保持可见多久，之后隐藏
+  DWORD graceMs = 400;    // 最后一条命令完成后保持可见多久，之后隐藏
   // 让行：这些进程（例如装着 Pi Background 扩展的 thorium.exe）在运行时不领邀请，两边不抢同一张票
   std::vector<std::wstring> yieldTo;
   // 智能体标签的省电手段（由浏览器窗口执行，桥只负责会话上的网址拦截）
-  DWORD freezeMs = 3000;      // 隐藏后再过多久挂起页面（TrySuspend，定时器与脚本全停）；0 = 不挂起
+  // 隐藏后再过多久挂起页面（TrySuspend，定时器与脚本全停）；0 = 不挂起。
+  // 每次挂起有 150–400ms 的 CPU 尖峰，只在长间隔里划算，所以默认 30 秒
+  DWORD freezeMs = 30000;
   double rasterScale = 1.0;   // 在宿主里的光栅化比例（CSS 视口不变，像素少）；0 = 跟随显示器
   bool blockAutoplay = true;  // 媒体不自动播放：play() 按浏览器自动播放策略的方式被拒绝
   bool blockImages = false;   // 不加载图片（用户点开这个标签看时不拦）
+  // 按需出帧：只在截图、输入等确实要出帧的命令前唤醒；导航、读页面、快照在隐藏状态下执行（同后台标签），
+  // 等待 Promise 的 evaluate 超过 renderWaitMs 仍未返回（可能在等 rAF）才唤醒
+  bool renderOnDemand = false;
+  DWORD renderWaitMs = 200;
   std::vector<std::string> blockedUrls;  // 智能体会话上的 Network.setBlockedURLs 模式（广告、统计）
 };
 
@@ -60,6 +66,8 @@ class AgentHost {
   virtual void ReturnAgentTab(uint32_t tabId) = 0;
   // 执行命令前唤醒（屏幕外可见），空闲后休眠（隐藏）；用户正看着这个标签时由窗口自己保持可见
   virtual void SetAgentTabAwake(uint32_t tabId, bool awake) = 0;
+  // 隐藏状态下执行命令前：若已挂起则恢复（不显示），并重新开始挂起计时
+  virtual void ResumeAgentTab(uint32_t tabId) = 0;
   virtual std::string AgentTabInfo(uint32_t tabId) = 0;  // chrome.tabs.Tab 风格的 JSON
 };
 
@@ -109,6 +117,7 @@ class AgentBridge {
     bool focusDesired = false;  // Playwright 要求的焦点模拟
     bool focusApplied = false;
     bool screencast = false;    // 录屏期间一直出帧，不休眠
+    std::map<std::string, ULONGLONG> renderWatch;  // 按需出帧：隐藏时发出、等待 Promise 的 evaluate（id → 发出时刻）
   };
   struct BrokerState;
 
@@ -129,6 +138,7 @@ class AgentBridge {
                 std::function<void(HRESULT, const std::string&)> done = nullptr);
   void Wake(Connection& connection);
   void Sleep(Connection& connection);
+  void EnsureIdleTimer();
   void OnIdleTimer();
   void OnCdpEvent(uint32_t connectionId, const std::string& method,
                   ICoreWebView2DevToolsProtocolEventReceivedEventArgs* args);

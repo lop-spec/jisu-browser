@@ -6,6 +6,7 @@
 
 #include <tlhelp32.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -228,6 +229,10 @@ AgentBridgeConfig LoadAgentBridgeConfig(const std::wstring& file, std::string* e
   }
   config.blockAutoplay = root["blockAutoplay"].AsBool(config.blockAutoplay);
   config.blockImages = root["blockImages"].AsBool(config.blockImages);
+  config.renderOnDemand = root["renderOnDemand"].AsBool(config.renderOnDemand);
+  if (root["renderWaitMs"].IsNumber()) {
+    config.renderWaitMs = ClampMs(root["renderWaitMs"].AsNumber(), 50, 5000);
+  }
   if (root["blockedUrls"].IsArray()) {
     for (const json::Value& pattern : root["blockedUrls"].Items()) {
       if (pattern.IsString() && !pattern.AsString().empty()) {
@@ -582,8 +587,10 @@ void AgentBridge::OnRelayMessage(uint32_t connectionId, const std::string& text)
   if (childSession.empty() && cdpMethod == "Emulation.setFocusEmulationEnabled") {
     // 焦点模拟由桥按唤醒状态开关：记下 Playwright 的意图，醒着时立即生效
     connection.focusDesired = cdpParams["enabled"].AsBool();
-    Wake(connection);
-    if (connection.focusApplied != connection.focusDesired) {
+    if (!config_.renderOnDemand) {
+      Wake(connection);
+    }
+    if (connection.awake && connection.focusApplied != connection.focusDesired) {
       Internal(connection, connection.rootSession, "Emulation.setFocusEmulationEnabled",
                connection.focusDesired ? "{\"enabled\":true}" : "{\"enabled\":false}");
       connection.focusApplied = connection.focusDesired;
@@ -596,7 +603,23 @@ void AgentBridge::OnRelayMessage(uint32_t connectionId, const std::string& text)
   } else if (cdpMethod == "Page.stopScreencast") {
     connection.screencast = false;
   }
-  Wake(connection);
+  // 要出帧的命令：截图、录屏、输入事件（命中测试与事件分发要用当前帧）
+  const bool needsRender = cdpMethod.rfind("Input.", 0) == 0 || cdpMethod == "Page.captureScreenshot" ||
+                           cdpMethod == "Page.startScreencast" || cdpMethod == "Page.screencastFrameAck" ||
+                           cdpMethod == "Page.printToPDF";
+  if (!config_.renderOnDemand || needsRender || connection.awake) {
+    Wake(connection);
+  } else {
+    host_.ResumeAgentTab(connection.tabId);  // 隐藏执行：挂起了就先恢复，但不显示
+    connection.lastActivity = GetTickCount64();
+    const bool awaitsPromise = (cdpMethod == "Runtime.evaluate" || cdpMethod == "Runtime.callFunctionOn") &&
+                               cdpParams["awaitPromise"].AsBool();
+    if (awaitsPromise) {
+      // 可能在等 rAF / 渲染：等 renderWaitMs 还没返回就唤醒
+      connection.renderWatch[idJson] = GetTickCount64();
+      EnsureIdleTimer();
+    }
+  }
   Execute(connection, idJson, session, cdpMethod, cdpParams.IsObject() ? json::Serialize(cdpParams) : "{}");
   if (cdpMethod == "Network.enable") {
     // 同一会话上按顺序执行：网址拦截紧跟在开启网络域之后生效（iframe 子会话各自开启，各自补上）
@@ -729,6 +752,7 @@ void AgentBridge::OnCommandDone(uint32_t connectionId, const std::string& idJson
   if (connection.pending > 0) {
     --connection.pending;
   }
+  connection.renderWatch.erase(idJson);
   connection.lastActivity = GetTickCount64();
   std::string body = resultJson ? ToUtf8(resultJson) : std::string();
   if (SUCCEEDED(result)) {
@@ -790,8 +814,14 @@ void AgentBridge::Wake(Connection& connection) {
     Internal(connection, connection.rootSession, "Emulation.setFocusEmulationEnabled", "{\"enabled\":true}");
     connection.focusApplied = true;
   }
+  EnsureIdleTimer();
+}
+
+void AgentBridge::EnsureIdleTimer() {
   if (!idleTimerRunning_) {
-    idleTimerRunning_ = SetTimer(hwnd_, kIdleTimer, 250, nullptr) != 0;
+    // 按需出帧要在 renderWaitMs 内发现卡住的 evaluate：间隔取两者较小者
+    const UINT interval = config_.renderOnDemand ? std::min<UINT>(100, config_.renderWaitMs) : 250;
+    idleTimerRunning_ = SetTimer(hwnd_, kIdleTimer, interval, nullptr) != 0;
   }
 }
 
@@ -813,6 +843,18 @@ void AgentBridge::OnIdleTimer() {
   bool anyAwake = false;
   for (auto& item : connections_) {
     Connection& connection = *item.second;
+    if (!connection.awake && !connection.renderWatch.empty()) {
+      bool stuck = false;
+      for (const auto& [id, since] : connection.renderWatch) {
+        stuck = stuck || now - since >= config_.renderWaitMs;
+      }
+      if (stuck) {
+        connection.renderWatch.clear();
+        Wake(connection);  // evaluate 在等渲染：出帧后 rAF 才会回调
+      } else {
+        anyAwake = true;  // 计时器还得接着跑
+      }
+    }
     if (!connection.awake) {
       continue;
     }
@@ -941,6 +983,7 @@ void AgentBridge::ReleaseSession(Connection& connection) {
   connection.focusApplied = false;
   connection.focusDesired = false;
   connection.screencast = false;
+  connection.renderWatch.clear();
   if (connection.attached && connection.webview && !connection.rootSession.empty()) {
     // 断开会话：Playwright 开过的域、注入的脚本、焦点模拟随会话一起清掉
     json::Value request = json::Value::MakeObject();
