@@ -48,6 +48,9 @@ struct AgentBridgeConfig {
   // 等待 Promise 的 evaluate 超过 renderWaitMs 仍未返回（可能在等 rAF）才唤醒
   bool renderOnDemand = false;
   DWORD renderWaitMs = 200;
+  // 隐藏后再过多久用 CDP 冻结页面（Page.setWebLifecycleState frozen：脚本、定时器停住，网络照收），
+  // 下一条命令前先解冻；0 = 不冻结。比 TrySuspend 便宜（不回收内存）
+  DWORD pageFreezeMs = 0;
   std::vector<std::string> blockedUrls;  // 智能体会话上的 Network.setBlockedURLs 模式（广告、统计）
 };
 
@@ -68,6 +71,8 @@ class AgentHost {
   virtual void SetAgentTabAwake(uint32_t tabId, bool awake) = 0;
   // 隐藏状态下执行命令前：若已挂起则恢复（不显示），并重新开始挂起计时
   virtual void ResumeAgentTab(uint32_t tabId) = 0;
+  // 用户正在主窗口里看这个标签（这时不冻结页面）
+  virtual bool IsAgentTabViewed(uint32_t tabId) = 0;
   virtual std::string AgentTabInfo(uint32_t tabId) = 0;  // chrome.tabs.Tab 风格的 JSON
 };
 
@@ -89,6 +94,8 @@ class AgentBridge {
   bool HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
   // 智能体标签被关掉或渲染进程退出
   void OnAgentTabGone(uint32_t tabId);
+  // 用户点开了这个智能体标签：冻结的页面先解冻
+  void OnAgentTabShown(uint32_t tabId);
   size_t ConnectionCount() const { return connections_.size(); }
   bool Yielding() const;  // 正在给 yieldTo 里的浏览器让行
 
@@ -118,6 +125,8 @@ class AgentBridge {
     bool focusApplied = false;
     bool screencast = false;    // 录屏期间一直出帧，不休眠
     std::map<std::string, ULONGLONG> renderWatch;  // 按需出帧：隐藏时发出、等待 Promise 的 evaluate（id → 发出时刻）
+    ULONGLONG sleptAt = 0;      // 进入休眠的时刻（冻结计时）
+    bool frozen = false;        // 已用 CDP 冻结
   };
   struct BrokerState;
 
@@ -139,6 +148,7 @@ class AgentBridge {
   void Wake(Connection& connection);
   void Sleep(Connection& connection);
   void EnsureIdleTimer();
+  void Thaw(Connection& connection);
   void OnIdleTimer();
   void OnCdpEvent(uint32_t connectionId, const std::string& method,
                   ICoreWebView2DevToolsProtocolEventReceivedEventArgs* args);

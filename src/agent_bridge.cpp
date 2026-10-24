@@ -230,6 +230,9 @@ AgentBridgeConfig LoadAgentBridgeConfig(const std::wstring& file, std::string* e
   config.blockAutoplay = root["blockAutoplay"].AsBool(config.blockAutoplay);
   config.blockImages = root["blockImages"].AsBool(config.blockImages);
   config.renderOnDemand = root["renderOnDemand"].AsBool(config.renderOnDemand);
+  if (root["pageFreezeMs"].IsNumber()) {
+    config.pageFreezeMs = root["pageFreezeMs"].AsNumber() <= 0 ? 0 : ClampMs(root["pageFreezeMs"].AsNumber(), 100, 3600000);
+  }
   if (root["renderWaitMs"].IsNumber()) {
     config.renderWaitMs = ClampMs(root["renderWaitMs"].AsNumber(), 50, 5000);
   }
@@ -607,6 +610,7 @@ void AgentBridge::OnRelayMessage(uint32_t connectionId, const std::string& text)
   const bool needsRender = cdpMethod.rfind("Input.", 0) == 0 || cdpMethod == "Page.captureScreenshot" ||
                            cdpMethod == "Page.startScreencast" || cdpMethod == "Page.screencastFrameAck" ||
                            cdpMethod == "Page.printToPDF";
+  Thaw(connection);  // 冻结的页面先解冻：同一会话上按顺序执行，解冻一定先于这条命令
   if (!config_.renderOnDemand || needsRender || connection.awake) {
     Wake(connection);
   } else {
@@ -754,6 +758,10 @@ void AgentBridge::OnCommandDone(uint32_t connectionId, const std::string& idJson
   }
   connection.renderWatch.erase(idJson);
   connection.lastActivity = GetTickCount64();
+  if (!connection.awake && connection.pending == 0 && config_.pageFreezeMs > 0) {
+    connection.sleptAt = connection.lastActivity;  // 按需出帧下隐藏执行完的命令：同样开始冻结计时
+    EnsureIdleTimer();
+  }
   std::string body = resultJson ? ToUtf8(resultJson) : std::string();
   if (SUCCEEDED(result)) {
     Reply(connection, idJson, body.empty() ? std::string("{}") : body);
@@ -802,8 +810,29 @@ void AgentBridge::Internal(Connection& connection, const std::string& session, c
 // ---------------------------------------------------------------------------
 // 唤醒与休眠
 
+void AgentBridge::Thaw(Connection& connection) {
+  connection.sleptAt = 0;
+  if (!connection.frozen) {
+    return;
+  }
+  connection.frozen = false;
+  if (connection.attached) {
+    Internal(connection, connection.rootSession, "Page.setWebLifecycleState", "{\"state\":\"active\"}");
+  }
+}
+
+void AgentBridge::OnAgentTabShown(uint32_t tabId) {
+  for (auto& item : connections_) {
+    Connection& connection = *item.second;
+    if (connection.tabId == tabId) {
+      Thaw(connection);
+    }
+  }
+}
+
 void AgentBridge::Wake(Connection& connection) {
   connection.lastActivity = GetTickCount64();
+  Thaw(connection);
   if (connection.awake) {
     return;
   }
@@ -836,6 +865,10 @@ void AgentBridge::Sleep(Connection& connection) {
     connection.focusApplied = false;
   }
   host_.SetAgentTabAwake(connection.tabId, false);
+  if (config_.pageFreezeMs > 0) {
+    connection.sleptAt = GetTickCount64();  // 冻结计时由空闲计时器接着看
+    EnsureIdleTimer();
+  }
 }
 
 void AgentBridge::OnIdleTimer() {
@@ -853,6 +886,18 @@ void AgentBridge::OnIdleTimer() {
         Wake(connection);  // evaluate 在等渲染：出帧后 rAF 才会回调
       } else {
         anyAwake = true;  // 计时器还得接着跑
+      }
+    }
+    if (!connection.awake && connection.sleptAt && !connection.frozen && connection.attached) {
+      if (host_.IsAgentTabViewed(connection.tabId)) {
+        connection.sleptAt = 0;  // 用户正看着：不冻结
+      } else if (connection.pending == 0 && now - connection.sleptAt >= config_.pageFreezeMs) {
+        // 隐藏且没有在途命令：冻住页面（脚本、定时器停住），下一条命令前解冻
+        Internal(connection, connection.rootSession, "Page.setWebLifecycleState", "{\"state\":\"frozen\"}");
+        connection.frozen = true;
+        connection.sleptAt = 0;
+      } else {
+        anyAwake = true;  // 还在等冻结时刻
       }
     }
     if (!connection.awake) {
@@ -984,6 +1029,7 @@ void AgentBridge::ReleaseSession(Connection& connection) {
   connection.focusDesired = false;
   connection.screencast = false;
   connection.renderWatch.clear();
+  Thaw(connection);  // 断开前解冻：页面回池后照常运行（长时间空闲由窗口挂起）
   if (connection.attached && connection.webview && !connection.rootSession.empty()) {
     // 断开会话：Playwright 开过的域、注入的脚本、焦点模拟随会话一起清掉
     json::Value request = json::Value::MakeObject();

@@ -35,6 +35,7 @@ class BrowserWindow : public AgentHost {
   void ReturnAgentTab(uint32_t tabId) override;
   void SetAgentTabAwake(uint32_t tabId, bool awake) override;
   void ResumeAgentTab(uint32_t tabId) override;
+  bool IsAgentTabViewed(uint32_t tabId) override;
   std::string AgentTabInfo(uint32_t tabId) override;
 
   static constexpr ULONG_PTR kCopyDataOpenUrl = 0x4A495355;  // 'JISU'：另一个实例转来的网址

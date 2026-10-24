@@ -1107,6 +1107,11 @@ void BrowserWindow::ReturnAgentTab(uint32_t tabId) {
   }
 }
 
+bool BrowserWindow::IsAgentTabViewed(uint32_t tabId) {
+  const Tab* tab = FindTab(tabId);
+  return tab && IsActive(*tab) && !IsIconic(hwnd_);
+}
+
 void BrowserWindow::ResumeAgentTab(uint32_t tabId) {
   Tab* tab = FindTab(tabId);
   if (!tab || !tab->agent) {
@@ -1387,6 +1392,9 @@ void BrowserWindow::PlaceTab(Tab& tab) {
     }
     if (tab.agent) {
       ApplyAgentScale(tab, false);
+      if (bridge_) {
+        bridge_->OnAgentTabShown(tab.id);  // 用户点开看：冻结的页面先解冻
+      }
     }
     tab.controller->put_Bounds(ContentRect());
     SetTabVisible(tab, true);
