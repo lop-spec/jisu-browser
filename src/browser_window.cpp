@@ -81,6 +81,8 @@ constexpr UINT kMenuImport = 1004;
 constexpr UINT kMenuDefaultBrowser = 1005;
 constexpr UINT kMenuAbout = 1006;
 constexpr UINT kMenuExtensions = 1007;
+constexpr UINT kMenuHistory = 1008;
+constexpr UINT kMenuMedia = 1009;
 constexpr UINT kMenuOpen = 2001;
 constexpr UINT kMenuOpenNewTab = 2002;
 constexpr UINT kMenuEdit = 2003;
@@ -113,6 +115,8 @@ enum Command : WPARAM {
   kCmdBookmarkManager,
   kCmdToggleFullscreen,
   kCmdExitFullscreen,
+  kCmdHistory,
+  kCmdMedia,
 };
 
 COREWEBVIEW2_COLOR ToWebViewColor(Rgb c) { return COREWEBVIEW2_COLOR{255, c.r, c.g, c.b}; }
@@ -145,6 +149,8 @@ bool IsWebUrl(const std::wstring& url) { return url.starts_with(L"http://") || u
 bool IsStarrable(const std::wstring& url) { return IsWebUrl(url) && !url.starts_with(kNtpOrigin); }
 
 std::wstring DisplayUrl(const std::wstring& url) {
+  if (url == L"https://newtab.jisu.example/history.html") return L"jisu://history";
+  if (url == L"https://newtab.jisu.example/player.html") return L"jisu://player";
   if (IsBookmarksPageUrl(url)) {
     return kBookmarksDisplay;
   }
@@ -188,6 +194,8 @@ std::wstring ToNavigableUrl(const std::wstring& input) {
   if (lower == kBookmarksDisplay || lower.starts_with(std::wstring(kBookmarksDisplay) + L"#")) {
     return kBookmarksUrl + input.substr(wcslen(kBookmarksDisplay));
   }
+  if (lower == L"jisu://history") return L"https://newtab.jisu.example/history.html";
+  if (lower == L"jisu://player") return L"https://newtab.jisu.example/player.html";
   if (lower == L"jisu://newtab") {
     return kNtpUrl;
   }
@@ -751,6 +759,7 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
           if (t->title.empty() && !IsNewTabPageUrl(t->url)) {
             t->title = t->url;
           }
+          if (!t->agent && !HistoryStore::SafeUrl(t->url).empty()) history_.Title(t->url, t->title);
           if (IsActive(*t)) {
             UpdateWindowTitle();
           }
@@ -761,12 +770,14 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
       &token);
   tab.webview->add_SourceChanged(
       Callback<ICoreWebView2SourceChangedEventHandler>(
-          [this, id](ICoreWebView2* sender, ICoreWebView2SourceChangedEventArgs*) -> HRESULT {
+          [this, id](ICoreWebView2* sender, ICoreWebView2SourceChangedEventArgs* args) -> HRESULT {
             if (Tab* t = FindTab(id)) {
               CoTaskString source;
               if (SUCCEEDED(sender->get_Source(source.Put()))) {
                 t->url = source.Str();
               }
+              BOOL newDocument = TRUE; args->get_IsNewDocument(&newDocument);
+              if (!newDocument) RecordVisit(*t);
               if (IsActive(*t)) {
                 UpdateAddressBar();
                 InvalidateChrome();  // 星标跟着网址变
@@ -800,8 +811,11 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
       &token);
   tab.webview->add_NavigationStarting(
       Callback<ICoreWebView2NavigationStartingEventHandler>(
-          [this, id](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs*) -> HRESULT {
+          [this, id](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
             if (Tab* t = FindTab(id)) {
+              CoTaskString uri; args->get_Uri(uri.Put());
+              if (t->media && uri.Str() != L"https://newtab.jisu.example/player.html") StopMedia(*t);
+              if (t->mediaTarget && uri.Str() != t->url) { if (auto* target=FindTab(t->mediaTarget)) target->mediaSource=0; t->mediaTarget=0; }
               if (fullscreenTab_ == id) ExitContentFullscreen();
               t->loading = true;
               InvalidateChrome();
@@ -812,8 +826,9 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
       &token);
   tab.webview->add_NavigationCompleted(
       Callback<ICoreWebView2NavigationCompletedEventHandler>(
-          [this, id](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs*) -> HRESULT {
+          [this, id](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs* args) -> HRESULT {
             if (Tab* t = FindTab(id)) {
+              BOOL success=FALSE; args->get_IsSuccess(&success); if(success) RecordVisit(*t);
               t->loading = false;
               Metrics& metrics = Metrics::Get();
               if (id == firstTabId_ && !metrics.Has("ntpNavCompleted")) {
@@ -942,7 +957,7 @@ void BrowserWindow::OnWebMessage(uint32_t id, ICoreWebView2WebMessageReceivedEve
   CoTaskString source;
   args->get_Source(source.Put());
   const std::wstring origin = source.Str();
-  if (Tab* tab = FindTab(id); tab && HandleTabLimitMessage(*tab, origin, ToUtf8(text.Str()))) return;
+  if (Tab* tab = FindTab(id); tab && (HandleMediaMessage(*tab, origin, ToUtf8(text.Str())) || HandleTabLimitMessage(*tab, origin, ToUtf8(text.Str())))) return;
   const bool ours = origin.starts_with(kNtpOrigin);
   if (options_.ntp == NtpSource::kFolder && !ours) {
     return;  // 只认新标签页自己的回报
@@ -999,6 +1014,7 @@ void BrowserWindow::PostToPage(Tab& tab, const std::string& json) {
 
 // 外壳自带页面（新标签页、书签管理页）的请求
 void BrowserWindow::OnPageMessage(Tab& tab, const std::string& text) {
+  if (HandleHistoryMessage(tab, text)) return;
   json::Value message;
   if (!json::Parse(text, message)) {
     return;
@@ -1470,6 +1486,8 @@ void BrowserWindow::CloseTab(size_t index) {
     return;
   }
   if (fullscreenTab_ == tabs_[index]->id) ExitContentFullscreen();
+  StopMedia(*tabs_[index]);
+  if(auto* target=FindTab(tabs_[index]->mediaTarget))target->mediaSource=0;
   std::unique_ptr<Tab> closing = std::move(tabs_[index]);
   tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(index));
   if (closing->leaseDone) {
@@ -1537,12 +1555,24 @@ void BrowserWindow::PlaceTab(Tab& tab) {
         bridge_->OnAgentTabShown(tab.id);  // 用户点开看：冻结的页面先解冻
       }
     }
-    tab.controller->put_Bounds(ContentRect());
-    SetTabVisible(tab, true);
+    auto bounds = ContentRect();
+    if (tab.mediaSurface) {
+      auto video = bounds;
+      const LONG controls = static_cast<LONG>((bounds.right < MulDiv(600,dpi_,96) ? 280 : 222) * (dpi_/96.0));
+      video.bottom = fullscreen_.Active() ? bounds.bottom : (std::max)(bounds.top+40L, bounds.bottom-controls);
+      SetWindowPos(tab.mediaSurface,nullptr,video.left,video.top,video.right-video.left,video.bottom-video.top,SWP_NOACTIVATE|SWP_NOZORDER|SWP_SHOWWINDOW);
+      bounds.top=video.bottom;
+      tab.controller->put_Bounds(bounds);
+      SetTabVisible(tab,!fullscreen_.Active());
+    } else {
+      tab.controller->put_Bounds(bounds);
+      SetTabVisible(tab, true);
+    }
     tab.suspended = false;  // 控件可见时内核自动恢复
     tab.suspending = false;
     return;
   }
+  if (tab.mediaSurface) ShowWindow(tab.mediaSurface,SW_HIDE);
   if (tab.agent) {
     HWND host = EnsureAgentHost();
     if (host && tab.parent != host) {
@@ -1676,6 +1706,13 @@ bool BrowserWindow::DispatchShortcut(UINT key, bool repeat) {
       case VK_TAB:
         command = shift ? kCmdPrevTab : kCmdNextTab;
         break;
+      case 'H':
+        command = kCmdHistory;
+        once = true;
+        break;
+      case 'M':
+        if (shift) { command = kCmdMedia; once = true; }
+        break;
       case 'L':
         command = kCmdFocusAddress;
         break;
@@ -1750,6 +1787,12 @@ bool BrowserWindow::DispatchShortcut(UINT key, bool repeat) {
 void BrowserWindow::ExecuteCommand(WPARAM command) {
   Tab* tab = ActiveTab();
   switch (command) {
+    case kCmdHistory:
+      OpenHistory();
+      break;
+    case kCmdMedia:
+      OpenMedia();
+      break;
     case kCmdToggleFullscreen:
       if (fullscreen_.Active()) ExitFullscreen();
       else { browserFullscreen_ = true; UpdateFullscreen(); }
@@ -2040,6 +2083,8 @@ void BrowserWindow::ShowMainMenu(POINT screen) {
   AppendMenuW(menu, MF_STRING | (settings_.bookmarkBar ? MF_CHECKED : 0), kMenuToggleBar, L"显示书签栏\tCtrl+Shift+B");
   AppendMenuW(menu, MF_STRING, kMenuImport, L"导入书签…");
   AppendMenuW(menu, MF_STRING, kMenuExtensions, L"扩展管理");
+  AppendMenuW(menu, MF_STRING, kMenuHistory, L"历史记录\tCtrl+H");
+  AppendMenuW(menu, MF_STRING, kMenuMedia, L"极速播放器\tCtrl+Shift+M");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, kMenuDefaultBrowser, L"设为默认浏览器…");
   AppendMenuW(menu, MF_STRING, kMenuAbout, L"关于极速浏览器");
@@ -2063,6 +2108,12 @@ void BrowserWindow::ShowMainMenu(POINT screen) {
       break;
     case kMenuExtensions:
       OpenExtensions();
+      break;
+    case kMenuHistory:
+      OpenHistory();
+      break;
+    case kMenuMedia:
+      OpenMedia();
       break;
     case kMenuDefaultBrowser:
       RegisterAsDefaultBrowser();
@@ -2504,6 +2555,7 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       return TRUE;
     case WM_TIMER:
+      if (wParam == 7) { PollMedia(); return 0; }
       if (wParam == kTimerTrayRetry) {
         KillTimer(hwnd_, kTimerTrayRetry);
         InstallTrayIcon();
@@ -2619,6 +2671,7 @@ void BrowserWindow::OnDestroy() {
   if(extensionTooltip_){DestroyWindow(extensionTooltip_);extensionTooltip_=nullptr;}
   bridge_.reset();  // 先断开所有智能体连接，再关控件
   for (auto& tab : tabs_) {
+    StopMedia(*tab);
     if (tab->leaseDone) {
       LeaseCallback done = std::move(tab->leaseDone);
       tab->leaseDone = nullptr;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(jisu_browser VERSION 0.2.3 LANGUAGES CXX RC)
+project(jisu_browser VERSION 0.3.0 LANGUAGES CXX RC)
 
 if(NOT MSVC)
   message(FATAL_ERROR "只支持 MSVC 构建（GitHub Actions windows-latest）")
@@ -51,6 +51,10 @@ add_executable(jisu-browser WIN32
   src/agent_bridge.cpp
   src/browser_window.cpp
   src/browser_profile.cpp
+  src/browser_history.cpp
+  src/browser_media.cpp
+  src/history.cpp
+  src/media_session.cpp
   src/extension_toolbar.cpp
   src/extension_popup.cpp
   src/favicons.cpp
@@ -87,7 +91,29 @@ target_link_options(jisu-browser PRIVATE
   /DELAYLOAD:winhttp.dll /DELAYLOAD:shell32.dll
   /DEBUG /OPT:REF /OPT:ICF)
 
+# Media engine is packaged by CI, never downloaded/loaded during ordinary browsing.
+set(MPV_DIR "" CACHE PATH "Verified mpv-dev package")
+if(NOT EXISTS "${MPV_DIR}/include/mpv/client.h" OR NOT EXISTS "${MPV_DIR}/libmpv-2.dll")
+  message(FATAL_ERROR "MPV_DIR must point at the pinned verified mpv-dev package")
+endif()
+add_executable(jisu-media WIN32 src/media_worker.cpp src/common.cpp src/json.cpp res/app.manifest)
+target_include_directories(jisu-media PRIVATE src "${MPV_DIR}/include")
+target_compile_definitions(jisu-media PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+target_compile_options(jisu-media PRIVATE /W4 /utf-8 /EHsc)
+target_link_libraries(jisu-media PRIVATE shell32 ole32 comdlg32 user32 gdi32 bcrypt)
+add_custom_command(TARGET jisu-media POST_BUILD
+  COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:jisu-media>/media"
+  COMMAND "${CMAKE_COMMAND}" -E copy "${MPV_DIR}/libmpv-2.dll" "$<TARGET_FILE_DIR:jisu-media>/media/libmpv-2.dll"
+  COMMAND "${CMAKE_COMMAND}" -E copy_directory "${MPV_DIR}/shaders" "$<TARGET_FILE_DIR:jisu-media>/media/shaders")
+
 enable_testing()
+add_test(NAME native-media-codecs-decode COMMAND jisu-media --selftest)
+set_tests_properties(native-media-codecs-decode PROPERTIES TIMEOUT 30)
+add_executable(history-test tests/history-test.cpp src/history.cpp src/common.cpp src/json.cpp)
+target_include_directories(history-test PRIVATE src)
+target_compile_definitions(history-test PRIVATE UNICODE _UNICODE NOMINMAX)
+target_compile_options(history-test PRIVATE /utf-8 /EHsc)
+add_test(NAME native-history-persistence COMMAND history-test)
 add_executable(fullscreen-window-test tests/fullscreen-window-test.cpp)
 target_include_directories(fullscreen-window-test PRIVATE src)
 target_compile_definitions(fullscreen-window-test PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)

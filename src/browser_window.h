@@ -8,6 +8,8 @@
 #include "graphics.h"
 #include "favicons.h"
 #include "fullscreen_window.h"
+#include "history.h"
+#include "media_session.h"
 #include "options.h"
 #include "palette.h"
 #include "tray_icon.h"
@@ -59,6 +61,16 @@ class BrowserWindow : public AgentHost {
     bool loading = false;
     bool canBack = false;
     bool canForward = false;
+    std::unique_ptr<MediaSession> media;
+    HWND mediaSurface = nullptr;
+    uint32_t mediaSource = 0;
+    uint32_t mediaTarget = 0;
+    std::string mediaPage;
+    std::string mediaOffer;
+    std::string mediaStatus;
+    ULONGLONG mediaSaved = 0;
+    bool mediaIntegration = false;
+    bool mediaAuto = false;
     HWND parent = nullptr;    // 控件当前的父窗口：主窗口或屏幕外宿主
     // 智能体标签
     bool agent = false;
@@ -123,6 +135,17 @@ class BrowserWindow : public AgentHost {
   bool HandleTabLimitMessage(Tab& tab, const std::wstring& source, const std::string& text);
   void SaveExtensionStatus();
   void OpenExtensions();
+  void OpenHistory();
+  void RecordVisit(Tab& tab);
+  bool HandleHistoryMessage(Tab& tab, const std::string& text);
+  void OpenMedia();
+  bool EnsureMedia(Tab& tab);
+  void CaptureMedia(Tab& source);
+  void StartMedia(uint32_t source, const std::string& offer);
+  bool HandleMediaMessage(Tab& tab, const std::wstring& origin, const std::string& text);
+  void PollMedia();
+  void SourceMediaAction(Tab& player, const std::string& action, int line = -1);
+  void StopMedia(Tab& tab);
   void RefreshExtensionToolbar();
   float LayoutExtensionToolbar(float right, float top, float scale);
   void DrawExtensionButton(const DRAWITEMSTRUCT& draw);
@@ -225,6 +248,7 @@ class BrowserWindow : public AgentHost {
 
   // 书签与设置：Create 时起后台线程读，首帧前等它读完
   BookmarkStore bookmarks_;
+  HistoryStore history_;
   mutable FaviconCache favicons_;
   bool profileConfigured_ = false;
   struct ExtensionEntry {

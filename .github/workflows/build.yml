@@ -36,9 +36,16 @@ jobs:
           Expand-Archive -Path $zip -DestinationPath $dir -Force
           "WEBVIEW2_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: 固定版本媒体引擎与着色器（下载并校验 SHA256）
+        shell: pwsh
+        run: |
+          $media = Join-Path $env:RUNNER_TEMP 'jisu-media-deps'
+          ./tools/prepare-media.ps1 -Destination $media
+          "MPV_DIR=$media" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: 配置
         shell: pwsh
-        run: cmake -S . -B build -A x64 "-DWEBVIEW2_DIR=$env:WEBVIEW2_DIR" "-DWEBVIEW2_VERSION=$env:WEBVIEW2_VERSION" "-DJISU_COMMIT=$env:GITHUB_SHA"
+        run: cmake -S . -B build -A x64 "-DWEBVIEW2_DIR=$env:WEBVIEW2_DIR" "-DWEBVIEW2_VERSION=$env:WEBVIEW2_VERSION" "-DJISU_COMMIT=$env:GITHUB_SHA" "-DMPV_DIR=$env:MPV_DIR"
 
       - name: 构建
         shell: pwsh
@@ -57,6 +64,7 @@ jobs:
             build/tab-chrome-evidence/
             build/Release/tab-chrome-render-test.exe
             build/Release/fullscreen-window-test.exe
+            build/Release/history-test.exe
           if-no-files-found: warn
           retention-days: 30
 
@@ -65,8 +73,12 @@ jobs:
         run: |
           $dist = Join-Path (Get-Location) "dist"
           New-Item -ItemType Directory -Force -Path "$dist/jisu-browser", "$dist/symbols" | Out-Null
-          Copy-Item build/Release/jisu-browser.exe "$dist/jisu-browser/"
+          Copy-Item build/Release/jisu-browser.exe, build/Release/jisu-media.exe "$dist/jisu-browser/"
           Copy-Item -Recurse build/Release/ntp "$dist/jisu-browser/ntp"
+          Copy-Item -Recurse build/Release/media "$dist/jisu-browser/media"
+          Copy-Item -Recurse "$env:MPV_DIR/licenses" "$dist/jisu-browser/media/licenses"
+          Copy-Item "$env:MPV_DIR/media-provenance.json" "$dist/jisu-browser/media/"
+          Copy-Item THIRD-PARTY.md "$dist/jisu-browser/"
           Copy-Item build/Release/jisu-browser.pdb "$dist/symbols/"
           $lines = Get-ChildItem -Recurse -File $dist | Sort-Object FullName | ForEach-Object {
             $rel = $_.FullName.Substring($dist.Length + 1).Replace('\', '/')
