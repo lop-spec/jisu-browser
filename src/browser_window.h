@@ -9,6 +9,7 @@
 #include "favicons.h"
 #include "options.h"
 #include "palette.h"
+#include "tray_icon.h"
 
 #include <WebView2.h>
 
@@ -84,6 +85,9 @@ class BrowserWindow : public AgentHost {
   LRESULT WndProc(UINT msg, WPARAM wParam, LPARAM lParam);
   void OnCreate();
   void OnDestroy();
+  void InstallTrayIcon();
+  void WriteTrayState();
+  void ExecuteTrayCommand(UINT command);
   void ApplyWindowTheme();
   void OnThemeChanged();
   void UpdateEditFont();
@@ -192,6 +196,8 @@ class BrowserWindow : public AgentHost {
   HWND hwnd_ = nullptr;
   HWND edit_ = nullptr;
   HWND agentHost_ = nullptr;
+  TrayIcon tray_;
+  UINT trayInstallAttempts_ = 0;
   HFONT editFont_ = nullptr;
   HBRUSH omniboxBrush_ = nullptr;
   int editHeightPx_ = 20;

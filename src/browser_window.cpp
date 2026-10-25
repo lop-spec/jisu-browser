@@ -52,11 +52,13 @@ constexpr wchar_t kProfileProp[] = L"JisuBrowser.Profile";
 constexpr UINT kMsgCommand = WM_APP + 1;
 constexpr UINT kMsgFavicon = WM_APP + 2;
 constexpr UINT kMsgTabLimit = WM_APP + 3;
+constexpr UINT kMsgInstallTray = WM_APP + 4;
 constexpr UINT_PTR kTimerSpare = 1;
 constexpr UINT_PTR kTimerMetrics = 2;
 constexpr UINT_PTR kTimerWatchdog = 3;
 constexpr UINT_PTR kTimerPreheat = 4;
 constexpr UINT_PTR kTimerAgentFreeze = 5;
+constexpr UINT_PTR kTimerTrayRetry = 6;
 
 // 智能体标签里媒体不自动播放：play() 像被浏览器自动播放策略拒绝一样返回 NotAllowedError，autoplay 属性起播的立即暂停。
 // 只装在智能体标签上；window.__jisuAllowMedia = true 可放行
@@ -395,6 +397,8 @@ void BrowserWindow::ShowFirstFrame(int showCmd) {
   RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN);
   metrics.Mark("firstPaint");
   warmup_.NotifyFirstPaint();
+  // Register after the first frame, never in the latency-sensitive startup path.
+  if (options_.metricsPath.empty()) PostMessageW(hwnd_, kMsgInstallTray, 0, 0);
 
   if (!options_.noActivate) {
     SetFocus(edit_);
@@ -2006,6 +2010,8 @@ void BrowserWindow::ShowMainMenu(POINT screen) {
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, kMenuDefaultBrowser, L"设为默认浏览器…");
   AppendMenuW(menu, MF_STRING, kMenuAbout, L"关于极速浏览器");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING, TrayIcon::kExit, L"彻底退出");
   const UINT command = static_cast<UINT>(TrackPopupMenuEx(
       menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTALIGN | TPM_TOPALIGN, screen.x, screen.y, hwnd_, nullptr));
   DestroyMenu(menu);
@@ -2030,6 +2036,9 @@ void BrowserWindow::ShowMainMenu(POINT screen) {
       break;
     case kMenuAbout:
       ShowAbout();
+      break;
+    case TrayIcon::kExit:
+      ExecuteTrayCommand(TrayIcon::kExit);
       break;
     default:
       break;
@@ -2238,6 +2247,11 @@ LRESULT CALLBACK BrowserWindow::WndProcThunk(HWND hwnd, UINT msg, WPARAM wParam,
 }
 
 LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
+  if (tray_.HandleExplorerRestart(msg)) {
+    trayInstallAttempts_ = 0;
+    InstallTrayIcon();
+    return 0;
+  }
   if (bridge_ && bridge_->HandleMessage(msg, wParam, lParam)) {
     return 0;
   }
@@ -2268,6 +2282,12 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       if (p.y >= 0 && p.y < layout_.tabStripHeight * layout_.scale && HitTest(p).kind == ChromeHit::kNone) return HTCAPTION;
       return HTCLIENT;
     }
+    case kMsgInstallTray:
+      InstallTrayIcon();
+      return 0;
+    case TrayIcon::kCallback:
+      ExecuteTrayCommand(tray_.HandleCallback(wParam, lParam));
+      return 0;
     case kMsgTabLimit:
       EnforceTabLimit();
       return 0;
@@ -2401,6 +2421,10 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       if (LOWORD(wParam) == WA_INACTIVE && reinterpret_cast<HWND>(lParam) != extensionPopupWindow_) CloseExtensionPopup();
       break;
     case WM_COMMAND:
+      if (LOWORD(wParam) >= TrayIcon::kOpen && LOWORD(wParam) <= TrayIcon::kExit) {
+        ExecuteTrayCommand(LOWORD(wParam));
+        return 0;
+      }
       if (HIWORD(wParam) == BN_CLICKED && HandleExtensionCommand(LOWORD(wParam))) return 0;
       if (LOWORD(wParam) == kAddressBarId) {
         switch (HIWORD(wParam)) {
@@ -2432,6 +2456,11 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       return TRUE;
     case WM_TIMER:
+      if (wParam == kTimerTrayRetry) {
+        KillTimer(hwnd_, kTimerTrayRetry);
+        InstallTrayIcon();
+        return 0;
+      }
       if (wParam == kTimerSpare) {
         KillTimer(hwnd_, kTimerSpare);
         CreateSpare();
@@ -2492,7 +2521,47 @@ void BrowserWindow::OnCreate() {
   UpdateWindowTitle();
 }
 
+void BrowserWindow::InstallTrayIcon() {
+  if (destroyed_ || options_.preheatSeconds > 0 || !options_.metricsPath.empty()) return;
+  ++trayInstallAttempts_;
+  const std::wstring version = FromUtf8(JISU_VERSION) + L" · " + FromUtf8(std::string(JISU_COMMIT).substr(0, 7));
+  if (!tray_.Install(hwnd_, instance_, version) && trayInstallAttempts_ < 6) {
+    SetTimer(hwnd_, kTimerTrayRetry, 2000, nullptr);
+  }
+  SetPropW(hwnd_, L"JisuBrowser.TrayRegistered", reinterpret_cast<HANDLE>(static_cast<uintptr_t>(tray_.Registered())));
+  WriteTrayState();
+}
+
+void BrowserWindow::WriteTrayState() {
+  if (!options_.defaultUserData || !options_.metricsPath.empty() || options_.preheatSeconds > 0) return;
+  const std::wstring file = ParentDirectory(profileDir_) + L"\\tray-status.json";
+  std::string state = "{\"pid\":" + std::to_string(GetCurrentProcessId()) +
+      ",\"hwnd\":" + std::to_string(reinterpret_cast<uintptr_t>(hwnd_)) +
+      ",\"registered\":" + (tray_.Registered() ? "true" : "false") +
+      ",\"exited\":" + (destroyed_ ? "true" : "false") + ",\"version\":";
+  json::AppendQuoted(state, JISU_VERSION);
+  state += ",\"commit\":";
+  json::AppendQuoted(state, JISU_COMMIT);
+  state += "}";
+  WriteFileAtomic(file, state);
+}
+
+void BrowserWindow::ExecuteTrayCommand(UINT command) {
+  if (command == TrayIcon::kExit) {
+    // Same normal teardown as the window X: bridge, popups, all tabs and spare
+    // WebViews are closed; no invisible shell is left behind.
+    tray_.SetExiting();
+    PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+  } else if (command == TrayIcon::kOpen || command == TrayIcon::kNewTab) {
+    if (command == TrayIcon::kNewTab) NewTab(L"");
+    ShowWindow(hwnd_, IsIconic(hwnd_) ? SW_RESTORE : SW_SHOW);
+    SetForegroundWindow(hwnd_);
+  }
+}
+
 void BrowserWindow::OnDestroy() {
+  tray_.SetExiting();
+  KillTimer(hwnd_, kTimerTrayRetry);
   WriteMetrics(true);  // 测量中被关掉也留下已有的时间线（已写过则不重复）
   destroyed_ = true;
   alive_.reset();
@@ -2522,6 +2591,9 @@ void BrowserWindow::OnDestroy() {
     DestroyWindow(agentHost_);
     agentHost_ = nullptr;
   }
+  tray_.Remove();
+  RemovePropW(hwnd_, L"JisuBrowser.TrayRegistered");
+  WriteTrayState();
   RemovePropW(hwnd_, kProfileProp);
   PostQuitMessage(0);
 }

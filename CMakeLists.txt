@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(jisu_browser VERSION 0.2.0 LANGUAGES CXX RC)
+project(jisu_browser VERSION 0.2.1 LANGUAGES CXX RC)
 
 if(NOT MSVC)
   message(FATAL_ERROR "只支持 MSVC 构建（GitHub Actions windows-latest）")
@@ -43,6 +43,7 @@ add_executable(jisu-browser WIN32
   src/options.cpp
   src/metrics.cpp
   src/palette.cpp
+  src/tray_icon.cpp
   src/graphics.cpp
   src/json.cpp
   src/net.cpp
@@ -87,6 +88,14 @@ target_link_options(jisu-browser PRIVATE
   /DEBUG /OPT:REF /OPT:ICF)
 
 enable_testing()
+add_test(NAME native-atomic-exe-swap-ps51 COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/atomic-exe-swap-test.ps1")
+add_executable(tray-icon-test tests/tray-icon-test.cpp src/tray_icon.cpp)
+target_include_directories(tray-icon-test PRIVATE src)
+target_compile_definitions(tray-icon-test PRIVATE UNICODE _UNICODE NOMINMAX)
+target_compile_options(tray-icon-test PRIVATE /utf-8)
+target_link_libraries(tray-icon-test PRIVATE shell32 user32)
+add_test(NAME native-tray-menu-lifecycle COMMAND tray-icon-test)
+
 add_executable(tab-policy-test tests/tab-policy-test.cpp)
 target_include_directories(tab-policy-test PRIVATE src)
 add_test(NAME native-tab-policy COMMAND tab-policy-test)
