@@ -120,6 +120,8 @@ struct ChromeState {
 class ChromePainter {
  public:
   HRESULT CreateTarget(const GraphicsWarmup& graphics, HWND hwnd, RenderTargetKind kind, UINT dpi);
+  // The identical paint path on an off-screen bitmap (native visual regression tests).
+  HRESULT CreateBitmapTarget(const GraphicsWarmup& graphics, IWICBitmap* bitmap, UINT dpi);
   void Resize(UINT width, UINT height);
   void SetDpi(UINT dpi);
   void Paint(const Palette& palette, const ChromeLayout& layout, const ChromeState& state);
@@ -158,7 +160,7 @@ class ChromePainter {
   ComPtr<ID2D1PathGeometry> activeTabShape_;
   float activeTabWidth_ = 0;
   float activeTabHeight_ = 0;
-  ComPtr<ID2D1HwndRenderTarget> target_;
+  ComPtr<ID2D1RenderTarget> target_;
   ComPtr<ID2D1SolidColorBrush> brush_;
   ComPtr<ID2D1StrokeStyle> roundStroke_;
   ComPtr<ID2D1PathGeometry> reloadArc_;

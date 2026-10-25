@@ -180,6 +180,21 @@ HRESULT ChromePainter::CreateTarget(const GraphicsWarmup& graphics, HWND hwnd, R
   return EnsureTarget();
 }
 
+HRESULT ChromePainter::CreateBitmapTarget(const GraphicsWarmup& graphics, IWICBitmap* bitmap, UINT dpi) {
+  factory_ = graphics.d2d;
+  dwrite_ = graphics.dwrite;
+  tabTitle_ = graphics.tabTitle;
+  bookmarkTitle_ = graphics.bookmarkTitle;
+  message_ = graphics.message;
+  dpi_ = dpi;
+  const auto properties = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+      D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+      static_cast<float>(dpi), static_cast<float>(dpi));
+  HRESULT hr = factory_->CreateWicBitmapRenderTarget(bitmap, properties, target_.ReleaseAndGetAddressOf());
+  if (SUCCEEDED(hr)) hr = target_->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black), brush_.ReleaseAndGetAddressOf());
+  return hr;
+}
+
 HRESULT ChromePainter::EnsureTarget() {
   if (target_) {
     return S_OK;
@@ -198,8 +213,10 @@ HRESULT ChromePainter::EnsureTarget() {
       hwnd_,
       D2D1::SizeU(static_cast<UINT32>(client.right - client.left), static_cast<UINT32>(client.bottom - client.top)),
       D2D1_PRESENT_OPTIONS_IMMEDIATELY);
-  HRESULT hr = factory_->CreateHwndRenderTarget(properties, hwndProperties, target_.ReleaseAndGetAddressOf());
+  ComPtr<ID2D1HwndRenderTarget> hwndTarget;
+  HRESULT hr = factory_->CreateHwndRenderTarget(properties, hwndProperties, hwndTarget.GetAddressOf());
   if (SUCCEEDED(hr)) {
+    target_ = hwndTarget;
     hr = target_->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black), brush_.ReleaseAndGetAddressOf());
   }
   if (FAILED(hr)) {
@@ -300,8 +317,9 @@ HRESULT ChromePainter::EnsureGeometry() {
 }
 
 void ChromePainter::Resize(UINT width, UINT height) {
-  if (target_) {
-    target_->Resize(D2D1::SizeU(width, height));
+  ComPtr<ID2D1HwndRenderTarget> hwndTarget;
+  if (target_ && SUCCEEDED(target_.As(&hwndTarget))) {
+    hwndTarget->Resize(D2D1::SizeU(width, height));
   }
 }
 

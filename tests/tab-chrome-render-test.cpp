@@ -1,7 +1,6 @@
-// Exercises the production Direct2D chrome renderer only. No WebView, browser,
-// profile, extension, remote debugging or website login data is opened.
+// Production Direct2D paint path on WIC bitmaps. No browser, WebView, HWND,
+// profile, extension or website login data is opened; no desktop activation.
 #include "graphics.h"
-#include <dwmapi.h>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -11,12 +10,7 @@ using namespace jisu;
 namespace {
 void Check(bool ok, const char* error) { if (!ok) throw std::runtime_error(error); }
 void Hr(HRESULT hr) { Check(SUCCEEDED(hr), "COM/render operation failed"); }
-
-void SavePng(HBITMAP bitmap, const std::filesystem::path& file) {
-  ComPtr<IWICImagingFactory> wic;
-  Hr(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(wic.GetAddressOf())));
-  ComPtr<IWICBitmap> source;
-  Hr(wic->CreateBitmapFromHBITMAP(bitmap, nullptr, WICBitmapIgnoreAlpha, source.GetAddressOf()));
+void SavePng(IWICImagingFactory* wic, IWICBitmap* bitmap, const std::filesystem::path& file) {
   ComPtr<IWICStream> stream;
   Hr(wic->CreateStream(stream.GetAddressOf()));
   Hr(stream->InitializeFromFilename(file.c_str(), GENERIC_WRITE));
@@ -27,24 +21,23 @@ void SavePng(HBITMAP bitmap, const std::filesystem::path& file) {
   Hr(encoder->CreateNewFrame(frame.GetAddressOf(), nullptr));
   Hr(frame->Initialize(nullptr));
   UINT width = 0, height = 0;
-  Hr(source->GetSize(&width, &height));
+  Hr(bitmap->GetSize(&width, &height));
   Hr(frame->SetSize(width, height));
-  WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
+  WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
   Hr(frame->SetPixelFormat(&format));
-  Hr(frame->WriteSource(source.Get(), nullptr));
+  Hr(frame->WriteSource(bitmap, nullptr));
   Hr(frame->Commit());
   Hr(encoder->Commit());
 }
-
 void Render(const GraphicsWarmup& graphics, const Palette& palette, const std::filesystem::path& out,
             const wchar_t* name, float width, UINT dpi, size_t count, size_t active, ChromeHit hover = {}) {
   const float scale = static_cast<float>(dpi) / 96.0f;
-  const int pxWidth = static_cast<int>(width * scale);
-  const int pxHeight = static_cast<int>(768 * scale);
-  HWND window = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, L"JisuTabChromeTest", L"Native tab render test",
-      WS_POPUP, -30000, -30000, pxWidth, pxHeight, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
-  Check(window != nullptr, "Test HWND creation failed");
-  ShowWindow(window, SW_SHOWNOACTIVATE);
+  const UINT pxWidth = static_cast<UINT>(width * scale);
+  const UINT pxHeight = static_cast<UINT>(100 * scale);
+  ComPtr<IWICImagingFactory> wic;
+  Hr(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(wic.GetAddressOf())));
+  ComPtr<IWICBitmap> bitmap;
+  Hr(wic->CreateBitmap(pxWidth, pxHeight, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, bitmap.GetAddressOf()));
   ChromeLayout layout;
   layout.width = width;
   layout.scale = scale;
@@ -64,60 +57,36 @@ void Render(const GraphicsWarmup& graphics, const Palette& palette, const std::f
   layout.menu = D2D1::RectF(width-40, 54, width-8, 86);
   ChromeState state;
   state.hover = hover;
-  for (size_t i = 0; i < count; ++i) {
-    state.tabs.push_back(ChromeTab{i == 0 ? L"登录QQ邮箱" : L"新标签页", i == active});
-  }
-  {
-    ChromePainter painter;
-    Hr(painter.CreateTarget(graphics, window, RenderTargetKind::kSoftware, dpi));
-    painter.Paint(palette, layout, state);
-    DwmFlush();
-    HDC dc = GetDC(window);
-    HDC memory = CreateCompatibleDC(dc);
-    HBITMAP bitmap = CreateCompatibleBitmap(dc, pxWidth, static_cast<int>(100 * scale));
-    const HGDIOBJ old = SelectObject(memory, bitmap);
-    Check(PrintWindow(window, memory, 2) != FALSE, "PrintWindow failed");
-    const COLORREF sample = GetPixel(memory, static_cast<int>(5*scale), static_cast<int>(3*scale));
-    Check(std::abs(static_cast<int>(GetRValue(sample)) - palette.frame.r) < 3 &&
-          std::abs(static_cast<int>(GetGValue(sample)) - palette.frame.g) < 3 &&
-          std::abs(static_cast<int>(GetBValue(sample)) - palette.frame.b) < 3, "Captured frame color mismatch");
-    // The active shoulder must be rounded, its body white/dark-toolbar, and its
-    // concave foot must fill into the toolbar without a seam.
-    const auto& r = layout.tabs[active];
-    auto IsColor = [&](float x, float y, Rgb color) {
-      const COLORREF pixel = GetPixel(memory, static_cast<int>(x*scale), static_cast<int>(y*scale));
-      return std::abs(static_cast<int>(GetRValue(pixel))-color.r) < 3 &&
-             std::abs(static_cast<int>(GetGValue(pixel))-color.g) < 3 &&
-             std::abs(static_cast<int>(GetBValue(pixel))-color.b) < 3;
-    };
-    Check(IsColor(r.left + 1, 6, palette.frame), "Rounded shoulder missing");
-    Check(IsColor((r.left+r.right)*0.5f, 8, palette.toolbar), "Selected tab body missing");
-    Check(IsColor(r.right + 3, 49, palette.toolbar), "Concave foot missing");
-    Check(IsColor((r.left+r.right)*0.5f, 50, palette.toolbar), "Tab/toolbar seam detected");
-    SavePng(bitmap, out / name);
-    SelectObject(memory, old);
-    DeleteObject(bitmap);
-    DeleteDC(memory);
-    ReleaseDC(window, dc);
-  }
-  DestroyWindow(window);
+  for (size_t i = 0; i < count; ++i) state.tabs.push_back(ChromeTab{i == 0 ? L"登录QQ邮箱" : L"新标签页", i == active});
+  ChromePainter painter;
+  Hr(painter.CreateBitmapTarget(graphics, bitmap.Get(), dpi));
+  painter.Paint(palette, layout, state);
+  SavePng(wic.Get(), bitmap.Get(), out / name);
+  auto IsColor = [&](float x, float y, Rgb color) {
+    const WICRect rect{static_cast<INT>(x*scale), static_cast<INT>(y*scale), 1, 1};
+    BYTE pixel[4]{};
+    Hr(bitmap->CopyPixels(&rect, 4, 4, pixel));
+    return std::abs(static_cast<int>(pixel[2])-color.r) < 3 &&
+           std::abs(static_cast<int>(pixel[1])-color.g) < 3 &&
+           std::abs(static_cast<int>(pixel[0])-color.b) < 3;
+  };
+  const auto& r = layout.tabs[active];
+  Check(IsColor(5, 3, palette.frame), "Frame color mismatch");
+  Check(IsColor(r.left + 1, 6, palette.frame), "Rounded shoulder missing");
+  Check(IsColor((r.left+r.right)*0.5f, 8, palette.toolbar), "Selected tab body missing");
+  Check(IsColor(r.right + 3, 49, palette.toolbar), "Concave foot missing");
+  Check(IsColor((r.left+r.right)*0.5f, 50, palette.toolbar), "Tab/toolbar seam detected");
 }
 }  // namespace
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int) {
   std::wstring directory = commandLine;
   if (directory.size() >= 2 && directory.front() == L'"' && directory.back() == L'"') directory = directory.substr(1, directory.size()-2);
   const std::filesystem::path out = directory.empty() ? L"tab-chrome-evidence" : directory;
   std::filesystem::create_directories(out);
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-  SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   int result = 0;
   try {
-    WNDCLASSW cls{};
-    cls.lpfnWndProc = DefWindowProcW;
-    cls.hInstance = instance;
-    cls.lpszClassName = L"JisuTabChromeTest";
-    Check(RegisterClassW(&cls) != 0, "Test class registration failed");
     Options options;
     options.warmD3D = 0;
     GraphicsWarmup graphics;
@@ -132,7 +101,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     Render(graphics, light, out, L"narrow-390.png", 390, 96, 3, 1);
     Render(graphics, light, out, L"crowded-1024.png", 1024, 96, 20, 4);
     Render(graphics, dark, out, L"dark-1024.png", 1024, 96, 3, 2);
-    std::ofstream(out / "result.txt") << "PASS actual production renderer: 220 DIP tabs; rounded shoulders; concave feet; no toolbar seam; light/dark; hover; 100/125 percent DPI; 390/1024 widths; crowded strip. No WebView or profile opened.\n";
+    std::ofstream(out / "result.txt") << "PASS production Direct2D renderer: 220 DIP tabs; rounded shoulders; concave feet; no toolbar seam; light/dark; hover; 100/125 percent DPI; 390/1024 widths; crowded strip. No browser/profile opened.\n";
   } catch (const std::exception& e) {
     std::ofstream(out / "result.txt") << "FAIL " << e.what() << '\n';
     result = 1;

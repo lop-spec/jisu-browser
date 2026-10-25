@@ -109,8 +109,8 @@ target_include_directories(tab-strip-test PRIVATE src)
 target_compile_definitions(tab-strip-test PRIVATE UNICODE _UNICODE NOMINMAX)
 add_test(NAME native-tab-strip-layout COMMAND tab-strip-test)
 
-# Same renderer as the browser, but no WebView/profile is created. Off-screen,
-# no-activate HWNDs exercise actual Direct2D output at desktop/narrow/DPI sizes.
+# Same renderer as the browser, but no WebView/profile/window is created.
+# WIC targets exercise actual Direct2D output at desktop/narrow/DPI sizes.
 add_executable(tab-chrome-render-test WIN32 tests/tab-chrome-render-test.cpp src/graphics.cpp src/palette.cpp src/metrics.cpp src/common.cpp)
 target_include_directories(tab-chrome-render-test PRIVATE src)
 target_compile_definitions(tab-chrome-render-test PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)
