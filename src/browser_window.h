@@ -144,6 +144,7 @@ class BrowserWindow : public AgentHost {
   void StartMedia(uint32_t source, const std::string& offer);
   bool HandleMediaMessage(Tab& tab, const std::wstring& origin, const std::string& text);
   void PollMedia();
+  void PostMediaShortcut(const std::string& shortcut);
   void SourceMediaAction(Tab& player, const std::string& action, int line = -1);
   void StopMedia(Tab& tab);
   void RefreshExtensionToolbar();

@@ -104,7 +104,8 @@ void BrowserWindow::PollMedia(){
             const auto script=L"window.dispatchEvent(new CustomEvent('jisu-native-progress',{detail:"+std::to_wstring(time)+L"}));";source->webview->ExecuteScript(script.c_str(),nullptr);
           }
         }
-      }else if(type=="player.fullscreen"&&IsActive(tab)){if(fullscreen_.Active())ExitFullscreen();else{browserFullscreen_=true;UpdateFullscreen();}PlaceTab(tab);}
+      }else if(type=="player.shortcut"&&IsActive(tab))PostMediaShortcut(event["command"].AsString());
+      else if(type=="player.fullscreen"&&IsActive(tab)){if(fullscreen_.Active())ExitFullscreen();else{browserFullscreen_=true;UpdateFullscreen();}PlaceTab(tab);}
       else if(type=="player.escape"&&IsActive(tab)){ExitFullscreen();PlaceTab(tab);}
       else if(type=="player.ended"&&tab.mediaAuto)SourceMediaAction(tab,"next");
       else if(type=="player.error"&&event["fatal"].AsBool()&&tab.mediaIntegration){if(auto* source=FindTab(tab.mediaSource);source&&source->webview&&ToUtf8(source->url)==tab.mediaPage)source->webview->ExecuteScript(L"window.dispatchEvent(new Event('jisu-native-error'));",nullptr);}

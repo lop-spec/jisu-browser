@@ -1786,6 +1786,16 @@ bool BrowserWindow::DispatchShortcut(UINT key, bool repeat) {
   return true;
 }
 
+void BrowserWindow::PostMediaShortcut(const std::string& shortcut) {
+  WPARAM command=kCmdNone;
+  if(shortcut=="history")command=kCmdHistory;else if(shortcut=="address")command=kCmdFocusAddress;
+  else if(shortcut=="new-tab")command=kCmdNewTab;else if(shortcut=="close-tab")command=kCmdCloseTab;
+  else if(shortcut=="next-tab")command=kCmdNextTab;else if(shortcut=="prev-tab")command=kCmdPrevTab;
+  else if(shortcut=="reload")command=kCmdReload;else if(shortcut=="bookmark")command=kCmdToggleBookmark;
+  else if(shortcut=="media")command=kCmdMedia;
+  if(command!=kCmdNone)PostMessageW(hwnd_,kMsgCommand,command,0);
+}
+
 void BrowserWindow::ExecuteCommand(WPARAM command) {
   Tab* tab = ActiveTab();
   switch (command) {

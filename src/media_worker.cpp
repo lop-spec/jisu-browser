@@ -176,6 +176,10 @@ LRESULT CALLBACK Proc(HWND window,UINT message,WPARAM w,LPARAM l){
   if(message==WM_LBUTTONDOWN){SetFocus(window);Command({"cycle","pause"});return 0;}
   if(message==WM_LBUTTONDBLCLK){if(mini){if(miniFullscreen.Active())miniFullscreen.Exit(mini);else miniFullscreen.Enter(mini);}else Event("player.fullscreen");return 0;}
   if(message==WM_KEYDOWN){
+    const bool ctrl=GetKeyState(VK_CONTROL)<0,alt=GetKeyState(VK_MENU)<0,shift=GetKeyState(VK_SHIFT)<0;const char* shortcut=nullptr;
+    if(ctrl&&!alt){if(w=='H')shortcut="history";else if(w=='L')shortcut="address";else if(w=='T')shortcut="new-tab";else if(w=='W')shortcut="close-tab";else if(w==VK_TAB)shortcut=shift?"prev-tab":"next-tab";else if(w=='R')shortcut="reload";else if(w=='D')shortcut="bookmark";else if(w=='M'&&shift)shortcut="media";}
+    else if((alt&&w=='D')||w==VK_F6)shortcut="address";
+    if(shortcut){if(!(l&(1LL<<30))){auto event=json::Value::MakeObject();event.Set("type",json::Value::String("player.shortcut"));event.Set("command",json::Value::String(shortcut));Emit(event);}return 0;}
     if(w==VK_SPACE)Command({"cycle","pause"});else if(w==VK_LEFT)Command({"seek","-10","relative"});else if(w==VK_RIGHT)Command({"seek","10","relative"});
     else if(w==VK_ESCAPE){if(mini&&miniFullscreen.Active())miniFullscreen.Exit(mini);else Event("player.escape");}else if(w=='F'||w==VK_F11){if(mini){if(miniFullscreen.Active())miniFullscreen.Exit(mini);else miniFullscreen.Enter(mini);}else Event("player.fullscreen");}else if(w==VK_OEM_PERIOD)Command({"frame-step"});return 0;
   }
