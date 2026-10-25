@@ -23,7 +23,8 @@ HICON ProgramIcon(const std::wstring& folder, UINT dpi) {
   if (icons.IsNull()) icons = manifest["icons"];
   std::wstring relative;
   if (icons.IsString()) relative = FromUtf8(icons.AsString());
-  else for (const auto* size : {"32", "48", "24", "16", "128"}) if (icons[size].IsString()) { relative = FromUtf8(icons[size].AsString()); break; }
+  else for (const auto* size : {"32", "38", "48", "24", "19", "16", "128"}) if (icons[size].IsString()) { relative = FromUtf8(icons[size].AsString()); break; }
+  if(relative.empty()) for(const auto& [size,value]:icons.Members()) if(value.IsString()){relative=FromUtf8(value.AsString());break;}
   const auto file = ExtensionFile(folder, relative);
   if (file.empty()) return nullptr;
   const int size = std::clamp(MulDiv(20, static_cast<int>(dpi), 96), 16, 64);
@@ -61,7 +62,7 @@ void BrowserWindow::RefreshExtensionToolbar() {
   if (destroyed_ || !hwnd_) return;
   if (!extensionsButton_) {
     extensionsButton_ = CreateWindowExW(0, L"BUTTON", L"扩展程序", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-      0,0,0,0,hwnd_,reinterpret_cast<HMENU>(kExtensionsButton),instance_,nullptr);
+      0,0,0,0,hwnd_,reinterpret_cast<HMENU>(static_cast<INT_PTR>(kExtensionsButton)),instance_,nullptr);
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES}; InitCommonControlsEx(&controls);
     extensionTooltip_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE, TOOLTIPS_CLASSW, nullptr,
       WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,hwnd_,nullptr,instance_,nullptr);
@@ -103,7 +104,16 @@ void BrowserWindow::DrawExtensionButton(const DRAWITEMSTRUCT& d) {
     fallback=e.nativeTabLimit?L"×":e.name.find(L"4K")!=std::wstring::npos?L"4K":L"验";
   }
   const int size=MulDiv(20,static_cast<int>(dpi_),96);
-  if(icon)DrawIconEx(d.hDC,(d.rcItem.left+d.rcItem.right-size)/2,(d.rcItem.top+d.rcItem.bottom-size)/2,icon,size,size,0,nullptr,DI_NORMAL);
+  if(d.CtlID==kExtensionsButton) {
+    const int cx=(d.rcItem.left+d.rcItem.right)/2,cy=(d.rcItem.top+d.rcItem.bottom)/2;
+    const int a=MulDiv(6,static_cast<int>(dpi_),96),r=MulDiv(3,static_cast<int>(dpi_),96);
+    HPEN pen=CreatePen(PS_SOLID,std::max(1,MulDiv(1,static_cast<int>(dpi_),96)),ToColorRef(palette_.text));
+    HBRUSH fill=CreateSolidBrush(ToColorRef(palette_.text));auto oldPen=SelectObject(d.hDC,pen);auto oldBrush=SelectObject(d.hDC,fill);
+    RoundRect(d.hDC,cx-a,cy-a,cx+a,cy+a,2,2);Ellipse(d.hDC,cx-r,cy-a-r,cx+r,cy-a+r);Ellipse(d.hDC,cx+a-r,cy-r,cx+a+r,cy+r);
+    HBRUSH cut=CreateSolidBrush(ToColorRef(down?palette_.buttonHover:palette_.toolbar));SelectObject(d.hDC,cut);SelectObject(d.hDC,GetStockObject(NULL_PEN));Ellipse(d.hDC,cx-a-r,cy-r,cx-a+r,cy+r);Ellipse(d.hDC,cx-r,cy+a-r,cx+r,cy+a+r);
+    SelectObject(d.hDC,oldPen);SelectObject(d.hDC,oldBrush);DeleteObject(pen);DeleteObject(fill);DeleteObject(cut);
+  }
+  else if(icon)DrawIconEx(d.hDC,(d.rcItem.left+d.rcItem.right-size)/2,(d.rcItem.top+d.rcItem.bottom-size)/2,icon,size,size,0,nullptr,DI_NORMAL);
   else {
     SetBkMode(d.hDC,TRANSPARENT);SetTextColor(d.hDC,ToColorRef(disabled?palette_.textMuted:palette_.text));
     HFONT font=CreateFontW(-MulDiv(13,static_cast<int>(dpi_),96),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Microsoft YaHei UI");
