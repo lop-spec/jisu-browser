@@ -29,7 +29,7 @@ class HistoryStore {
   std::thread worker_;
   std::mutex mutex_;
   std::condition_variable cv_;
-  bool ready_ = false, busy_ = false, stop_ = false;
+  bool ready_ = false, busy_ = false, stop_ = false, diskError_ = false;
   int64_t nextId_ = 1;
 };
 }  // namespace jisu

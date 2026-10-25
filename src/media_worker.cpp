@@ -55,6 +55,10 @@ double resumePosition=-1;
 bool enhanced=false;
 ULONGLONG qualityTick=0;
 double qualityDrops=0;
+bool watching=false;
+ULONGLONG progressAt=0;
+double progressPosition=-1;
+int64_t expectedEntry=-1,eventEntry=-1;
 double pendingStart = 0, skipIntro = 0, skipOutro = 0;
 bool outroSent = false;
 void Emit(const json::Value& value) {
@@ -106,8 +110,9 @@ std::string ResumeHash(const std::string& value){
 void Load(const std::string& url, double position, const std::string& title, bool local) {
   if ((!local && !ValidNetwork(url)) || url.find('\0')!=std::string::npos) { Error("不支持的媒体地址");return; }
   SaveResume(true);resumeKey=ResumeHash(url);resumePosition=-1;
-  loadedTitle=title;pendingStart=position>=0?position:resumes[resumeKey]["position"].AsNumber();outroSent=false;lastError.clear();
+  loadedTitle=title;pendingStart=position>=0?position:resumes[resumeKey]["position"].AsNumber();outroSent=false;lastError.clear();watching=true;progressAt=GetTickCount64();progressPosition=-1;
   if (Command({"loadfile",url.c_str(),"replace"})<0)Error("无法打开媒体，请返回网页重试或选择其他线路",true);
+  else expectedEntry=static_cast<int64_t>(Number("playlist/0/id"));
 }
 void Picker(bool subtitle) {
   wchar_t file[32768]{};OPENFILENAMEW dialog{sizeof(dialog)};dialog.hwndOwner=GetAncestor(owner,GA_ROOT);dialog.lpstrFile=file;dialog.nMaxFile=ARRAYSIZE(file);
@@ -126,7 +131,7 @@ void Handle(const std::string& text) {
     skipIntro=std::clamp(c["intro"].AsNumber(),0.0,600.0);skipOutro=std::clamp(c["outro"].AsNumber(),0.0,600.0);
     Load(c["url"].AsString(),c["start"].AsNumber(-1),c["title"].AsString(),false);
   } else if(type=="pause")Command({"cycle","pause"});
-  else if(type=="seek"){const auto value=std::to_string(std::clamp(c["value"].AsNumber(),-86400.0,864000.0));Command({"seek",value.c_str(),c["absolute"].AsBool()?"absolute+exact":"relative+exact"});}
+  else if(type=="seek"){progressAt=GetTickCount64();progressPosition=-1;const auto value=std::to_string(std::clamp(c["value"].AsNumber(),-86400.0,864000.0));Command({"seek",value.c_str(),c["absolute"].AsBool()?"absolute+exact":"relative+exact"});}
   else if(type=="set"){
     const auto key=c["key"].AsString(),value=c["value"].AsString();
     if(key=="speed"||key=="volume"||key=="audio-delay"||key=="sub-delay"){
@@ -163,7 +168,7 @@ void Handle(const std::string& text) {
     }
   }else if(type=="frame")Command({"frame-step"});
   else if(type=="frame-back")Command({"frame-back-step"});
-  else if(type=="stop"){SaveResume(true);Command({"stop"});PostMessageW(surface,WM_CLOSE,0,0);}
+  else if(type=="stop"){watching=false;SaveResume(true);Command({"stop"});PostMessageW(surface,WM_CLOSE,0,0);}
   Status();
 }
 LRESULT CALLBACK Proc(HWND window,UINT message,WPARAM w,LPARAM l){
@@ -177,11 +182,15 @@ LRESULT CALLBACK Proc(HWND window,UINT message,WPARAM w,LPARAM l){
   if(message==WM_TIMER){
     RECT r{};GetClientRect(mini?mini:owner,&r);SetWindowPos(window,nullptr,0,0,r.right,r.bottom,SWP_NOACTIVATE|SWP_NOZORDER);
     for(int i=0;i<100;++i){auto* e=api.wait_event(player,0);if(!e||e->event_id==MPV_EVENT_NONE)break;
-      if(e->event_id==MPV_EVENT_FILE_LOADED){if(pendingStart>=Number("duration")-5)pendingStart=0;const auto seek=std::to_string((std::max)(pendingStart,skipIntro));Command({"seek",seek.c_str(),"absolute+exact"});api.set_property_string(player,"pause","no");Event("player.loaded");}
-      if(e->event_id==MPV_EVENT_END_FILE){auto* end=static_cast<mpv_event_end_file*>(e->data);if(end&&end->reason==MPV_END_FILE_REASON_ERROR)Error(std::string("播放失败：")+api.error_string(end->error),true);else if(end&&end->reason==MPV_END_FILE_REASON_EOF){outroSent=true;Event("player.ended");}}
+      if(e->event_id==MPV_EVENT_START_FILE){auto* start=static_cast<mpv_event_start_file*>(e->data);if(start)eventEntry=start->playlist_entry_id;}
+      if(e->event_id==MPV_EVENT_FILE_LOADED&&eventEntry==expectedEntry){if(pendingStart>=Number("duration")-5)pendingStart=0;const auto seek=std::to_string((std::max)(pendingStart,skipIntro));Command({"seek",seek.c_str(),"absolute+exact"});api.set_property_string(player,"pause","no");Event("player.loaded");}
+      if(e->event_id==MPV_EVENT_END_FILE){auto* end=static_cast<mpv_event_end_file*>(e->data);if(end&&end->playlist_entry_id!=expectedEntry)continue;if(end&&end->reason==MPV_END_FILE_REASON_ERROR)Error(std::string("播放失败：")+api.error_string(end->error),true);else if(end&&end->reason==MPV_END_FILE_REASON_EOF){outroSent=true;Event("player.ended");}}
     }
     const double duration=Number("duration"),position=Number("time-pos");
     if(!outroSent&&skipOutro>0&&duration>skipOutro+60&&position>=duration-skipOutro){outroSent=true;Event("player.ended");}
+    const bool paused=Get("pause").AsBool();
+    if(paused||std::abs(position-progressPosition)>0.1){progressPosition=position;progressAt=GetTickCount64();}
+    if(watching&&!paused&&!outroSent&&GetTickCount64()-progressAt>20000){watching=false;Error("片源连续 20 秒未推进，请重试或切换线路",true);Command({"stop"});}
     if(!outroSent&&Get("eof-reached").AsBool()){outroSent=true;Event("player.ended");}
     if(enhanced&&GetTickCount64()-qualityTick>3000){const double dropped=Number("frame-drop-count");if(dropped-qualityDrops>=12&&!Get("pause").AsBool()){api.set_property_string(player,"glsl-shaders","");enhanced=false;Event("player.enhancement-reduced");}qualityDrops=dropped;qualityTick=GetTickCount64();}
     if(GetTickCount64()-resumeSaved>2000)SaveResume();

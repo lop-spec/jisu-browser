@@ -16,7 +16,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $exeSource = Join-Path $Package "jisu-browser.exe"
-foreach ($required in @($exeSource, (Join-Path $Package "ntp\index.html"), (Join-Path $Package "ntp\bookmarks.html"))) {
+foreach ($required in @($exeSource, (Join-Path $Package "jisu-media.exe"), (Join-Path $Package "media\libmpv-2.dll"), (Join-Path $Package "ntp\index.html"), (Join-Path $Package "ntp\bookmarks.html"))) {
   if (-not (Test-Path -LiteralPath $required)) { throw "运行包不完整，缺少 $required" }
 }
 
@@ -37,6 +37,16 @@ Copy-Item -LiteralPath $exeSource -Destination $destExe -Force
 $ntpDest = Join-Path $Dest "ntp"
 if (Test-Path -LiteralPath $ntpDest) { Remove-Item -LiteralPath $ntpDest -Recurse -Force }
 Copy-Item -LiteralPath (Join-Path $Package "ntp") -Destination $ntpDest -Recurse
+foreach ($component in @('jisu-media.exe','media','THIRD-PARTY.md')) {
+  $target = Join-Path $Dest $component
+  if (Test-Path -LiteralPath $target) {
+    $snapshot = Join-Path $Dest ("_历史版本\media-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    New-Item -ItemType Directory -Force -Path $snapshot | Out-Null
+    Copy-Item -LiteralPath $target -Destination $snapshot -Recurse
+    Remove-Item -LiteralPath $target -Recurse -Force
+  }
+  Copy-Item -LiteralPath (Join-Path $Package $component) -Destination $Dest -Recurse
+}
 
 $hashSource = (Get-FileHash -Algorithm SHA256 -LiteralPath $exeSource).Hash
 $hashDest = (Get-FileHash -Algorithm SHA256 -LiteralPath $destExe).Hash

@@ -9,7 +9,6 @@ constexpr wchar_t kPlayerUrl[]=L"https://newtab.jisu.example/player.html";
 constexpr UINT_PTR kMediaTimer=7;
 std::wstring PlayerDirectory(){wchar_t path[MAX_PATH];GetModuleFileNameW(nullptr,path,MAX_PATH);return ParentDirectory(path);}
 bool PlayerUrl(const std::wstring& url){return url==kPlayerUrl;}
-std::string Quote(const std::string& text){std::string out;json::AppendQuoted(out,text);return out;}
 }
 void BrowserWindow::OpenMedia(){
   Tab* source=ActiveTab();if(source&&!PlayerUrl(source->url)&&!source->agent&&source->webview){CaptureMedia(*source);return;}
@@ -85,7 +84,7 @@ bool BrowserWindow::HandleMediaMessage(Tab& tab,const std::wstring& origin,const
   if(type=="player.fullscreen"){browserFullscreen_=!fullscreen_.Active();if(!browserFullscreen_)ExitFullscreen();else UpdateFullscreen();PlaceTab(tab);return true;}
   if(type=="player.next"||type=="player.prev")SourceMediaAction(tab,type.substr(7));
   else if(type=="player.line")SourceMediaAction(tab,"line",static_cast<int>(message["index"].AsNumber(-1)));
-  else if(type=="player.close"){StopMedia(tab);PlaceTab(tab);}
+  else if(type=="player.close"){StopMedia(tab);PostToPage(tab,"{\"type\":\"player.closed\"}");PlaceTab(tab);}
   else if(tab.media){
     const auto op=type.substr(7);
     if(op=="pause"||op=="seek"||op=="set"||op=="enhance"||op=="frame"||op=="frame-back"||op=="screenshot"||op=="subtitle"||op=="file"||op=="pip"){
@@ -116,6 +115,7 @@ void BrowserWindow::PollMedia(){
   if(!any)KillTimer(hwnd_,kMediaTimer);
 }
 void BrowserWindow::StopMedia(Tab& tab){
+  if(!destroyed_&&tab.media&&IsActive(tab)&&fullscreen_.Active())ExitFullscreen();
   if(auto* source=FindTab(tab.mediaSource);source&&source->mediaTarget==tab.id){source->mediaTarget=0;if(source->webview)source->webview->ExecuteScript(L"window.dispatchEvent(new Event('jisu-native-stop'));",nullptr);}
   tab.media.reset();if(tab.mediaSurface){DestroyWindow(tab.mediaSurface);tab.mediaSurface=nullptr;}
   tab.mediaSource=0;tab.mediaPage.clear();tab.mediaOffer.clear();tab.mediaStatus.clear();

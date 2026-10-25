@@ -63,6 +63,7 @@ std::string HistoryStore::Query(std::wstring query, size_t offset, size_t limit)
     if (total++ >= offset && rows.Items().size() < limit) rows.Push(Row(e.id, e.at, e.url, e.title));
   }
   out.Set("type", json::Value::String("history.rows")); out.Set("loading", json::Value::Bool(!ready_ || !pending_.empty() || busy_));
+  out.Set("query",json::Value::String(ToUtf8(query)));out.Set("error",json::Value::String(diskError_?"历史记录未能写入磁盘，请检查资料目录权限或磁盘空间":""));
   out.Set("total", json::Value::Number(static_cast<double>(total))); out.Set("rows", std::move(rows)); return json::Serialize(out);
 }
 void HistoryStore::Run() {
@@ -97,9 +98,10 @@ void HistoryStore::Run() {
     }
     std::erase_if(entries_, [](const auto& e) { return e.at < Now() - 90LL*86400000; });
     if (entries_.size() > 20000) entries_.resize(20000);
+    size_t textSize=0;size_t keep=0;for(const auto& e:entries_){textSize+=e.url.size()+e.title.size();if(textSize>6*1024*1024)break;++keep;}if(entries_.size()>keep)entries_.resize(keep);
     const auto snapshot = entries_; lock.unlock();
     auto data = json::Value::MakeArray(); for (const auto& e : snapshot) data.Push(Row(e.id, e.at, e.url, e.title));
-    bytes = json::Serialize(data); WriteFileAtomic(file_, bytes); lock.lock();
+    bytes = json::Serialize(data); const bool saved=WriteFileAtomic(file_, bytes); lock.lock();diskError_=!saved;
     busy_ = false; cv_.notify_all();
   }
 }

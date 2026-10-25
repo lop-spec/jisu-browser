@@ -1523,6 +1523,7 @@ void BrowserWindow::Activate(size_t index) {
     return;
   }
   if (fullscreenTab_ && fullscreenTab_ != tabs_[index]->id) ExitContentFullscreen();
+  if (auto* old=ActiveTab();old&&old->media&&index!=active_&&fullscreen_.Active())ExitFullscreen();
   active_ = index;
   PostMessageW(hwnd_, kMsgTabLimit, 0, 0);
   // 先显示新标签再隐藏旧的，中间不露底色
@@ -1561,6 +1562,7 @@ void BrowserWindow::PlaceTab(Tab& tab) {
       const LONG controls = static_cast<LONG>((bounds.right < MulDiv(600,dpi_,96) ? 280 : 222) * (dpi_/96.0));
       video.bottom = fullscreen_.Active() ? bounds.bottom : (std::max)(bounds.top+40L, bounds.bottom-controls);
       SetWindowPos(tab.mediaSurface,nullptr,video.left,video.top,video.right-video.left,video.bottom-video.top,SWP_NOACTIVATE|SWP_NOZORDER|SWP_SHOWWINDOW);
+      if(HWND surface=FindWindowExW(tab.mediaSurface,nullptr,L"JisuMediaSurface",nullptr))SetWindowPos(surface,nullptr,0,0,video.right-video.left,video.bottom-video.top,SWP_NOACTIVATE|SWP_NOZORDER|SWP_ASYNCWINDOWPOS);
       bounds.top=video.bottom;
       tab.controller->put_Bounds(bounds);
       SetTabVisible(tab,!fullscreen_.Active());

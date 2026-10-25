@@ -127,7 +127,7 @@ void BrowserWindow::EnforceTabLimit() {
   std::vector<TabPolicyEntry> candidates;
   for (size_t i = 0; i < tabs_.size(); ++i) {
     const auto& tab = *tabs_[i];
-    candidates.push_back({tab.id, i == active_, tab.agent || tab.leased, tab.url.starts_with(L"chrome-extension://")});
+    candidates.push_back({tab.id, i == active_, tab.agent || tab.leased || tab.media != nullptr || tab.mediaTarget != 0, tab.url.starts_with(L"chrome-extension://")});
   }
   for (const uint32_t id : OldTabsToClose(candidates, static_cast<size_t>(settings_.maxRegularTabs))) {
     if (const Tab* tab = FindTab(id)) CloseTab(IndexOf(*tab));
