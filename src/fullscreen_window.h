@@ -13,6 +13,7 @@ class FullscreenWindow {
     MONITORINFO monitor{sizeof(MONITORINFO)};
     if (!GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor)) return false;
     style_ = GetWindowLongPtrW(window, GWL_STYLE);
+    visible_ = IsWindowVisible(window) != FALSE;
     active_ = true;  // WM_NCCALCSIZE must not constrain fullscreen to the work area.
     SetWindowLongPtrW(window, GWL_STYLE, style_ & ~(WS_OVERLAPPEDWINDOW | WS_MAXIMIZE | WS_MINIMIZE));
     if (Position(window, monitor.rcMonitor)) return true;
@@ -23,7 +24,10 @@ class FullscreenWindow {
     if (!active_) return;
     active_ = false;
     SetWindowLongPtrW(window, GWL_STYLE, style_);
-    SetWindowPlacement(window, &placement_);
+    auto restore = placement_;
+    // GetWindowPlacement reports SW_SHOWNORMAL even for a never-shown window.
+    if (!visible_) restore.showCmd = SW_HIDE;
+    SetWindowPlacement(window, &restore);
     SetWindowPos(window, nullptr, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
   }
@@ -42,6 +46,7 @@ class FullscreenWindow {
                         SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED) != FALSE;
   }
   bool active_ = false;
+  bool visible_ = false;
   LONG_PTR style_ = 0;
   WINDOWPLACEMENT placement_{sizeof(WINDOWPLACEMENT)};
 };

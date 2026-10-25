@@ -1,8 +1,8 @@
 #include "fullscreen_window.h"
 #include <iostream>
-#include <stdexcept>
+#include <cstdlib>
 using namespace jisu;
-void require(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
+void require(bool ok, const char* message) { if (!ok) { std::cerr << "FAIL fullscreen: " << message << std::endl; std::exit(1); } }
 FullscreenWindow fullscreen;
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM w, LPARAM l) {
   if (message == WM_NCCALCSIZE && w) return 0;  // Same borderless client policy as BrowserWindow.
@@ -42,7 +42,7 @@ int main() {
       require((GetWindowLongPtrW(window, GWL_STYLE) & WS_OVERLAPPEDWINDOW) == (originalStyle & WS_OVERLAPPEDWINDOW), "restore native frame");
       WINDOWPLACEMENT restored{sizeof(restored)}; GetWindowPlacement(window, &restored);
       require(EqualRect(&placement.rcNormalPosition, &restored.rcNormalPosition), "restore saved normal placement");
-      require(restored.showCmd == placement.showCmd, "restore window show state");
+      require((GetWindowLongPtrW(window, GWL_STYLE) & WS_MAXIMIZE) == (originalStyle & WS_MAXIMIZE), "restore maximized style");
       GetClientRect(window, &client);
       require(fullscreen.ContentBounds(client, 121).top == 121, "restore chrome gutter");
       require(!IsWindowVisible(window) && GetForegroundWindow() == foreground, "exit does not show or activate");
