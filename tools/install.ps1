@@ -53,11 +53,10 @@ if ($AgentTokenFile) {
     if (Test-Path -LiteralPath $agentConfig) {
       Copy-Item -LiteralPath $agentConfig -Destination "$agentConfig.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
     }
+    # 只写连接所需的项；省电相关取程序里的默认值（见 README），以后升级跟着新默认走
     $config = [ordered]@{
       broker    = "http://127.0.0.1:18773"
       tokenFile = $AgentTokenFile
-      pollMs    = 1000
-      graceMs   = 1500
       yieldTo   = @($YieldTo)
     }
     # ConvertTo-Json 在 PS 5.1 里会把单元素数组压成字符串：单独处理

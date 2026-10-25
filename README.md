@@ -56,7 +56,7 @@ Pi 的 `browser` 工具走 Playwright MCP 的扩展模式：MCP 起一个本机 
 - 每条连接用 `Target.attachToTarget` 单开一个 CDP 会话，断开时 detach：Playwright 开过的域、注入的脚本随会话清掉（WebView2 自带的默认会话不随连接结束）。
 - 与 Pi 扩展相同的单标签约束：拒绝新建 / 关闭标签，忽略置前请求。
 - 省电：执行命令时智能体标签在屏幕外宿主窗口里可见（WebView2 隐藏的控件不出帧，截图和 rAF 会卡住）；命令间隙超过 `graceMs` 就关掉焦点模拟并隐藏，页面定时器随即被节流，再过 `pageFreezeMs` 冻结。实测动画重页单核占用：可见 47%、隐藏但保留焦点模拟 15%、隐藏并关焦点模拟 0.2%。
-- 唤醒后先等页面出一帧（rAF → setTimeout 0，最多 300ms）再转发命令：休眠时没跑的 rAF 批量更新、冻结时积下的网络回调先处理完，智能体读到的内容和一直在渲染的浏览器一样新（例如轮询 AI 聊天页的回答）。
+- 唤醒后先等页面出一帧（rAF → setTimeout 0，最多 300ms）再转发命令，给积下的页面更新一个处理机会，降低读到旧内容的风险。这不是「页面已完成更新」的保证：冻结会暂停定时器与客户端逻辑，依赖这些逻辑的轮询、流式回答或后台任务可能延迟；要求持续运行时，把 `pageFreezeMs` 和 `freezeMs` 都设为 0。用户正在看的标签不冻结。
 - 智能体标签在标签条里画一个圈（执行命令时实心）；点开可以直接看，也能接手操作。它们的脚本弹框按 Playwright 默认处理（离开页面确认放行，其余取消），权限请求拒绝。
 
 配置 `agent-bridge.json`（不存在就不开桥）：
@@ -94,11 +94,24 @@ Pi 的 `browser` 工具走 Playwright MCP 的扩展模式：MCP 起一个本机 
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\install.ps1 -Package <运行包里的 jisu-browser 目录> -ShortcutDir <快捷方式目录> -StartMenu -AgentTokenFile <Pi 的 extension-auth.json> -YieldTo thorium.exe
 ```
 
-程序装到 `%LOCALAPPDATA%\Programs\JisuBrowser`，覆盖前旧程序留在 `_历史版本\`；目标程序正在运行时脚本会停下，不会结束它。
+程序装到 `%LOCALAPPDATA%\Programs\JisuBrowser`，覆盖前旧程序留在 `_历史版本\`；目标程序正在运行时脚本会停下，不会结束它。新写的智能体配置只包含 `broker`、`tokenFile`、`yieldTo`，省电项跟随程序默认值；已有配置默认保留，只有 `-ForceAgentConfig` 才备份并重写。
 
 ## 智能体 CPU 对比
 
-`measure/agent-bench.mjs` 用 Pi 同一套 Playwright MCP 扩展模式（进程内测试 broker + relay，打 Pi 的两个补丁）在同一组站点上按「执行一步 → 等待」驱动浏览器；`measure/jobrun.cs` 把浏览器整棵进程树放进 Job Object 记账 CPU（已退出的渲染进程也算）。两边都用临时配置目录，窗口放在屏幕外不激活。
+`measure/agent-bench.mjs` 用 Pi 同一套 Playwright MCP 扩展模式（进程内测试 broker + relay，打 Pi 的两个补丁）在同一组站点上按「执行一步 → 等待」驱动浏览器；`measure/jobrun.cs` 把浏览器整棵进程树放进 Job Object 记账 CPU（已退出的渲染进程也算）。
+
+最终程序 `d10c6f8`、默认省电设置的本机对照（13 个站点 × 导航、文本、快照、滚动，共 52 步）：
+
+| 命令间隔 | Thorium CPU 秒 | 极速 CPU 秒 | Thorium / 极速 | CPU 减少 |
+|---|---:|---:|---:|---:|
+| 按 Pi 日志抽样的真实间隔（单次上限 120 秒） | 177.8 | 71.5 | 2.49× | 59.8% |
+| 固定 10 秒 | 99.8 | 69.5 | 1.44× | 30.4% |
+
+这是整棵进程树累计 CPU 时间，不是网页速度或瓦特实测；**整体 CPU 降到 1/3 的目标尚未达到**。真实间隔组的执行期 CPU 为 49.2 → 46.3 秒，间隙为 128.6 → 25.1 秒，收益主要来自等待时少运行。
+
+两组都是实时网络单轮对照，测试期间有用户输入，不能当成稳定性能保证；两边均有一次导航超时，10 秒组 Thorium 还多一次固定标签协议错误，数字包含失败步骤。较早构建的空闲态结果不混入最终程序的整体成绩。
+
+默认不禁图片、不启用按需出帧；禁图片会影响图像识别，按需出帧可能延长重型 SPA 初始化。默认禁自动播放只作用于智能体标签，媒体自动播放行为会改变。两边都用临时配置目录，窗口放在屏幕外不激活。
 
 ## 测量 G1 / G2
 
