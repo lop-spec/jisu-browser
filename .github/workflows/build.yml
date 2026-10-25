@@ -20,6 +20,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: 校验图标（可复现、透明圆形、各尺寸暖橙色）
+        shell: pwsh
+        run: node res/test-icon.mjs
+
       - name: 获取 Microsoft.Web.WebView2（nuget.org，校验 SHA256）
         shell: pwsh
         run: |

@@ -1,4 +1,5 @@
-// 生成 res/app.ico：圆角方块（主色渐变）+ 白色闪电。纯 Node，无依赖；改图形后重跑：node res/make-icon.mjs
+// 生成 res/app.ico 与 app.svg：深色正圆 + 暖橙闪电，圆外透明。纯 Node，无依赖。
+// node res/make-icon.mjs [预览 PNG 输出目录]
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
@@ -6,16 +7,13 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256];
-const TOP = [0x3b, 0x8b, 0xff];
-const BOTTOM = [0x1a, 0x63, 0xd8];
-const BOLT = [[0.62, 0.10], [0.27, 0.56], [0.49, 0.56], [0.38, 0.90], [0.75, 0.42], [0.53, 0.42]];
+const BACKGROUND = [0x1b, 0x1b, 0x1b];
+const ORANGE = [0xff, 0x9c, 0x55];
+const RADIUS = 0.46;
+const BOLT = [[0.555, 0.19], [0.325, 0.54], [0.455, 0.54], [0.455, 0.81], [0.695, 0.45], [0.555, 0.45]];
 
-function insideRounded(x, y) {
-  const lo = 0.04, hi = 0.96, r = 0.22;
-  if (x < lo || x > hi || y < lo || y > hi) return false;
-  const cx = Math.min(Math.max(x, lo + r), hi - r);
-  const cy = Math.min(Math.max(y, lo + r), hi - r);
-  return (x - cx) ** 2 + (y - cy) ** 2 <= r * r;
+function insideCircle(x, y) {
+  return (x - 0.5) ** 2 + (y - 0.5) ** 2 <= RADIUS ** 2;
 }
 
 function insideBolt(x, y) {
@@ -37,19 +35,17 @@ function render(size) {
         for (let sx = 0; sx < ss; sx++) {
           const x = (px + (sx + 0.5) / ss) / size;
           const y = (py + (sy + 0.5) / ss) / size;
-          if (insideRounded(x, y)) {
+          if (insideCircle(x, y)) {
             bg++;
             if (insideBolt(x, y)) bolt++;
           }
         }
       }
       const n = ss * ss;
-      const t = py / Math.max(1, size - 1);
-      const base = TOP.map((c, k) => c + (BOTTOM[k] - c) * t);
       const a = bg / n;
-      const w = bg ? bolt / bg : 0;  // 闪电在底色内部的占比
+      const w = bg ? bolt / bg : 0;
       const o = (py * size + px) * 4;
-      for (let k = 0; k < 3; k++) rgba[o + k] = Math.round(base[k] * (1 - w) + 255 * w);
+      for (let k = 0; k < 3; k++) rgba[o + k] = bg ? Math.round(BACKGROUND[k] * (1 - w) + ORANGE[k] * w) : 0;
       rgba[o + 3] = Math.round(a * 255);
     }
   }
@@ -116,3 +112,12 @@ SIZES.forEach((size, i) => {
 const out = path.join(here, 'app.ico');
 fs.writeFileSync(out, Buffer.concat([header, ...images]));
 console.log('wrote', out, offset, 'bytes');
+
+const hex = rgb => '#' + rgb.map(v => v.toString(16).padStart(2, '0')).join('');
+const points = BOLT.map(([x, y]) => `${x * 256},${y * 256}`).join(' ');
+fs.writeFileSync(path.join(here, 'app.svg'), `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">\n  <circle cx="128" cy="128" r="${RADIUS * 256}" fill="${hex(BACKGROUND)}"/>\n  <polygon points="${points}" fill="${hex(ORANGE)}"/>\n</svg>\n`);
+if (process.argv[2]) {
+  const preview = path.resolve(process.argv[2]);
+  fs.mkdirSync(preview, { recursive: true });
+  SIZES.forEach((size, i) => fs.writeFileSync(path.join(preview, `icon-${size}.png`), images[i]));
+}
