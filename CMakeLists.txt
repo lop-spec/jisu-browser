@@ -81,5 +81,10 @@ target_link_options(jisu-browser PRIVATE
   /DELAYLOAD:winhttp.dll /DELAYLOAD:shell32.dll
   /DEBUG /OPT:REF /OPT:ICF)
 
+enable_testing()
+add_executable(tab-policy-test tests/tab-policy-test.cpp)
+target_include_directories(tab-policy-test PRIVATE src)
+add_test(NAME native-tab-policy COMMAND tab-policy-test)
+
 add_custom_command(TARGET jisu-browser POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/ntp" "$<TARGET_FILE_DIR:jisu-browser>/ntp")

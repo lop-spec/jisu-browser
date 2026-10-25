@@ -48,6 +48,7 @@ constexpr wchar_t kProfileProp[] = L"JisuBrowser.Profile";
 
 constexpr UINT kMsgCommand = WM_APP + 1;
 constexpr UINT kMsgFavicon = WM_APP + 2;
+constexpr UINT kMsgTabLimit = WM_APP + 3;
 constexpr UINT_PTR kTimerSpare = 1;
 constexpr UINT_PTR kTimerMetrics = 2;
 constexpr UINT_PTR kTimerWatchdog = 3;
@@ -920,6 +921,7 @@ void BrowserWindow::OnWebMessage(uint32_t id, ICoreWebView2WebMessageReceivedEve
   CoTaskString source;
   args->get_Source(source.Put());
   const std::wstring origin = source.Str();
+  if (Tab* tab = FindTab(id); tab && HandleTabLimitMessage(*tab, origin, ToUtf8(text.Str()))) return;
   const bool ours = origin.starts_with(kNtpOrigin);
   if (options_.ntp == NtpSource::kFolder && !ours) {
     return;  // 只认新标签页自己的回报
@@ -1451,6 +1453,7 @@ void BrowserWindow::Activate(size_t index) {
     return;
   }
   active_ = index;
+  PostMessageW(hwnd_, kMsgTabLimit, 0, 0);
   // 先显示新标签再隐藏旧的，中间不露底色
   PlaceTab(*tabs_[index]);
   for (auto& tab : tabs_) {
@@ -2045,6 +2048,7 @@ void BrowserWindow::LoadSettings() {
   std::string text;
   json::Value root;
   if (ReadFileBytes(profileDir_ + L"\\jisu-settings.json", text) && json::Parse(text, root)) {
+    settings_.maxRegularTabs = static_cast<int>(std::clamp(root["maxRegularTabs"].AsNumber(10), 1.0, 99.0));
     settings_.bookmarkBar = root["bookmarkBar"].AsBool(true);
     settings_.importedDefaultBrowser = root["importedDefaultBrowser"].AsBool(false);
   }
@@ -2058,7 +2062,7 @@ void BrowserWindow::SaveSettings() {
   out += settings_.bookmarkBar ? "true" : "false";
   out += ",\"importedDefaultBrowser\":";
   out += settings_.importedDefaultBrowser ? "true" : "false";
-  out += "}";
+  out += ",\"maxRegularTabs\":" + std::to_string(settings_.maxRegularTabs) + "}";
   EnsureDirectory(profileDir_);
   WriteFileAtomic(profileDir_ + L"\\jisu-settings.json", out);
 }
@@ -2228,6 +2232,9 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       if (p.y >= 0 && p.y < layout_.tabStripHeight * layout_.scale && HitTest(p).kind == ChromeHit::kNone) return HTCAPTION;
       return HTCLIENT;
     }
+    case kMsgTabLimit:
+      EnforceTabLimit();
+      return 0;
     case kMsgFavicon:
       painter_.ClearFaviconBitmaps();
       InvalidateChrome();

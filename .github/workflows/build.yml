@@ -44,6 +44,10 @@ jobs:
         shell: pwsh
         run: cmake --build build --config Release --parallel
 
+      - name: 原生标签策略门禁（保护当前页、智能体和扩展页）
+        shell: pwsh
+        run: ctest --test-dir build -C Release --output-on-failure
+
       - name: 打包（exe + ntp/ 为运行包；PDB 单独放 symbols/）
         shell: pwsh
         run: |

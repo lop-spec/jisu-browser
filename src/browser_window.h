@@ -74,6 +74,7 @@ class BrowserWindow : public AgentHost {
   struct Settings {
     bool bookmarkBar = true;
     bool importedDefaultBrowser = false;
+    int maxRegularTabs = 10;
   };
 
   static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -106,6 +107,10 @@ class BrowserWindow : public AgentHost {
   void ConfigureWebView(Tab& tab);
   void ConfigureProfile(Tab& tab);
   void InstallNextExtension();
+  void PruneUnlistedExtensions();
+  void RemoveNextUnlistedExtension();
+  void EnforceTabLimit();
+  bool HandleTabLimitMessage(Tab& tab, const std::wstring& source, const std::string& text);
   void SaveExtensionStatus();
   void OpenExtensions();
   void NavigateNewTabPage(Tab& tab);
@@ -196,11 +201,16 @@ class BrowserWindow : public AgentHost {
   struct ExtensionEntry {
     std::wstring path, name, id, popup, options;
     bool enabled = false;
+    bool nativeTabLimit = false;
     HRESULT result = E_PENDING;
     ComPtr<ICoreWebView2BrowserExtension> handle;
   };
   std::vector<ExtensionEntry> extensions_;
   size_t extensionIndex_ = 0;
+  bool removeUnlistedExtensions_ = false;
+  bool extensionPruneStarted_ = false;
+  std::vector<ComPtr<ICoreWebView2BrowserExtension>> unlistedExtensions_;
+  size_t removedExtensionCount_ = 0;
   ComPtr<ICoreWebView2Profile7> extensionProfile_;
   std::shared_ptr<int> alive_ = std::make_shared<int>(0);
   Settings settings_;
