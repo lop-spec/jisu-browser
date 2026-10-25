@@ -52,6 +52,7 @@ constexpr wchar_t kProfileProp[] = L"JisuBrowser.Profile";
 constexpr UINT kMsgCommand = WM_APP + 1;
 constexpr UINT kMsgFavicon = WM_APP + 2;
 constexpr UINT kMsgTabLimit = WM_APP + 3;
+constexpr UINT kMsgFullscreenChanged = WM_APP + 42;
 constexpr UINT kMsgInstallTray = WM_APP + 41;
 constexpr UINT_PTR kTimerSpare = 1;
 constexpr UINT_PTR kTimerMetrics = 2;
@@ -110,6 +111,8 @@ enum Command : WPARAM {
   kCmdToggleBookmark,
   kCmdToggleBookmarkBar,
   kCmdBookmarkManager,
+  kCmdToggleFullscreen,
+  kCmdExitFullscreen,
 };
 
 COREWEBVIEW2_COLOR ToWebViewColor(Rgb c) { return COREWEBVIEW2_COLOR{255, c.r, c.g, c.b}; }
@@ -773,6 +776,12 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
           })
           .Get(),
       &token);
+  tab.webview->add_ContainsFullScreenElementChanged(
+      Callback<ICoreWebView2ContainsFullScreenElementChangedEventHandler>(
+          [this, id](ICoreWebView2*, IUnknown*) -> HRESULT {
+            PostMessageW(hwnd_, kMsgFullscreenChanged, id, 0);
+            return S_OK;
+          }).Get(), &token);
   tab.webview->add_HistoryChanged(
       Callback<ICoreWebView2HistoryChangedEventHandler>([this, id](ICoreWebView2* sender, IUnknown*) -> HRESULT {
         if (Tab* t = FindTab(id)) {
@@ -793,6 +802,7 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
       Callback<ICoreWebView2NavigationStartingEventHandler>(
           [this, id](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs*) -> HRESULT {
             if (Tab* t = FindTab(id)) {
+              if (fullscreenTab_ == id) ExitContentFullscreen();
               t->loading = true;
               InvalidateChrome();
             }
@@ -862,6 +872,7 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
             COREWEBVIEW2_PROCESS_FAILED_KIND kind = COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED;
             args->get_ProcessFailedKind(&kind);
             Tab* t = FindTab(id);
+            if (fullscreenTab_ == id) ExitContentFullscreen();
             if (!t || !t->agent || kind != COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED) {
               return S_OK;
             }
@@ -880,7 +891,9 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
       &token);
   tab.controller->add_AcceleratorKeyPressed(
       Callback<ICoreWebView2AcceleratorKeyPressedEventHandler>(
-          [this](ICoreWebView2Controller*, ICoreWebView2AcceleratorKeyPressedEventArgs* args) -> HRESULT {
+          [this, id](ICoreWebView2Controller*, ICoreWebView2AcceleratorKeyPressedEventArgs* args) -> HRESULT {
+            const Tab* source = FindTab(id);
+            if (!source || !IsActive(*source)) return S_OK;  // Background input cannot control native chrome.
             COREWEBVIEW2_KEY_EVENT_KIND kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_UP;
             args->get_KeyEventKind(&kind);
             if (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN) {
@@ -1456,6 +1469,7 @@ void BrowserWindow::CloseTab(size_t index) {
   if (index >= tabs_.size()) {
     return;
   }
+  if (fullscreenTab_ == tabs_[index]->id) ExitContentFullscreen();
   std::unique_ptr<Tab> closing = std::move(tabs_[index]);
   tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(index));
   if (closing->leaseDone) {
@@ -1490,6 +1504,7 @@ void BrowserWindow::Activate(size_t index) {
   if (index >= tabs_.size()) {
     return;
   }
+  if (fullscreenTab_ && fullscreenTab_ != tabs_[index]->id) ExitContentFullscreen();
   active_ = index;
   PostMessageW(hwnd_, kMsgTabLimit, 0, 0);
   // 先显示新标签再隐藏旧的，中间不露底色
@@ -1702,6 +1717,16 @@ bool BrowserWindow::DispatchShortcut(UINT key, bool repeat) {
     }
   } else if (!ctrl && !alt) {
     switch (key) {
+      case VK_F11:
+        command = kCmdToggleFullscreen;
+        once = true;
+        break;
+      case VK_ESCAPE:
+        if (fullscreen_.Active()) {
+          command = kCmdExitFullscreen;
+          once = true;
+        }
+        break;
       case VK_F5:
         command = kCmdReload;
         break;
@@ -1725,6 +1750,13 @@ bool BrowserWindow::DispatchShortcut(UINT key, bool repeat) {
 void BrowserWindow::ExecuteCommand(WPARAM command) {
   Tab* tab = ActiveTab();
   switch (command) {
+    case kCmdToggleFullscreen:
+      if (fullscreen_.Active()) ExitFullscreen();
+      else { browserFullscreen_ = true; UpdateFullscreen(); }
+      break;
+    case kCmdExitFullscreen:
+      ExitFullscreen();
+      break;
     case kCmdNewTab:
       NewTab(L"");
       break;
@@ -1785,6 +1817,7 @@ void BrowserWindow::ExecuteCommand(WPARAM command) {
 }
 
 void BrowserWindow::FocusAddressBar() {
+  if (fullscreen_.Active()) ExitFullscreen();
   SetFocus(edit_);
   SendMessageW(edit_, EM_SETSEL, 0, -1);
 }
@@ -2259,7 +2292,7 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_NCCALCSIZE:
       if (wParam) {
         auto* p = reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
-        if (IsZoomed(hwnd_)) {
+        if (!fullscreen_.Active() && IsZoomed(hwnd_)) {
           MONITORINFO monitor{sizeof(MONITORINFO)};
           if (GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &monitor)) p->rgrc[0] = monitor.rcWork;
         }
@@ -2267,6 +2300,7 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       break;
     case WM_NCHITTEST: {
+      if (fullscreen_.Active()) return HTCLIENT;
       POINT p = PointFromLParam(lParam);
       RECT r{}; GetWindowRect(hwnd_, &r);
       if (!IsZoomed(hwnd_)) {
@@ -2291,6 +2325,9 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
     case kMsgTabLimit:
       EnforceTabLimit();
       return 0;
+    case kMsgFullscreenChanged:
+      OnContentFullscreenChanged(static_cast<uint32_t>(wParam));
+      return 0;
     case kMsgFavicon:
       painter_.ClearFaviconBitmaps();
       InvalidateChrome();
@@ -2302,8 +2339,15 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_ERASEBKGND:
       return 1;  // 整个客户区由 Direct2D 画，不让 GDI 先擦一遍
     case WM_PAINT:
-      painter_.Paint(palette_, layout_, BuildChromeState());
-      ValidateRect(hwnd_, nullptr);
+      if (fullscreen_.Active()) {
+        PAINTSTRUCT paint{};
+        HDC dc = BeginPaint(hwnd_, &paint);
+        FillRect(dc, &paint.rcPaint, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        EndPaint(hwnd_, &paint);
+      } else {
+        painter_.Paint(palette_, layout_, BuildChromeState());
+        ValidateRect(hwnd_, nullptr);
+      }
       return 0;
     case WM_SIZE:
       CloseExtensionPopup();
@@ -2338,12 +2382,16 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       painter_.SetDpi(dpi_);
       UpdateEditFont();
       const auto* suggested = reinterpret_cast<const RECT*>(lParam);
-      SetWindowPos(hwnd_, nullptr, suggested->left, suggested->top, suggested->right - suggested->left,
-                   suggested->bottom - suggested->top, SWP_NOZORDER | SWP_NOACTIVATE);
+      if (fullscreen_.Active()) fullscreen_.FitToMonitor(hwnd_);
+      else SetWindowPos(hwnd_, nullptr, suggested->left, suggested->top, suggested->right - suggested->left,
+                        suggested->bottom - suggested->top, SWP_NOZORDER | SWP_NOACTIVATE);
       Relayout();
       InvalidateRect(hwnd_, nullptr, FALSE);
       return 0;
     }
+    case WM_DISPLAYCHANGE:
+      fullscreen_.FitToMonitor(hwnd_);
+      return 0;
     case WM_GETMINMAXINFO: {
       auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
       const int dpi = static_cast<int>(dpi_);
@@ -2650,12 +2698,68 @@ void BrowserWindow::UpdateEditFont() {
   editHeightPx_ = metrics.tmHeight;
 }
 
+// HTML fullscreen changes the WebView surface, not the native host window.
+// Only the selected, visible tab may expand the host; background leases never do.
+void BrowserWindow::OnContentFullscreenChanged(uint32_t id) {
+  Tab* tab = FindTab(id);
+  if (!tab || !tab->webview) return;
+  BOOL contains = FALSE;
+  if (FAILED(tab->webview->get_ContainsFullScreenElement(&contains))) return;
+  if (contains) {
+    if (!IsActive(*tab) || !IsWindowVisible(hwnd_) || IsIconic(hwnd_)) return;
+    if (GetForegroundWindow() != hwnd_ && !fullscreen_.Active()) return;
+    fullscreenTab_ = id;
+  } else if (fullscreenTab_ == id) {
+    fullscreenTab_ = 0;
+  } else return;
+  UpdateFullscreen();
+}
+
+void BrowserWindow::UpdateFullscreen() {
+  if (browserFullscreen_ || fullscreenTab_) {
+    CloseExtensionPopup();
+    CancelBookmarkDrag();
+    hover_ = {}; pressed_ = {};
+    if (!fullscreen_.Enter(hwnd_)) {
+      browserFullscreen_ = false;
+      ExitContentFullscreen();
+      return;
+    }
+  } else fullscreen_.Exit(hwnd_);
+  Relayout();
+  PlaceAllTabs();
+  InvalidateChrome();
+}
+
+void BrowserWindow::ExitContentFullscreen() {
+  if (!fullscreenTab_) return;
+  Tab* tab = FindTab(fullscreenTab_);
+  fullscreenTab_ = 0;
+  if (tab && tab->webview)
+    tab->webview->ExecuteScript(L"if(document.fullscreenElement)document.exitFullscreen().catch(()=>{});", nullptr);
+  UpdateFullscreen();
+}
+
+void BrowserWindow::ExitFullscreen() {
+  browserFullscreen_ = false;
+  ExitContentFullscreen();
+  UpdateFullscreen();
+}
+
 void BrowserWindow::Relayout() {
   RECT client{};
   GetClientRect(hwnd_, &client);
   ChromeLayout& l = layout_;
   l.scale = static_cast<float>(dpi_) / 96.0f;
   l.width = static_cast<float>(client.right - client.left) / l.scale;
+  if (fullscreen_.Active()) {
+    l.contentTopPx = 0;
+    if (edit_) ShowWindow(edit_, SW_HIDE);
+    if (extensionsButton_) ShowWindow(extensionsButton_, SW_HIDE);
+    for (auto& extension : extensions_) if (extension.button) ShowWindow(extension.button, SW_HIDE);
+    return;
+  }
+  if (edit_) ShowWindow(edit_, SW_SHOWNOACTIVATE);
 
   l.minimize = D2D1::RectF(l.width - 138, 0, l.width - 92, l.tabStripHeight);
   l.maximize = D2D1::RectF(l.width - 92, 0, l.width - 46, l.tabStripHeight);
@@ -2726,8 +2830,7 @@ void BrowserWindow::LayoutBookmarkBar() {
 RECT BrowserWindow::ContentRect() const {
   RECT client{};
   GetClientRect(hwnd_, &client);
-  client.top = std::min<LONG>(client.bottom, layout_.contentTopPx);
-  return client;
+  return fullscreen_.ContentBounds(client, layout_.contentTopPx);
 }
 
 ChromeState BrowserWindow::BuildChromeState() const {
@@ -2762,6 +2865,7 @@ ChromeState BrowserWindow::BuildChromeState() const {
 }
 
 ChromeHit BrowserWindow::HitTest(POINT point) const {
+  if (fullscreen_.Active()) return {};
   const float x = static_cast<float>(point.x) / layout_.scale;
   const float y = static_cast<float>(point.y) / layout_.scale;
   auto inside = [x, y](const D2D1_RECT_F& r) { return x >= r.left && x < r.right && y >= r.top && y < r.bottom; };

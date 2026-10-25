@@ -34,7 +34,7 @@ C++20 + Win32 + 官方 WebView2 SDK。标签条、工具栏、书签栏用 Direc
 | `--browser-args "<参数>"` | 传给内核的附加参数 |
 | `--preheat <秒>` | 不显示窗口，只持有内核进程（模拟开机预热） |
 
-快捷键：Ctrl+T 新标签，Ctrl+W 关闭，Ctrl+Tab 切换，Ctrl+L / Alt+D / F6 地址栏，F5 / Ctrl+R 刷新，Alt+← / Alt+→ 后退前进，Ctrl+D 添加 / 编辑书签，Ctrl+Shift+B 书签栏，Ctrl+Shift+O 书签管理器。
+快捷键：Ctrl+T 新标签，Ctrl+W 关闭，Ctrl+Tab 切换，Ctrl+L / Alt+D / F6 地址栏，F5 / Ctrl+R 刷新，Alt+← / Alt+→ 后退前进，Ctrl+D 添加 / 编辑书签，Ctrl+Shift+B 书签栏，Ctrl+Shift+O 书签管理器；F11 真全屏，Esc 退出。网页视频／标准 Fullscreen API 进入时隐藏标签条、地址栏和书签栏，窗口覆盖当前显示器（含任务栏区域）；退出恢复原窗口位置与最大化状态。后台标签的全屏请求不改变用户窗口，切换／关闭全屏标签或导航时退出网页全屏。
 
 工具栏最右的菜单：书签管理器、显示书签栏、导入书签、扩展管理、设为默认浏览器（在当前用户下登记后打开系统「默认应用」页，由用户自己选）、关于。
 

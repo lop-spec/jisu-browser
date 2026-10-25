@@ -7,6 +7,7 @@
 #include "common.h"
 #include "graphics.h"
 #include "favicons.h"
+#include "fullscreen_window.h"
 #include "options.h"
 #include "palette.h"
 #include "tray_icon.h"
@@ -92,6 +93,10 @@ class BrowserWindow : public AgentHost {
   void OnThemeChanged();
   void UpdateEditFont();
   void Relayout();
+  void OnContentFullscreenChanged(uint32_t id);
+  void UpdateFullscreen();
+  void ExitContentFullscreen();
+  void ExitFullscreen();
   void LayoutBookmarkBar();
   RECT ContentRect() const;
   ChromeState BuildChromeState() const;
@@ -202,6 +207,9 @@ class BrowserWindow : public AgentHost {
   HBRUSH omniboxBrush_ = nullptr;
   int editHeightPx_ = 20;
   UINT dpi_ = 96;
+  FullscreenWindow fullscreen_;
+  bool browserFullscreen_ = false;
+  uint32_t fullscreenTab_ = 0;
 
   ComPtr<ICoreWebView2Environment> environment_;
   std::vector<std::unique_ptr<Tab>> tabs_;

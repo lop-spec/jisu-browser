@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(jisu_browser VERSION 0.2.2 LANGUAGES CXX RC)
+project(jisu_browser VERSION 0.2.3 LANGUAGES CXX RC)
 
 if(NOT MSVC)
   message(FATAL_ERROR "只支持 MSVC 构建（GitHub Actions windows-latest）")
@@ -88,6 +88,11 @@ target_link_options(jisu-browser PRIVATE
   /DEBUG /OPT:REF /OPT:ICF)
 
 enable_testing()
+add_executable(fullscreen-window-test tests/fullscreen-window-test.cpp)
+target_include_directories(fullscreen-window-test PRIVATE src)
+target_compile_definitions(fullscreen-window-test PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+target_link_libraries(fullscreen-window-test PRIVATE user32)
+add_test(NAME native-fullscreen-window COMMAND fullscreen-window-test)
 add_test(NAME native-atomic-exe-swap-ps51 COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/atomic-exe-swap-test.ps1")
 add_executable(tray-icon-test tests/tray-icon-test.cpp src/tray_icon.cpp)
 target_include_directories(tray-icon-test PRIVATE src)
