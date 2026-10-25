@@ -75,6 +75,7 @@ class BrowserWindow : public AgentHost {
     bool bookmarkBar = true;
     bool importedDefaultBrowser = false;
     int maxRegularTabs = 10;
+    int64_t bookmarkFolder = 1;
   };
 
   static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -150,6 +151,10 @@ class BrowserWindow : public AgentHost {
 
   // 书签
   void ToggleBookmark(bool fromKeyboard);
+  void EditBookmark(BookmarkNode* node, const std::wstring& title, const std::wstring& url);
+  void CancelBookmarkDrag();
+  void UpdateBookmarkDrop(POINT point);
+  void FinishBookmarkDrag(POINT point);
   void ShowBookmarkFolderMenu(BookmarkNode& folder, POINT screen);
   void ShowBookmarkContextMenu(BookmarkNode& node, POINT screen);
   void ShowOverflowMenu(POINT screen);
@@ -222,6 +227,13 @@ class BrowserWindow : public AgentHost {
 
   ChromeHit hover_;
   ChromeHit pressed_;
+  int64_t dragBookmarkId_ = 0;
+  POINT dragStart_{};
+  bool draggingBookmark_ = false;
+  int dropBookmark_ = -1;
+  bool dropIntoFolder_ = false;
+  int64_t dropParentId_ = 0;
+  size_t dropIndex_ = 0;
   bool trackingMouse_ = false;
   bool omniboxFocused_ = false;
   bool focusInWebView_ = false;

@@ -108,6 +108,9 @@ struct ChromeState {
   bool canStar = false;  // 当前页能加书签（http/https）
   bool starred = false;  // 当前页已在书签里
   std::vector<ChromeBookmark> bookmarks;  // 书签栏各项，与 ChromeLayout::bookmarks 一一对应
+  bool bookmarkDrag = false;
+  int bookmarkDrop = -1;
+  bool bookmarkDropIntoFolder = false;
   bool maximized = false;
   std::wstring message;  // 内容区提示，例如没有 WebView2 运行时
 };

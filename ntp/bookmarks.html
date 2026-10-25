@@ -89,6 +89,11 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top
       <label for="editUrl">网址</label>
       <input id="editUrl" autocomplete="off">
     </div>
+    <label for="editParent">保存到</label>
+    <select id="editParent"></select>
+    <button type="button" id="createFolder" style="margin-top:10px">新建文件夹</button>
+    <div id="newFolderBlock" hidden><label for="newFolderName">在所选位置新建</label><input id="newFolderName" maxlength="200" autocomplete="off"></div>
+    <p id="editError" role="alert" style="color:var(--danger)"></p>
     <div class="buttons">
       <button type="button" id="editCancel">取消</button>
       <button type="submit" class="primary" id="editSave">保存</button>
@@ -167,8 +172,12 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top
     var r = el("div", "row");
     r.draggable = true;
     r.addEventListener("dragstart", function (e) { e.dataTransfer.setData("text/x-bookmark-id", String(node.id)); });
-    if (parent) {
-      dropTarget(r, function (id) { if (id !== node.id) send({ type: "bm.move", id: id, parent: parent.id, index: index }); });
+    r.dataset.nodeId = String(node.id);
+    if (node.children) {
+      dropTarget(r, function (id) { if (id !== node.id) send({ type: 'bm.move', id: id, parent: node.id, index: 1e9 }); });
+      r.title = '拖到此处移入文件夹';
+    } else if (parent) {
+      dropTarget(r, function (id) { if (id !== node.id) send({ type: 'bm.move', id: id, parent: parent.id, index: index }); });
     }
     if (node.children) r.appendChild(el("span", "icon", "▣"));
     else {
@@ -245,22 +254,34 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top
     $("editUrl").value = node && !node.children ? node.url : "";
     $("editUrlBlock").style.display = isFolder ? "none" : "";
     $("editForm").dataset.folder = isFolder ? "1" : "";
+    $("editError").textContent = ''; $("editSave").disabled = false;
+    $("newFolderBlock").hidden = true; $("newFolderName").value = '';
+    var picker = $("editParent"); picker.replaceChildren();
+    var owner = node ? find(node.id).parent : null;
+    var initial = owner ? owner.id : selected;
+    roots().forEach(function add(root) {
+      (function folder(f, prefix) {
+        if (node && f.id === node.id) return;
+        var path = prefix ? prefix + ' / ' + f.title : f.title;
+        var option = document.createElement('option'); option.value = f.id; option.textContent = path; picker.appendChild(option);
+        (f.children || []).forEach(function (child) { if (child.children) folder(child, path); });
+      })(root, '');
+    });
+    picker.value = String(initial); if (picker.selectedIndex < 0) picker.selectedIndex = 0;
     $("editDialog").showModal();
     $("editName").focus();
   }
 
-  $("editForm").addEventListener("submit", function () {
-    var name = $("editName").value, url = $("editUrl").value.trim(), folder = $("editForm").dataset.folder === "1";
-    if (editing) {
-      var message = { type: "bm.update", id: editing.id, title: name };
-      if (!folder && url) message.url = url;
-      send(message);
-    } else if (folder) {
-      send({ type: "bm.addFolder", parent: selected, title: name });
-    } else if (url) {
-      send({ type: "bm.add", parent: selected, title: name || url, url: url });
+  $("createFolder").onclick = function () { $("newFolderBlock").hidden = false; $("newFolderName").focus(); };
+  $("editForm").addEventListener("submit", function (event) {
+    event.preventDefault();
+    var name = $("editName").value.trim(), url = $("editUrl").value.trim(), folder = $("editForm").dataset.folder === "1";
+    var newFolder = $("newFolderBlock").hidden ? '' : $("newFolderName").value.trim();
+    if ((!folder && !/^https?:\/\//i.test(url)) || (folder && !name) || (!$("newFolderBlock").hidden && !newFolder)) {
+      $("editError").textContent = '请检查名称、网址和新文件夹名称'; return;
     }
-    editing = null;
+    $("editSave").disabled = true;
+    send({ type: 'bm.save', id: editing ? editing.id : 0, folder: !!folder, parent: Number($("editParent").value), title: name || url, url: url, newFolder: newFolder });
   });
   $("editCancel").onclick = function () { editing = null; $("editDialog").close(); };
   $("addBookmark").onclick = function () { openEdit(null, false); };
@@ -288,6 +309,10 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top
         if (hit) { if (hit.parent) selected = hit.parent.id; render(); openEdit(hit.node); return; }
       }
       render();
+    } else if (data.type === 'bm.saved') {
+      $("editSave").disabled = false;
+      if (data.ok) { editing = null; $("editDialog").close(); }
+      else $("editError").textContent = data.error || '保存失败，请重试';
     } else if (data.type === 'bm.icons') {
       (data.icons || []).forEach(function (item) {
         var img = document.querySelector('[data-bookmark-id="' + Number(item.id) + '"]');

@@ -520,6 +520,11 @@ void ChromePainter::DrawBookmarkBar(const Palette& palette, const ChromeLayout& 
     if (state.hover.kind == ChromeHit::kBookmark && state.hover.index == static_cast<int>(i)) {
       FillRounded(r, 5.0f, palette.buttonHover);
     }
+    if (state.bookmarkDrag && state.bookmarkDropIntoFolder && state.bookmarkDrop == static_cast<int>(i)) {
+      FillRounded(r, 5.0f, palette.buttonHover);
+      SetColor(palette.accent);
+      target_->DrawRoundedRectangle(D2D1::RoundedRect(r,5.0f,5.0f), brush_.Get(), 1.5f);
+    }
     const D2D1_POINT_2F icon = D2D1::Point2F(r.left + 8.0f + 7.0f, (r.top + r.bottom) * 0.5f);
     SetColor(palette.textMuted);
     if (item.folder) {
@@ -533,6 +538,13 @@ void ChromePainter::DrawBookmarkBar(const Palette& palette, const ChromeLayout& 
                         D2D1::RectF(r.left + 8.0f + 20.0f, r.top, r.right - 8.0f, r.bottom), brush_.Get(),
                         D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
+  }
+  if (state.bookmarkDrag && !state.bookmarkDropIntoFolder && state.bookmarkDrop >= 0 && !layout.bookmarks.empty()) {
+    const auto index = static_cast<size_t>(state.bookmarkDrop);
+    const float x = index < layout.bookmarks.size() ? layout.bookmarks[index].left - 1 : layout.bookmarks.back().right + 1;
+    const auto& r = layout.bookmarks.front();
+    SetColor(palette.accent);
+    Stroke(D2D1::Point2F(x,r.top+2),D2D1::Point2F(x,r.bottom-2),2.0f);
   }
   if (layout.hasOverflow) {
     const D2D1_RECT_F r = layout.bookmarkOverflow;

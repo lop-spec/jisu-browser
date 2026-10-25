@@ -3,6 +3,7 @@
 #include "json.h"
 #include "metrics.h"
 #include "menu_icons.h"
+#include "bookmark_editor.h"
 #include "ntp_html.h"
 
 #include <WebView2EnvironmentOptions.h>
@@ -1036,6 +1037,32 @@ void BrowserWindow::OnPageMessage(Tab& tab, const std::string& text) {
     return;
   }
   bool changed = false;
+  if (type == "bm.save") {
+    const auto id = static_cast<int64_t>(message["id"].AsNumber(0));
+    const auto parentId = static_cast<int64_t>(message["parent"].AsNumber(1));
+    auto* parent = bookmarks_.FindById(parentId);
+    auto* node = id ? bookmarks_.FindById(id) : nullptr;
+    const bool folder = message["folder"].AsBool();
+    const auto title = Trim(FromUtf8(message["title"].AsString()));
+    const auto url = Trim(FromUtf8(message["url"].AsString()));
+    const auto newFolder = Trim(FromUtf8(message["newFolder"].AsString()));
+    bool valid = parent && parent->folder && !title.empty() && title.size() <= 4096 && newFolder.size() <= 200 &&
+                 (folder || IsWebUrl(url)) && (!id || (node && !bookmarks_.IsRoot(*node) && node->folder == folder));
+    for (const auto* p = parent; valid && p; p = p->parent) if (p == node) valid = false;
+    if (valid) {
+      if (!newFolder.empty()) parent = bookmarks_.AddFolder(*parent,parent->children.size(),newFolder);
+      if (node) {
+        bookmarks_.Rename(id,title); if (!folder) bookmarks_.SetUrl(id,url);
+        if (node->parent != parent) bookmarks_.Move(id,parent->id,parent->children.size());
+      } else if (folder) bookmarks_.AddFolder(*parent,parent->children.size(),title);
+      else bookmarks_.AddUrl(*parent,parent->children.size(),title,url);
+      settings_.bookmarkFolder = parent->id; SaveSettings();
+      OnBookmarksChanged();
+    }
+    PostToPage(tab, valid ? "{\"type\":\"bm.saved\",\"ok\":true}" :
+                          "{\"type\":\"bm.saved\",\"ok\":false,\"error\":\"目标文件夹或输入无效，未修改书签\"}");
+    return;
+  }
   if (type == "bm.get") {
     PostToPage(tab, "{\"type\":\"bm.tree\",\"tree\":" + bookmarks_.TreeJson() + "}");
   } else if (type == "bm.icons") {
@@ -1579,6 +1606,7 @@ bool BrowserWindow::PreTranslate(const MSG& msg) {
     return false;
   }
   const UINT key = static_cast<UINT>(msg.wParam);
+  if (key == VK_ESCAPE && dragBookmarkId_) { CancelBookmarkDrag(); return true; }
   const bool repeat = (msg.lParam & (1 << 30)) != 0;
   if (DispatchShortcut(key, repeat)) {
     return true;
@@ -1823,31 +1851,26 @@ void BrowserWindow::ToggleBookmark(bool fromKeyboard) {
   if (!tab || !profileLoaded_ || !IsStarrable(tab->url)) {
     return;
   }
-  BookmarkNode* existing = bookmarks_.FindByUrl(tab->url);
-  if (!existing) {
-    bookmarks_.AddUrl(bookmarks_.Bar(), bookmarks_.Bar().children.size(), tab->title.empty() ? tab->url : tab->title,
-                      tab->url);
-    OnBookmarksChanged();
+  (void)fromKeyboard;
+  EditBookmark(bookmarks_.FindByUrl(tab->url), tab->title.empty() ? tab->url : tab->title, tab->url);
+}
+
+void BrowserWindow::EditBookmark(BookmarkNode* node, const std::wstring& title, const std::wstring& url) {
+  const int64_t id = node ? node->id : 0;
+  const int64_t parent = node && node->parent ? node->parent->id : settings_.bookmarkFolder;
+  const auto edit = ShowBookmarkEditor(hwnd_, instance_, bookmarks_, node ? node->title : title,
+                                        node ? node->url : url, parent, node != nullptr);
+  if (!edit) return;
+  const int64_t applied = ApplyBookmarkEdit(bookmarks_, *edit, id);
+  if (!applied) {
+    MessageBoxW(hwnd_, L"目标文件夹已变化，书签未保存，请重试。", L"保存书签", MB_OK | MB_ICONWARNING);
     return;
   }
-  (void)fromKeyboard;
-  // 已收藏：弹出移除 / 编辑
-  POINT point{static_cast<LONG>(std::lround(layout_.star.left * layout_.scale)),
-              static_cast<LONG>(std::lround(layout_.star.bottom * layout_.scale))};
-  ClientToScreen(hwnd_, &point);
-  HMENU menu = CreatePopupMenu();
-  AppendMenuW(menu, MF_STRING, kMenuRemoveStar, L"移除书签");
-  AppendMenuW(menu, MF_STRING, kMenuEditStar, L"编辑…");
-  const UINT command = static_cast<UINT>(
-      TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN, point.x, point.y, hwnd_, nullptr));
-  DestroyMenu(menu);
-  const int64_t id = existing->id;
-  if (command == kMenuRemoveStar) {
-    bookmarks_.Remove(id);
-    OnBookmarksChanged();
-  } else if (command == kMenuEditStar) {
-    OpenBookmarkManager(L"#edit=" + std::to_wstring(id));
+  if (!edit->remove) {
+    if (const auto* saved = bookmarks_.FindById(applied); saved && saved->parent) settings_.bookmarkFolder = saved->parent->id;
+    SaveSettings();
   }
+  OnBookmarksChanged();
 }
 
 // 书签菜单：网址项编号 kMenuItemBase + 序号；有两个以上网址的文件夹末尾加「全部打开」
@@ -1949,7 +1972,8 @@ void BrowserWindow::ShowBookmarkContextMenu(BookmarkNode& node, POINT screen) {
       }
       break;
     case kMenuEdit:
-      OpenBookmarkManager(L"#edit=" + std::to_wstring(id));
+      if (node.folder) OpenBookmarkManager(L"#edit=" + std::to_wstring(id));
+      else EditBookmark(&node, node.title, node.url);
       break;
     case kMenuDelete:
       if (bookmarks_.Remove(id)) {
@@ -2051,6 +2075,7 @@ void BrowserWindow::LoadSettings() {
   std::string text;
   json::Value root;
   if (ReadFileBytes(profileDir_ + L"\\jisu-settings.json", text) && json::Parse(text, root)) {
+    settings_.bookmarkFolder = static_cast<int64_t>(root["bookmarkFolder"].AsNumber(1));
     settings_.maxRegularTabs = static_cast<int>(std::clamp(root["maxRegularTabs"].AsNumber(10), 1.0, 99.0));
     settings_.bookmarkBar = root["bookmarkBar"].AsBool(true);
     settings_.importedDefaultBrowser = root["importedDefaultBrowser"].AsBool(false);
@@ -2065,7 +2090,8 @@ void BrowserWindow::SaveSettings() {
   out += settings_.bookmarkBar ? "true" : "false";
   out += ",\"importedDefaultBrowser\":";
   out += settings_.importedDefaultBrowser ? "true" : "false";
-  out += ",\"maxRegularTabs\":" + std::to_string(settings_.maxRegularTabs) + "}";
+  out += ",\"maxRegularTabs\":" + std::to_string(settings_.maxRegularTabs);
+  out += ",\"bookmarkFolder\":" + std::to_string(settings_.bookmarkFolder) + "}";
   EnsureDirectory(profileDir_);
   WriteFileAtomic(profileDir_ + L"\\jisu-settings.json", out);
 }
@@ -2311,6 +2337,13 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
         SetFocus(edit_);
       }
       return 0;
+    case WM_CAPTURECHANGED:
+    case WM_CANCELMODE:
+      CancelBookmarkDrag();
+      break;
+    case WM_KEYDOWN:
+      if (wParam == VK_ESCAPE && dragBookmarkId_) { CancelBookmarkDrag(); return 0; }
+      break;
     case WM_MOUSEMOVE:
       OnMouseMove(PointFromLParam(lParam));
       return 0;
@@ -2616,6 +2649,9 @@ ChromeState BrowserWindow::BuildChromeState() const {
     state.tabs.push_back(ChromeTab{std::move(title), i == active_, tab.loading, tab.agent, tab.agentAwake, tab.agent ? L"" : favicons_.Request(tab.url)});
   }
   state.hover = hover_;
+  state.bookmarkDrag = draggingBookmark_;
+  state.bookmarkDrop = dropBookmark_;
+  state.bookmarkDropIntoFolder = dropIntoFolder_;
   if (const Tab* tab = ActiveTab()) {
     state.canBack = tab->canBack;
     state.canForward = tab->canForward;
@@ -2686,6 +2722,11 @@ void BrowserWindow::InvalidateChrome() {
 }
 
 void BrowserWindow::OnMouseMove(POINT point) {
+  if (dragBookmarkId_ && GetCapture() == hwnd_) {
+    if (!draggingBookmark_ && (std::abs(point.x - dragStart_.x) >= GetSystemMetricsForDpi(SM_CXDRAG, dpi_) ||
+                              std::abs(point.y - dragStart_.y) >= GetSystemMetricsForDpi(SM_CYDRAG, dpi_))) draggingBookmark_ = true;
+    if (draggingBookmark_) { UpdateBookmarkDrop(point); return; }
+  }
   if (!trackingMouse_) {
     TRACKMOUSEEVENT track{sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd_, 0};
     TrackMouseEvent(&track);
@@ -2700,12 +2741,19 @@ void BrowserWindow::OnMouseMove(POINT point) {
 
 void BrowserWindow::OnLButtonDown(POINT point) {
   pressed_ = HitTest(point);
+  if (pressed_.kind == ChromeHit::kBookmark && static_cast<size_t>(pressed_.index) < barItems_.size()) {
+    dragBookmarkId_ = barItems_[static_cast<size_t>(pressed_.index)]->id;
+    dragStart_ = point;
+    SetCapture(hwnd_);
+  }
   if (pressed_.kind == ChromeHit::kTab) {
     Activate(static_cast<size_t>(pressed_.index));  // 标签按下即切换
   }
 }
 
 void BrowserWindow::OnLButtonUp(POINT point) {
+  if (draggingBookmark_) { FinishBookmarkDrag(point); return; }
+  if (dragBookmarkId_) { dragBookmarkId_ = 0; if (GetCapture() == hwnd_) ReleaseCapture(); }
   const ChromeHit hit = HitTest(point);
   const ChromeHit pressed = pressed_;
   pressed_ = {};

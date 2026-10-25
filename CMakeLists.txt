@@ -52,6 +52,8 @@ add_executable(jisu-browser WIN32
   src/browser_profile.cpp
   src/favicons.cpp
   src/menu_icons.cpp
+  src/bookmark_editor.cpp
+  src/bookmark_drag.cpp
   res/app.rc
   res/app.manifest)
 
@@ -92,6 +94,13 @@ target_compile_definitions(menu-icons-test PRIVATE UNICODE _UNICODE NOMINMAX)
 target_compile_options(menu-icons-test PRIVATE /utf-8)
 target_link_libraries(menu-icons-test PRIVATE windowscodecs ole32 gdi32 user32)
 add_test(NAME native-bookmark-menu-icons COMMAND menu-icons-test "${CMAKE_CURRENT_SOURCE_DIR}/res/app.ico")
+
+add_executable(bookmark-editor-test tests/bookmark-editor-test.cpp src/bookmark_editor.cpp src/bookmarks.cpp src/common.cpp src/json.cpp)
+target_include_directories(bookmark-editor-test PRIVATE src)
+target_compile_definitions(bookmark-editor-test PRIVATE UNICODE _UNICODE NOMINMAX)
+target_compile_options(bookmark-editor-test PRIVATE /utf-8)
+target_link_libraries(bookmark-editor-test PRIVATE ole32 gdi32 user32 advapi32)
+add_test(NAME native-bookmark-edit-move COMMAND bookmark-editor-test)
 
 add_custom_command(TARGET jisu-browser POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/ntp" "$<TARGET_FILE_DIR:jisu-browser>/ntp")
