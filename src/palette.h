@@ -27,7 +27,7 @@ struct Palette {
   Rgb content;
 };
 
-// 跟随系统「默认应用模式」（HKCU\...\Themes\Personalize\AppsUseLightTheme），与 WebView2 的判断一致。
+// 外壳固定采用参考图的浅蓝灰标签条与白色工具栏，不修改 Windows 或网站的配色设置。
 Palette LoadPalette();
 
 inline COLORREF ToColorRef(Rgb c) { return RGB(c.r, c.g, c.b); }

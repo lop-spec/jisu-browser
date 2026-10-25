@@ -93,7 +93,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR commandLine, int) {
     graphics.Start(options);
     graphics.WaitReady();
     graphics.NotifyFirstPaint();
-    const Palette light{false, {235,242,250}, {220,230,244}, {255,255,255}, {236,237,239}, {241,243,244}, {218,220,224}, {218,220,224}, {31,31,31}, {95,99,104}, {26,115,232}, {255,255,255}};
+    const Palette light = LoadPalette();
+    Check(!light.dark && light.frame.r == 235 && light.frame.g == 242 && light.frame.b == 250 &&
+          light.toolbar.r == 255 && light.toolbar.g == 255 && light.toolbar.b == 255,
+          "Live chrome palette must match the light reference, regardless of Windows app theme");
     const Palette dark{true, {28,28,28}, {42,42,42}, {43,43,43}, {58,58,58}, {31,31,31}, {60,60,60}, {58,58,58}, {232,232,232}, {160,160,160}, {76,139,245}, {32,32,32}};
     Render(graphics, light, out, L"light-1024.png", 1024, 96, 3, 2);
     Render(graphics, light, out, L"hover-1024.png", 1024, 96, 3, 2, {ChromeHit::kTabClose, 1});

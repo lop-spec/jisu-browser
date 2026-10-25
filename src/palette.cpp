@@ -18,29 +18,13 @@ constexpr Palette kLight{
     .content = {0xFF, 0xFF, 0xFF},
 };
 
-constexpr Palette kDark{
-    .dark = true,
-    .frame = {0x1C, 0x1C, 0x1C},
-    .tabHover = {0x2A, 0x2A, 0x2A},
-    .toolbar = {0x2B, 0x2B, 0x2B},
-    .buttonHover = {0x3A, 0x3A, 0x3A},
-    .omnibox = {0x1F, 0x1F, 0x1F},
-    .omniboxBorder = {0x3C, 0x3C, 0x3C},
-    .separator = {0x3A, 0x3A, 0x3A},
-    .text = {0xE8, 0xE8, 0xE8},
-    .textMuted = {0xA0, 0xA0, 0xA0},
-    .accent = {0x4C, 0x8B, 0xF5},
-    .content = {0x20, 0x20, 0x20},
-};
-
 }  // namespace
 
 Palette LoadPalette() {
-  DWORD light = 1;
-  DWORD size = sizeof(light);
-  RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-               L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size);
-  return light ? kLight : kDark;
+  // The supplied reference is a light blue-gray strip and white connected tab.
+  // Keep browser chrome stable even when Windows applications use dark mode;
+  // this does not alter the Windows setting or force a website's color scheme.
+  return kLight;
 }
 
 }  // namespace jisu

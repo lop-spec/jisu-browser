@@ -4,8 +4,8 @@
 1 ICON "app.ico"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,2,1,0
- PRODUCTVERSION 0,2,1,0
+ FILEVERSION 0,2,2,0
+ PRODUCTVERSION 0,2,2,0
  FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -18,11 +18,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Jisu Browser"
             VALUE "FileDescription", "Jisu Browser"
-            VALUE "FileVersion", "0.2.1"
+            VALUE "FileVersion", "0.2.2"
             VALUE "InternalName", "jisu-browser"
             VALUE "OriginalFilename", "jisu-browser.exe"
             VALUE "ProductName", "Jisu Browser"
-            VALUE "ProductVersion", "0.2.1"
+            VALUE "ProductVersion", "0.2.2"
         END
     END
     BLOCK "VarFileInfo"
