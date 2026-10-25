@@ -32,6 +32,7 @@ void BrowserWindow::ConfigureProfile(Tab& tab) {
     entry.path = path; entry.name = FromUtf8(item["name"].AsString());
     entry.popup = FromUtf8(item["popup"].AsString()); entry.options = FromUtf8(item["options"].AsString());
     entry.enabled = item["enabled"].AsBool();
+    entry.pinned = item["pinned"].AsBool(true);
     entry.nativeTabLimit = item["sourceId"].AsString() == "auto-close-old-tabs";
     extensions_.push_back(std::move(entry));
   }
@@ -71,6 +72,7 @@ void BrowserWindow::SaveExtensionStatus() {
     out += "{\"name\":"; json::AppendQuoted(out, ToUtf8(e.name));
     out += ",\"id\":"; json::AppendQuoted(out, ToUtf8(e.id));
     out += ",\"nativeTabLimit\":" + std::string(e.nativeTabLimit ? "true" : "false");
+    out += ",\"pinned\":" + std::string(e.pinned ? "true" : "false");
     out += ",\"enabled\":" + std::string(e.enabled ? "true" : "false");
     out += ",\"loaded\":" + std::string(SUCCEEDED(e.result) && !e.id.empty() ? "true" : "false");
     out += ",\"hresult\":" + std::to_string(static_cast<uint32_t>(e.result));
@@ -80,6 +82,7 @@ void BrowserWindow::SaveExtensionStatus() {
   }
   out += "]}";
   WriteFileAtomic(profileDir_ + L"\\extensions-status.json", out);
+  RefreshExtensionToolbar();
   for (auto& tab : tabs_) if (tab->url.starts_with(L"https://newtab.jisu.example/extensions.html")) PostToPage(*tab, "{\"type\":\"ext.list\",\"data\":" + out + "}");
 }
 void BrowserWindow::PruneUnlistedExtensions() {

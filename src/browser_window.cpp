@@ -4,6 +4,7 @@
 #include "metrics.h"
 #include "menu_icons.h"
 #include "bookmark_editor.h"
+#include "extension_toolbar.h"
 #include "ntp_html.h"
 
 #include <WebView2EnvironmentOptions.h>
@@ -894,6 +895,7 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
       &token);
   tab.controller->add_GotFocus(Callback<ICoreWebView2FocusChangedEventHandler>(
                                    [this](ICoreWebView2Controller*, IUnknown*) -> HRESULT {
+                                     if(extensionPopupWindow_) PostMessageW(hwnd_,kMsgCloseExtensionPopup,static_cast<WPARAM>(extensionPopupGeneration_),0);
                                      focusInWebView_ = true;
                                      return S_OK;
                                    })
@@ -987,18 +989,21 @@ void BrowserWindow::OnPageMessage(Tab& tab, const std::string& text) {
   const std::string& type = message["type"].AsString();
   if (type.starts_with("ext.") && tab.url.starts_with(L"https://newtab.jisu.example/extensions.html")) {
     if (type == "ext.get") SaveExtensionStatus();
-    else if (type == "ext.open" || type == "ext.toggle") {
+    else if (type == "ext.open" || type == "ext.toggle" || type == "ext.pin") {
       const std::wstring id = FromUtf8(message["id"].AsString());
       for (size_t i = 0; i < extensions_.size(); ++i) {
         auto& e = extensions_[i];
         if (e.id != id || !e.handle) continue;
-        if (type == "ext.open") {
+        if (type == "ext.pin") {
+          SetExtensionPinned(i,message["pinned"].AsBool());
+        } else if (type == "ext.open") {
           std::wstring page = message["options"].AsBool() ? e.options : e.popup;
           while (!page.empty() && page.front() == L'/') page.erase(page.begin());
           if (!page.empty() && page.find(L":") == std::wstring::npos && page.find(L"..") == std::wstring::npos)
             NewTab(L"chrome-extension://" + e.id + L"/" + page);
         } else {
           const bool enabled = message["enabled"].AsBool();
+          if (!enabled && popupExtensionIndex_ == i) CloseExtensionPopup();
           std::weak_ptr<int> alive = alive_;
           e.handle->Enable(enabled ? TRUE : FALSE, Callback<ICoreWebView2BrowserExtensionEnableCompletedHandler>(
             [this, i, enabled, alive](HRESULT hr) -> HRESULT {
@@ -1477,6 +1482,7 @@ void BrowserWindow::CloseTab(size_t index) {
 }
 
 void BrowserWindow::Activate(size_t index) {
+  CloseExtensionPopup();
   if (index >= tabs_.size()) {
     return;
   }
@@ -1606,6 +1612,7 @@ bool BrowserWindow::PreTranslate(const MSG& msg) {
     return false;
   }
   const UINT key = static_cast<UINT>(msg.wParam);
+  if (key == VK_ESCAPE && extensionPopupWindow_) { CloseExtensionPopup(); return true; }
   if (key == VK_ESCAPE && dragBookmarkId_) { CancelBookmarkDrag(); return true; }
   const bool repeat = (msg.lParam & (1 << 30)) != 0;
   if (DispatchShortcut(key, repeat)) {
@@ -2279,6 +2286,7 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       ValidateRect(hwnd_, nullptr);
       return 0;
     case WM_SIZE:
+      CloseExtensionPopup();
       if (wParam == SIZE_MINIMIZED) {
         PlaceAllTabs();  // 最小化时让内核降载；醒着的智能体标签移去屏幕外宿主
         return 0;
@@ -2303,7 +2311,10 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       return 0;
     case WM_DPICHANGED: {
+      CloseExtensionPopup();
+      for (auto& e : extensions_) if(e.toolbarIcon){DestroyIcon(e.toolbarIcon);e.toolbarIcon=nullptr;}
       dpi_ = HIWORD(wParam);
+      if (extensionsButton_) RefreshExtensionToolbar();
       painter_.SetDpi(dpi_);
       UpdateEditFont();
       const auto* suggested = reinterpret_cast<const RECT*>(lParam);
@@ -2374,10 +2385,27 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
         return reinterpret_cast<LRESULT>(omniboxBrush_);
       }
       break;
+    case WM_DRAWITEM:
+      if (wParam == kExtensionsButton || (wParam >= kExtensionButtonBase && wParam - kExtensionButtonBase < extensions_.size())) {
+        DrawExtensionButton(*reinterpret_cast<const DRAWITEMSTRUCT*>(lParam)); return TRUE;
+      }
+      break;
+    case kMsgCloseExtensionPopup:
+      if(static_cast<uint64_t>(wParam) == extensionPopupGeneration_) CloseExtensionPopup();
+      return 0;
+    case kMsgOpenExtensionSettings: {
+      std::unique_ptr<std::wstring> url(reinterpret_cast<std::wstring*>(lParam));
+      CloseExtensionPopup(); if(url) NewTab(*url); return 0;
+    }
+    case WM_ACTIVATE:
+      if (LOWORD(wParam) == WA_INACTIVE && reinterpret_cast<HWND>(lParam) != extensionPopupWindow_) CloseExtensionPopup();
+      break;
     case WM_COMMAND:
+      if (HIWORD(wParam) == BN_CLICKED && HandleExtensionCommand(LOWORD(wParam))) return 0;
       if (LOWORD(wParam) == kAddressBarId) {
         switch (HIWORD(wParam)) {
           case EN_SETFOCUS:
+            CloseExtensionPopup();
             omniboxFocused_ = true;
             focusInWebView_ = false;
             PostMessageW(edit_, EM_SETSEL, 0, -1);  // 点进地址栏即全选，和主流浏览器一致
@@ -2469,6 +2497,9 @@ void BrowserWindow::OnDestroy() {
   destroyed_ = true;
   alive_.reset();
   favicons_.Stop();
+  CloseExtensionPopup();
+  for (auto& e : extensions_) if(e.toolbarIcon){DestroyIcon(e.toolbarIcon);e.toolbarIcon=nullptr;}
+  if(extensionTooltip_){DestroyWindow(extensionTooltip_);extensionTooltip_=nullptr;}
   bridge_.reset();  // 先断开所有智能体连接，再关控件
   for (auto& tab : tabs_) {
     if (tab->leaseDone) {
@@ -2581,7 +2612,8 @@ void BrowserWindow::Relayout() {
   l.forward = D2D1::RectF(44.0f, top + 4.0f, 76.0f, top + 36.0f);
   l.reload = D2D1::RectF(80.0f, top + 4.0f, 112.0f, top + 36.0f);
   l.menu = D2D1::RectF(std::max(160.0f, l.width - 40.0f), top + 4.0f, std::max(192.0f, l.width - 8.0f), top + 36.0f);
-  l.omnibox = D2D1::RectF(120.0f, top + 5.0f, std::max(160.0f, l.menu.left - 6.0f), top + 35.0f);
+  const float toolbarRight = LayoutExtensionToolbar(l.menu.left - 6.0f, top, l.scale);
+  l.omnibox = D2D1::RectF(120.0f, top + 5.0f, std::max(160.0f, toolbarRight - 6.0f), top + 35.0f);
   l.star = D2D1::RectF(l.omnibox.right - 32.0f, l.omnibox.top + 2.0f, l.omnibox.right - 4.0f, l.omnibox.bottom - 2.0f);
   LayoutBookmarkBar();
   l.separatorPx = static_cast<int>(std::lround((l.tabStripHeight + l.toolbarHeight + l.bookmarkBarHeight) * l.scale));
@@ -2740,6 +2772,7 @@ void BrowserWindow::OnMouseMove(POINT point) {
 }
 
 void BrowserWindow::OnLButtonDown(POINT point) {
+  CloseExtensionPopup();
   pressed_ = HitTest(point);
   if (pressed_.kind == ChromeHit::kBookmark && static_cast<size_t>(pressed_.index) < barItems_.size()) {
     dragBookmarkId_ = barItems_[static_cast<size_t>(pressed_.index)]->id;
@@ -2826,6 +2859,7 @@ void BrowserWindow::OnMButtonUp(POINT point) {
 }
 
 void BrowserWindow::OnRButtonUp(POINT point) {
+  CloseExtensionPopup();
   const ChromeHit hit = HitTest(point);
   if (hit.kind == ChromeHit::kBookmark && static_cast<size_t>(hit.index) < barItems_.size()) {
     POINT screen = point;

@@ -50,6 +50,8 @@ add_executable(jisu-browser WIN32
   src/agent_bridge.cpp
   src/browser_window.cpp
   src/browser_profile.cpp
+  src/extension_toolbar.cpp
+  src/extension_popup.cpp
   src/favicons.cpp
   src/menu_icons.cpp
   src/bookmark_editor.cpp
@@ -74,7 +76,7 @@ target_compile_options(jisu-browser PRIVATE /W4 /permissive- /utf-8 /Zc:__cplusp
 
 target_link_libraries(jisu-browser PRIVATE
   "${WEBVIEW2_NATIVE}/${WEBVIEW2_ARCH}/WebView2LoaderStatic.lib"
-  version d2d1 dwrite d3d11 dwmapi winhttp shell32 ole32 advapi32 delayimp windowscodecs)
+  version d2d1 dwrite d3d11 dwmapi winhttp shell32 ole32 advapi32 delayimp windowscodecs comctl32)
 
 # 首帧路径之外的 DLL 延迟到第一次调用才加载：D2D/DWrite/D3D 由后台预热线程触发，与建窗并行；
 # WinHTTP（智能体桥）在内核就绪后才用，shell32 只在菜单「设为默认浏览器」时用。
