@@ -2,6 +2,7 @@
 
 #include "json.h"
 #include "metrics.h"
+#include "menu_icons.h"
 #include "ntp_html.h"
 
 #include <WebView2EnvironmentOptions.h>
@@ -1864,6 +1865,7 @@ void BrowserWindow::ShowBookmarkMenu(const std::vector<BookmarkNode*>& nodes, Bo
                                      bool alignRight) {
   std::vector<BookmarkNode*> urls;
   std::vector<BookmarkNode*> folders;
+  BookmarkMenuIcons icons(dpi_);  // includes submenu images; handles outlive the entire native modal menu
   auto build = [&](auto&& self, HMENU menu, const std::vector<BookmarkNode*>& list, BookmarkNode* owner) -> void {
     if (list.empty()) {
       AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"（空）");
@@ -1880,10 +1882,11 @@ void BrowserWindow::ShowBookmarkMenu(const std::vector<BookmarkNode*>& nodes, Bo
         }
         HMENU sub = CreatePopupMenu();
         self(self, sub, children, node);
-        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sub), MenuText(node->title).c_str());
+        icons.Append(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(sub), MenuText(node->title), L"", true);
       } else {
         urls.push_back(node);
-        AppendMenuW(menu, MF_STRING, kMenuItemBase + urls.size() - 1, MenuText(BookmarkLabel(*node)).c_str());
+        icons.Append(menu, MF_STRING, kMenuItemBase + urls.size() - 1, MenuText(BookmarkLabel(*node)),
+                     favicons_.Request(node->url), false);
       }
     }
     const int count = owner ? CountUrls(*owner) : 0;

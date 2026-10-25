@@ -8,9 +8,10 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256];
 const BACKGROUND = [0x1b, 0x1b, 0x1b];
-const ORANGE = [0xff, 0x9c, 0x55];
+const ORANGE = [0xff, 0xc0, 0x64];
 const RADIUS = 0.46;
-const BOLT = [[0.555, 0.19], [0.325, 0.54], [0.455, 0.54], [0.455, 0.81], [0.695, 0.45], [0.555, 0.45]];
+// 1.23x taller, 1.38x wider than the first circle icon; brighter amber-orange.
+const BOLT = [[0.575, 0.12], [0.255, 0.55], [0.435, 0.55], [0.435, 0.88], [0.765, 0.44], [0.575, 0.44]];
 
 function insideCircle(x, y) {
   return (x - 0.5) ** 2 + (y - 0.5) ** 2 <= RADIUS ** 2;

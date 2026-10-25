@@ -51,6 +51,7 @@ add_executable(jisu-browser WIN32
   src/browser_window.cpp
   src/browser_profile.cpp
   src/favicons.cpp
+  src/menu_icons.cpp
   res/app.rc
   res/app.manifest)
 
@@ -85,6 +86,12 @@ enable_testing()
 add_executable(tab-policy-test tests/tab-policy-test.cpp)
 target_include_directories(tab-policy-test PRIVATE src)
 add_test(NAME native-tab-policy COMMAND tab-policy-test)
+add_executable(menu-icons-test tests/menu-icons-test.cpp src/menu_icons.cpp)
+target_include_directories(menu-icons-test PRIVATE src)
+target_compile_definitions(menu-icons-test PRIVATE UNICODE _UNICODE NOMINMAX)
+target_compile_options(menu-icons-test PRIVATE /utf-8)
+target_link_libraries(menu-icons-test PRIVATE windowscodecs ole32 gdi32 user32)
+add_test(NAME native-bookmark-menu-icons COMMAND menu-icons-test "${CMAKE_CURRENT_SOURCE_DIR}/res/app.ico")
 
 add_custom_command(TARGET jisu-browser POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/ntp" "$<TARGET_FILE_DIR:jisu-browser>/ntp")
