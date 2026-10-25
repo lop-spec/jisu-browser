@@ -710,8 +710,8 @@ void AgentBridge::Attach(Connection& connection, const std::string& idJson) {
     return;
   }
   connection.attaching = true;
-  // Reused WebView2 tabs may have no live renderer target while hidden/suspended (Evergreen 155).
-  // Resume/show only the already leased off-screen control before querying its CDP target.
+  // A running target is required for CDP attachment. Resume/show only the already leased
+  // off-screen control; never activate a native window or borrow a user page.
   host_.ResumeAgentTab(connection.tabId);
   Wake(connection);
   Subscribe(connection);  // 先订阅：附加成功后的第一批事件不能丢
