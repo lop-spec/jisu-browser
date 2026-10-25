@@ -54,7 +54,8 @@ C++20 + Win32 + 官方 WebView2 SDK。标签条、工具栏、书签栏用 Direc
 
 `node tools/import-profile-assets.mjs --apply` 只处理本机能找到的 **Anime4K WebExtension、Auto Close Old Tabs、Authenticator** 程序文件，并导入本机网站图标缓存。扩展源码、账号、验证码种子、保险库和扩展存储不随浏览器发布；第三方程序不进仓库。
 
-- 三项扩展均通过 WebView2 的正式扩展 API 加载，可在「菜单 → 扩展管理」打开、设置或停用；加载成功不代表所有 Chrome API 都兼容。
+- 扩展通过 WebView2 的正式扩展 API 加载；已启用的扩展默认显示在地址栏右侧，悬停显示名称，点击在按钮下方打开独立弹层，再点一次、Esc 或点击外部关闭；不占用网页标签，不借用智能体标签。
+- 「扩展程序」拼图按钮列出全部扩展，可打开、固定到工具栏／取消固定、进入设置或管理；管理页也有固定开关。固定状态写入本机 `extensions.json` 的 `pinned`，重启保留；取消固定不等于停用，停用的扩展不显示按钮。加载成功不代表所有 Chrome API 都兼容。
 - Auto Close Old Tabs 的界面沿用原扩展，普通标签关闭由外壳原生适配：默认上限 10 个，按创建顺序关闭最早的非当前普通标签，保护当前页、智能体租用标签和扩展页面。上限可在扩展「打开」里改为 1–99。
 - 安装清单写在用户资料目录的 `extensions.json`；指定 `removeUnlisted: true` 后，启动时会通过正式 API 移除未列出的扩展，结果在 `extensions-status.json` 与 `extensions-cleanup.json`。
 - 开启 WebView2 原生密码保存和自动填充。但 SDK 没有跨浏览器密码导入接口；不会解密或直接搬运 `Login Data`、Cookie、登录会话或身份验证器种子。已有账号要在极速里登录；Authenticator 的保险库迁移需由用户通过其正式导入流程完成。
