@@ -710,6 +710,10 @@ void AgentBridge::Attach(Connection& connection, const std::string& idJson) {
     return;
   }
   connection.attaching = true;
+  // Reused WebView2 tabs may have no live renderer target while hidden/suspended (Evergreen 155).
+  // Resume/show only the already leased off-screen control before querying its CDP target.
+  host_.ResumeAgentTab(connection.tabId);
+  Wake(connection);
   Subscribe(connection);  // 先订阅：附加成功后的第一批事件不能丢
   const uint32_t connectionId = connection.id;
   std::weak_ptr<int> alive = alive_;
@@ -727,7 +731,7 @@ void AgentBridge::Attach(Connection& connection, const std::string& idJson) {
              const std::string targetId =
                  SUCCEEDED(hr) && json::Parse(body, info) ? info["targetInfo"]["targetId"].AsString() : std::string();
              if (targetId.empty()) {
-               FinishAttach(connectionId, std::string(), "Target.getTargetInfo failed: " + body);
+               FinishAttach(connectionId, std::string(), "Target.getTargetInfo failed (HRESULT " + std::to_string(static_cast<uint32_t>(hr)) + "): " + body);
                return;
              }
              json::Value request = json::Value::MakeObject();
