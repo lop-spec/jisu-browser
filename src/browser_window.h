@@ -6,6 +6,7 @@
 #include "bookmarks.h"
 #include "common.h"
 #include "graphics.h"
+#include "favicons.h"
 #include "options.h"
 #include "palette.h"
 
@@ -103,6 +104,10 @@ class BrowserWindow : public AgentHost {
   void OnControllerFailed(Tab& tab, HRESULT result);
   void AbandonNewWindow(Tab& tab);
   void ConfigureWebView(Tab& tab);
+  void ConfigureProfile(Tab& tab);
+  void InstallNextExtension();
+  void SaveExtensionStatus();
+  void OpenExtensions();
   void NavigateNewTabPage(Tab& tab);
   void OnWebMessage(uint32_t id, ICoreWebView2WebMessageReceivedEventArgs* args);
   void OnPageMessage(Tab& tab, const std::string& json);
@@ -186,6 +191,18 @@ class BrowserWindow : public AgentHost {
 
   // 书签与设置：Create 时起后台线程读，首帧前等它读完
   BookmarkStore bookmarks_;
+  mutable FaviconCache favicons_;
+  bool profileConfigured_ = false;
+  struct ExtensionEntry {
+    std::wstring path, name, id, popup, options;
+    bool enabled = false;
+    HRESULT result = E_PENDING;
+    ComPtr<ICoreWebView2BrowserExtension> handle;
+  };
+  std::vector<ExtensionEntry> extensions_;
+  size_t extensionIndex_ = 0;
+  ComPtr<ICoreWebView2Profile7> extensionProfile_;
+  std::shared_ptr<int> alive_ = std::make_shared<int>(0);
   Settings settings_;
   HANDLE profileThread_ = nullptr;
   std::wstring profileDir_;     // 用户数据目录（书签、设置文件所在）

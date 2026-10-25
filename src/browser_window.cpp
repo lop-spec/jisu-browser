@@ -47,6 +47,7 @@ constexpr wchar_t kSearchPrefix[] = L"https://www.bing.com/search?q=";
 constexpr wchar_t kProfileProp[] = L"JisuBrowser.Profile";
 
 constexpr UINT kMsgCommand = WM_APP + 1;
+constexpr UINT kMsgFavicon = WM_APP + 2;
 constexpr UINT_PTR kTimerSpare = 1;
 constexpr UINT_PTR kTimerMetrics = 2;
 constexpr UINT_PTR kTimerWatchdog = 3;
@@ -72,6 +73,7 @@ constexpr UINT kMenuToggleBar = 1003;
 constexpr UINT kMenuImport = 1004;
 constexpr UINT kMenuDefaultBrowser = 1005;
 constexpr UINT kMenuAbout = 1006;
+constexpr UINT kMenuExtensions = 1007;
 constexpr UINT kMenuOpen = 2001;
 constexpr UINT kMenuOpenNewTab = 2002;
 constexpr UINT kMenuEdit = 2003;
@@ -359,6 +361,8 @@ bool BrowserWindow::Create(HINSTANCE instance) {
   if (!created) {
     return false;
   }
+  SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+  if (options_.metricsPath.empty() && options_.preheatSeconds <= 0) favicons_.Start(profileDir_, hwnd_, kMsgFavicon);
   SetPropW(hwnd_, kProfileProp, reinterpret_cast<HANDLE>(static_cast<uintptr_t>(ProfileHash(profileDir_))));
   if (options_.preheatSeconds > 0) {
     SetTimer(hwnd_, kTimerPreheat, static_cast<UINT>(options_.preheatSeconds) * 1000u, nullptr);
@@ -400,6 +404,7 @@ void BrowserWindow::StartEnvironment() {
   Metrics& metrics = Metrics::Get();
   metrics.Mark("envBegin");
   auto environmentOptions = Make<CoreWebView2EnvironmentOptions>();
+  environmentOptions->put_AreBrowserExtensionsEnabled(TRUE);
   if (!options_.browserArgs.empty()) {
     environmentOptions->put_AdditionalBrowserArguments(options_.browserArgs.c_str());
   }
@@ -648,8 +653,34 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
     const std::wstring folder = ExeDirectory() + L"\\ntp";
     webview3->SetVirtualHostNameToFolderMapping(kNtpHost, folder.c_str(), COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY);
   }
+  ComPtr<ICoreWebView2_3> faviconMapping;
+  if (SUCCEEDED(tab.webview.As(&faviconMapping))) {
+    const std::wstring cache = profileDir_ + L"\\Favicons";
+    faviconMapping->SetVirtualHostNameToFolderMapping(L"favicons.jisu.example", cache.c_str(), COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
+  }
+  ConfigureProfile(tab);
   const uint32_t id = tab.id;
   EventRegistrationToken token{};
+  ComPtr<ICoreWebView2_15> faviconView;
+  if (SUCCEEDED(tab.webview.As(&faviconView))) {
+    std::weak_ptr<int> alive = alive_;
+    faviconView->add_FaviconChanged(Callback<ICoreWebView2FaviconChangedEventHandler>(
+      [this, id, alive](ICoreWebView2* sender, IUnknown*) -> HRESULT {
+        if (alive.expired()) return S_OK;
+        const Tab* current = FindTab(id);
+        if (!current || current->agent) return S_OK;
+        const std::wstring url = current->url;
+        ComPtr<ICoreWebView2_15> view;
+        if (SUCCEEDED(sender->QueryInterface(IID_PPV_ARGS(view.GetAddressOf())))) {
+          view->GetFavicon(COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG, Callback<ICoreWebView2GetFaviconCompletedHandler>(
+            [this, url, alive](HRESULT hr, IStream* image) -> HRESULT {
+              if (!alive.expired() && SUCCEEDED(hr)) favicons_.Store(url, image);
+              return S_OK;
+            }).Get());
+        }
+        return S_OK;
+      }).Get(), &token);
+  }
   if (tab.agent) {
     // 智能体标签在屏幕外：内核自带的弹框和权限气泡会落在看不见的地方，改由外壳处理
     ComPtr<ICoreWebView2Settings> settings;
@@ -950,6 +981,44 @@ void BrowserWindow::OnPageMessage(Tab& tab, const std::string& text) {
     return;
   }
   const std::string& type = message["type"].AsString();
+  if (type.starts_with("ext.") && tab.url.starts_with(L"https://newtab.jisu.example/extensions.html")) {
+    if (type == "ext.get") SaveExtensionStatus();
+    else if (type == "ext.open" || type == "ext.toggle") {
+      const std::wstring id = FromUtf8(message["id"].AsString());
+      for (size_t i = 0; i < extensions_.size(); ++i) {
+        auto& e = extensions_[i];
+        if (e.id != id || !e.handle) continue;
+        if (type == "ext.open") {
+          std::wstring page = message["options"].AsBool() ? e.options : e.popup;
+          while (!page.empty() && page.front() == L'/') page.erase(page.begin());
+          if (!page.empty() && page.find(L":") == std::wstring::npos && page.find(L"..") == std::wstring::npos)
+            NewTab(L"chrome-extension://" + e.id + L"/" + page);
+        } else {
+          const bool enabled = message["enabled"].AsBool();
+          std::weak_ptr<int> alive = alive_;
+          e.handle->Enable(enabled ? TRUE : FALSE, Callback<ICoreWebView2BrowserExtensionEnableCompletedHandler>(
+            [this, i, enabled, alive](HRESULT hr) -> HRESULT {
+              if (alive.expired()) return S_OK;
+              if (SUCCEEDED(hr)) {
+                extensions_[i].enabled = enabled;
+                std::string text; json::Value c;
+                if (ReadFileBytes(profileDir_ + L"\\extensions.json", text) && json::Parse(text,c)) {
+                  auto entries = c["extensions"];
+                  for (auto& item : entries.MutableItems()) {
+                    if (FromUtf8(item["path"].AsString()) == extensions_[i].path) item.Set("enabled", json::Value::Bool(enabled));
+                  }
+                  c.Set("extensions", entries);
+                  WriteFileAtomic(profileDir_ + L"\\extensions.json", json::Serialize(c));
+                }
+              }
+              extensions_[i].result = hr; SaveExtensionStatus(); return S_OK;
+            }).Get());
+        }
+        break;
+      }
+    }
+    return;
+  }
   if (type == "open") {
     const std::wstring url = FromUtf8(message["url"].AsString());
     if (IsWebUrl(url)) {
@@ -966,6 +1035,22 @@ void BrowserWindow::OnPageMessage(Tab& tab, const std::string& text) {
   bool changed = false;
   if (type == "bm.get") {
     PostToPage(tab, "{\"type\":\"bm.tree\",\"tree\":" + bookmarks_.TreeJson() + "}");
+  } else if (type == "bm.icons") {
+    std::string out = "{\"type\":\"bm.icons\",\"icons\":[";
+    bool first = true; size_t count = 0;
+    for (const auto& item : message["ids"].Items()) {
+      if (++count > 500) break;
+      const auto id = static_cast<int64_t>(item.AsNumber());
+      const auto* node = bookmarks_.FindById(id);
+      if (!node || node->folder) continue;
+      const std::wstring file = favicons_.Request(node->url);
+      if (file.empty()) continue;
+      if (!first) out += ','; first = false;
+      out += "{\"id\":" + std::to_string(id) + ",\"src\":";
+      json::AppendQuoted(out, "https://favicons.jisu.example/" + ToUtf8(FaviconKey(node->url)) + ".png");
+      out += '}';
+    }
+    PostToPage(tab, out + "]}");
   } else if (type == "bm.add" || type == "bm.addFolder") {
     BookmarkNode* parent = bookmarks_.FindById(static_cast<int64_t>(message["parent"].AsNumber(1)));
     if (parent && parent->folder) {
@@ -1880,6 +1965,7 @@ void BrowserWindow::ShowMainMenu(POINT screen) {
   AppendMenuW(menu, MF_STRING, kMenuBookmarkManager, L"书签管理器\tCtrl+Shift+O");
   AppendMenuW(menu, MF_STRING | (settings_.bookmarkBar ? MF_CHECKED : 0), kMenuToggleBar, L"显示书签栏\tCtrl+Shift+B");
   AppendMenuW(menu, MF_STRING, kMenuImport, L"导入书签…");
+  AppendMenuW(menu, MF_STRING, kMenuExtensions, L"扩展管理");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, kMenuDefaultBrowser, L"设为默认浏览器…");
   AppendMenuW(menu, MF_STRING, kMenuAbout, L"关于极速浏览器");
@@ -1898,6 +1984,9 @@ void BrowserWindow::ShowMainMenu(POINT screen) {
       break;
     case kMenuImport:
       OpenBookmarkManager(L"#import");
+      break;
+    case kMenuExtensions:
+      OpenExtensions();
       break;
     case kMenuDefaultBrowser:
       RegisterAsDefaultBrowser();
@@ -2113,6 +2202,37 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
     return 0;
   }
   switch (msg) {
+    case WM_NCCALCSIZE:
+      if (wParam) {
+        auto* p = reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
+        if (IsZoomed(hwnd_)) {
+          MONITORINFO monitor{sizeof(MONITORINFO)};
+          if (GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &monitor)) p->rgrc[0] = monitor.rcWork;
+        }
+        return 0;
+      }
+      break;
+    case WM_NCHITTEST: {
+      POINT p = PointFromLParam(lParam);
+      RECT r{}; GetWindowRect(hwnd_, &r);
+      if (!IsZoomed(hwnd_)) {
+        const int edge = GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi_) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi_);
+        const bool left = p.x < r.left + edge, right = p.x >= r.right - edge;
+        const bool top = p.y < r.top + edge, bottom = p.y >= r.bottom - edge;
+        if (top && left) return HTTOPLEFT; if (top && right) return HTTOPRIGHT;
+        if (bottom && left) return HTBOTTOMLEFT; if (bottom && right) return HTBOTTOMRIGHT;
+        if (left) return HTLEFT; if (right) return HTRIGHT;
+        if (top) return HTTOP; if (bottom) return HTBOTTOM;
+      }
+      ScreenToClient(hwnd_, &p);
+      if (p.y >= 0 && p.y < layout_.tabStripHeight * layout_.scale && HitTest(p).kind == ChromeHit::kNone) return HTCAPTION;
+      return HTCLIENT;
+    }
+    case kMsgFavicon:
+      painter_.ClearFaviconBitmaps();
+      InvalidateChrome();
+      BroadcastBookmarks();
+      return 0;
     case WM_CREATE:
       OnCreate();
       return 0;
@@ -2304,6 +2424,8 @@ void BrowserWindow::OnCreate() {
 void BrowserWindow::OnDestroy() {
   WriteMetrics(true);  // 测量中被关掉也留下已有的时间线（已写过则不重复）
   destroyed_ = true;
+  alive_.reset();
+  favicons_.Stop();
   bridge_.reset();  // 先断开所有智能体连接，再关控件
   for (auto& tab : tabs_) {
     if (tab->leaseDone) {
@@ -2392,7 +2514,10 @@ void BrowserWindow::Relayout() {
   constexpr float kLeft = 8.0f;
   constexpr float kTabTop = 6.0f;
   constexpr float kNewTabWidth = 28.0f;
-  constexpr float kRightReserve = 16.0f;
+  constexpr float kRightReserve = 154.0f;
+  l.minimize = D2D1::RectF(l.width - 138, 0, l.width - 92, l.tabStripHeight);
+  l.maximize = D2D1::RectF(l.width - 92, 0, l.width - 46, l.tabStripHeight);
+  l.windowClose = D2D1::RectF(l.width - 46, 0, l.width, l.tabStripHeight);
   const size_t count = tabs_.size();
   const float available = std::max(0.0f, l.width - kLeft - kNewTabWidth - kRightReserve);
   const float tabWidth = count == 0 ? 0.0f : std::clamp(available / static_cast<float>(count), 40.0f, 240.0f);
@@ -2478,7 +2603,7 @@ ChromeState BrowserWindow::BuildChromeState() const {
   for (size_t i = 0; i < tabs_.size(); ++i) {
     const Tab& tab = *tabs_[i];
     std::wstring title = tab.title.empty() ? std::wstring(tab.agent ? kAgentTabTitle : kNewTabTitle) : tab.title;
-    state.tabs.push_back(ChromeTab{std::move(title), i == active_, tab.loading, tab.agent, tab.agentAwake});
+    state.tabs.push_back(ChromeTab{std::move(title), i == active_, tab.loading, tab.agent, tab.agentAwake, tab.agent ? L"" : favicons_.Request(tab.url)});
   }
   state.hover = hover_;
   if (const Tab* tab = ActiveTab()) {
@@ -2492,8 +2617,9 @@ ChromeState BrowserWindow::BuildChromeState() const {
   }
   state.bookmarks.reserve(barItems_.size());
   for (const BookmarkNode* node : barItems_) {
-    state.bookmarks.push_back(ChromeBookmark{node->title, node->folder});
+    state.bookmarks.push_back(ChromeBookmark{node->title, node->folder, node->folder ? L"" : favicons_.Request(node->url)});
   }
+  state.maximized = IsZoomed(hwnd_) != FALSE;
   state.omniboxFocused = omniboxFocused_;
   state.message = message_;
   return state;
@@ -2503,6 +2629,9 @@ ChromeHit BrowserWindow::HitTest(POINT point) const {
   const float x = static_cast<float>(point.x) / layout_.scale;
   const float y = static_cast<float>(point.y) / layout_.scale;
   auto inside = [x, y](const D2D1_RECT_F& r) { return x >= r.left && x < r.right && y >= r.top && y < r.bottom; };
+  if (inside(layout_.minimize)) return ChromeHit{ChromeHit::kMinimize, -1};
+  if (inside(layout_.maximize)) return ChromeHit{ChromeHit::kMaximize, -1};
+  if (inside(layout_.windowClose)) return ChromeHit{ChromeHit::kWindowClose, -1};
   for (size_t i = 0; i < layout_.tabs.size(); ++i) {
     if (inside(layout_.tabs[i])) {
       return ChromeHit{inside(layout_.tabCloses[i]) ? ChromeHit::kTabClose : ChromeHit::kTab, static_cast<int>(i)};
@@ -2581,6 +2710,12 @@ void BrowserWindow::OnLButtonUp(POINT point) {
     return p;
   };
   switch (hit.kind) {
+    case ChromeHit::kMinimize:
+      ShowWindow(hwnd_, SW_MINIMIZE); break;
+    case ChromeHit::kMaximize:
+      ShowWindow(hwnd_, IsZoomed(hwnd_) ? SW_RESTORE : SW_MAXIMIZE); break;
+    case ChromeHit::kWindowClose:
+      PostMessageW(hwnd_, WM_CLOSE, 0, 0); break;
     case ChromeHit::kTabClose:
       CloseTab(static_cast<size_t>(hit.index));
       break;

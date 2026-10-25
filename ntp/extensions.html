@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>扩展管理</title>
+<style>
+:root{color-scheme:light dark;font:14px "Microsoft YaHei UI",sans-serif;background:light-dark(#fff,#202020);color:light-dark(#202020,#e8e8e8)}*{box-sizing:border-box}body{margin:28px auto;padding:0 24px;max-width:1000px}h1{font-size:20px;font-weight:600}p{color:light-dark(#5f6368,#aaa);line-height:1.7}.item{display:flex;align-items:center;gap:16px;border-bottom:1px solid light-dark(#ddd,#383838);padding:16px 0}.info{flex:1;min-width:0}.name{font-weight:500}.status{font-size:12px;color:light-dark(#666,#aaa);margin-top:6px}.actions{display:flex;gap:8px}button{font:inherit;padding:6px 12px;border-radius:6px;border:1px solid light-dark(#ccc,#555);background:transparent;color:inherit;cursor:pointer}button:disabled{opacity:.4;cursor:default}input{accent-color:#ff9c55;width:18px;height:18px}#notice{font-size:13px}a{color:inherit}
+</style>
+<h1>扩展管理</h1>
+<p id="notice">扩展程序来自本机浏览器，只迁入程序文件，不带账号、密钥、脚本或历史数据。WebView2 不支持所有 Chrome API；“已加载”不等于每项功能均兼容。</p>
+<p>顶部按钮型扩展可尝试“打开”；翻译、阅读、脚本类可通过页面右键或快捷键使用。不能使用的扩展请关闭。</p>
+<div id="list">正在读取扩展…</div>
+<script>
+'use strict';
+const wv=window.chrome?.webview;
+const send=data=>wv?.postMessage(JSON.stringify(data));
+function render(data){const list=document.getElementById('list');list.replaceChildren();for(const e of data.extensions||[]){const row=document.createElement('div');row.className='item';const box=document.createElement('input');box.type='checkbox';box.checked=e.enabled;box.disabled=!e.loaded;box.setAttribute('aria-label','启用 '+e.name);box.onchange=()=>{box.disabled=true;send({type:'ext.toggle',id:e.id,enabled:box.checked});};const info=document.createElement('div');info.className='info';const name=document.createElement('div');name.className='name';name.textContent=e.name;const status=document.createElement('div');status.className='status';status.textContent=e.loaded?(e.enabled?'已加载 · 已启用':'已加载 · 未启用'):(e.hresult===2147483658?'等待加载':'加载失败 · 0x'+Number(e.hresult).toString(16));info.append(name,status);const actions=document.createElement('div');actions.className='actions';for(const [label,key] of [['打开','popup'],['设置','options']]){const b=document.createElement('button');b.textContent=label;b.disabled=!e.loaded||!e.enabled||!e[key];b.onclick=()=>send({type:'ext.open',id:e.id,options:key==='options'});actions.append(b);}row.append(box,info,actions);list.append(row);}if(!list.children.length)list.textContent='尚未迁入扩展。';}
+wv?.addEventListener('message',event=>{let m=event.data;try{if(typeof m==='string')m=JSON.parse(m);}catch{return;}if(m.type==='ext.list')render(m.data);});
+send({type:'ext.get'});
+</script></html>

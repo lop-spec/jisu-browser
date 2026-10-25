@@ -9,6 +9,8 @@
 #include <d3d11.h>
 #include <dwrite.h>
 #include <dxgiformat.h>
+#include <wincodec.h>
+#include <map>
 
 #include <string>
 #include <vector>
@@ -51,7 +53,7 @@ class GraphicsWarmup {
 };
 
 struct ChromeHit {
-  enum Kind { kNone, kTab, kTabClose, kNewTab, kBack, kForward, kReload, kStar, kMenu, kBookmark, kBookmarkOverflow };
+  enum Kind { kNone, kTab, kTabClose, kNewTab, kBack, kForward, kReload, kStar, kMenu, kBookmark, kBookmarkOverflow, kMinimize, kMaximize, kWindowClose };
   Kind kind = kNone;
   int index = -1;
   bool operator==(const ChromeHit&) const = default;
@@ -67,6 +69,7 @@ struct ChromeLayout {
   std::vector<D2D1_RECT_F> tabs;
   std::vector<D2D1_RECT_F> tabCloses;
   D2D1_RECT_F newTab{};
+  D2D1_RECT_F minimize{}, maximize{}, windowClose{};
   D2D1_RECT_F back{};
   D2D1_RECT_F forward{};
   D2D1_RECT_F reload{};
@@ -86,11 +89,13 @@ struct ChromeTab {
   bool loading = false;
   bool agent = false;       // 智能体标签：标题前画一个圈
   bool agentAwake = false;  // 正在执行命令：圈填实
+  std::wstring favicon;
 };
 
 struct ChromeBookmark {
   std::wstring title;
   bool folder = false;
+  std::wstring favicon;
 };
 
 struct ChromeState {
@@ -103,6 +108,7 @@ struct ChromeState {
   bool canStar = false;  // 当前页能加书签（http/https）
   bool starred = false;  // 当前页已在书签里
   std::vector<ChromeBookmark> bookmarks;  // 书签栏各项，与 ChromeLayout::bookmarks 一一对应
+  bool maximized = false;
   std::wstring message;  // 内容区提示，例如没有 WebView2 运行时
 };
 
@@ -115,6 +121,7 @@ class ChromePainter {
   bool IsHardware() const;
   // 书签栏一项的宽度（DIP，含内边距与图标）；渲染目标建好之前返回估算值
   float MeasureBookmark(const std::wstring& title, bool folder) const;
+  void ClearFaviconBitmaps() { faviconBitmaps_.clear(); }
 
  private:
   HRESULT EnsureTarget();
@@ -133,6 +140,9 @@ class ChromePainter {
   void DrawFolderGlyph(D2D1_POINT_2F center);
   void DrawPageGlyph(D2D1_POINT_2F center);
   void DrawBookmarkBar(const Palette& palette, const ChromeLayout& layout, const ChromeState& state);
+  bool DrawFavicon(const std::wstring& file, D2D1_POINT_2F center, float size = 16.0f);
+  std::map<std::wstring, ComPtr<ID2D1Bitmap>> faviconBitmaps_;
+  ComPtr<IWICImagingFactory> wic_;
 
   ComPtr<ID2D1Factory> factory_;
   ComPtr<IDWriteFactory> dwrite_;

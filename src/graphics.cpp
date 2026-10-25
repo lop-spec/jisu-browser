@@ -348,6 +348,21 @@ void ChromePainter::Paint(const Palette& palette, const ChromeLayout& layout, co
   Stroke(D2D1::Point2F(plus.x - 5.0f, plus.y), D2D1::Point2F(plus.x + 5.0f, plus.y));
   Stroke(D2D1::Point2F(plus.x, plus.y - 5.0f), D2D1::Point2F(plus.x, plus.y + 5.0f));
 
+  // Window controls share the tab strip; no duplicate native caption row.
+  for (const auto& button : {std::pair{layout.minimize, ChromeHit::kMinimize},
+                             std::pair{layout.maximize, ChromeHit::kMaximize},
+                             std::pair{layout.windowClose, ChromeHit::kWindowClose}}) {
+    if (state.hover.kind == button.second) Fill(button.first, button.second == ChromeHit::kWindowClose ? Rgb{196, 43, 28} : palette.buttonHover);
+    SetColor(palette.text);
+    const auto c = Center(button.first);
+    if (button.second == ChromeHit::kMinimize) Stroke(D2D1::Point2F(c.x - 5, c.y), D2D1::Point2F(c.x + 5, c.y), 1.0f);
+    else if (button.second == ChromeHit::kWindowClose) DrawCross(c, 4.5f);
+    else {
+      if (state.maximized) target_->DrawRectangle(D2D1::RectF(c.x - 3, c.y - 6, c.x + 6, c.y + 3), brush_.Get(), 1.0f);
+      target_->DrawRectangle(D2D1::RectF(c.x - 5, c.y - 4, c.x + 4, c.y + 5), brush_.Get(), 1.0f);
+    }
+  }
+
   // 工具栏：后退、前进、刷新（加载中显示为停止）
   Fill(D2D1::RectF(0, stripBottom, width, toolbarBottom), palette.toolbar);
   DrawToolbarButton(palette, layout.back, state.hover.kind == ChromeHit::kBack, state.canBack);
@@ -398,6 +413,7 @@ void ChromePainter::Paint(const Palette& palette, const ChromeLayout& layout, co
   if (target_->EndDraw() == D2DERR_RECREATE_TARGET) {
     target_.Reset();
     brush_.Reset();
+    faviconBitmaps_.clear();
   }
 }
 
@@ -432,6 +448,8 @@ void ChromePainter::DrawTab(const Palette& palette, const ChromeLayout& layout, 
     SetColor(palette.accent);
     target_->FillEllipse(D2D1::Ellipse(dot, 3.0f, 3.0f), brush_.Get());
     textLeft += 12.0f;
+  } else if (DrawFavicon(tab.favicon, dot, 16.0f)) {
+    textLeft += 22.0f;
   }
   const bool showClose = tab.active || hovered;
   const D2D1_RECT_F close = layout.tabCloses[index];
@@ -506,7 +524,7 @@ void ChromePainter::DrawBookmarkBar(const Palette& palette, const ChromeLayout& 
     SetColor(palette.textMuted);
     if (item.folder) {
       DrawFolderGlyph(icon);
-    } else {
+    } else if (!DrawFavicon(item.favicon, icon, 16.0f)) {
       DrawPageGlyph(icon);
     }
     if (!item.title.empty() && tabTitle_) {
@@ -528,6 +546,29 @@ void ChromePainter::DrawBookmarkBar(const Palette& palette, const ChromeLayout& 
       Stroke(D2D1::Point2F(c.x + dx + 2.0f, c.y), D2D1::Point2F(c.x + dx - 2.0f, c.y + 4.0f), 1.3f);
     }
   }
+}
+
+bool ChromePainter::DrawFavicon(const std::wstring& file, D2D1_POINT_2F center, float size) {
+  if (file.empty() || !target_) return false;
+  auto found = faviconBitmaps_.find(file);
+  if (found == faviconBitmaps_.end()) {
+    if (!wic_) CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(wic_.GetAddressOf()));
+    ComPtr<IWICBitmapDecoder> decoder;
+    ComPtr<IWICBitmapFrameDecode> frame;
+    ComPtr<IWICFormatConverter> converter;
+    ComPtr<ID2D1Bitmap> bitmap;
+    if (wic_ && SUCCEEDED(wic_->CreateDecoderFromFilename(file.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, decoder.GetAddressOf())) &&
+        SUCCEEDED(decoder->GetFrame(0, frame.GetAddressOf())) && SUCCEEDED(wic_->CreateFormatConverter(converter.GetAddressOf())) &&
+        SUCCEEDED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom))) {
+      target_->CreateBitmapFromWicBitmap(converter.Get(), nullptr, bitmap.GetAddressOf());
+    }
+    if (faviconBitmaps_.size() >= 512) faviconBitmaps_.clear();
+    found = faviconBitmaps_.emplace(file, bitmap).first;
+  }
+  if (!found->second) return false;
+  target_->DrawBitmap(found->second.Get(), D2D1::RectF(center.x - size/2, center.y - size/2, center.x + size/2, center.y + size/2),
+                      1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+  return true;
 }
 
 void ChromePainter::DrawStar(D2D1_POINT_2F center, bool filled) {
