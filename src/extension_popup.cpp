@@ -7,10 +7,14 @@ using Microsoft::WRL::Callback;
 namespace jisu {
 LRESULT CALLBACK BrowserWindow::ExtensionPopupProc(HWND h,UINT message,WPARAM w,LPARAM l) {
   auto* self=reinterpret_cast<BrowserWindow*>(GetWindowLongPtrW(h,GWLP_USERDATA));
-  if(message==WM_NCCREATE){const auto* c=reinterpret_cast<CREATESTRUCTW*>(l);self=static_cast<BrowserWindow*>(c->lpCreateParams);SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));}
+  if(message==WM_NCCREATE){const auto* c=reinterpret_cast<CREATESTRUCTW*>(l);self=static_cast<BrowserWindow*>(c->lpCreateParams);SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));SetPropW(h,L"Jisu.PopupGeneration",reinterpret_cast<HANDLE>(static_cast<uintptr_t>(self->extensionPopupGeneration_)));}
   if(self){
-    if(message==WM_CLOSE){PostMessageW(self->hwnd_,kMsgCloseExtensionPopup,static_cast<WPARAM>(self->extensionPopupGeneration_),0);return 0;}
-    if(message==WM_ACTIVATE&&LOWORD(w)==WA_INACTIVE){PostMessageW(self->hwnd_,kMsgCloseExtensionPopup,static_cast<WPARAM>(self->extensionPopupGeneration_),0);}
+    const auto generation=reinterpret_cast<uintptr_t>(GetPropW(h,L"Jisu.PopupGeneration"));
+    if(message==WM_CLOSE){PostMessageW(self->hwnd_,kMsgCloseExtensionPopup,static_cast<WPARAM>(generation),0);return 0;}
+    // Returning to the owner is handled by the actual toolbar/page click. Closing here
+    // before its BN_CLICKED would turn a second click into close-then-reopen.
+    if(message==WM_ACTIVATE&&LOWORD(w)==WA_INACTIVE&&reinterpret_cast<HWND>(l)!=self->hwnd_){PostMessageW(self->hwnd_,kMsgCloseExtensionPopup,static_cast<WPARAM>(generation),0);}
+    if(message==WM_NCDESTROY)RemovePropW(h,L"Jisu.PopupGeneration");
     if(message==WM_SIZE&&self->extensionPopup_&&self->extensionPopup_->controller){RECT r{};GetClientRect(h,&r);self->extensionPopup_->controller->put_Bounds(r);}
     if(message==WM_ERASEBKGND){RECT r{};GetClientRect(h,&r);HBRUSH brush=CreateSolidBrush(ToColorRef(self->palette_.content));FillRect(reinterpret_cast<HDC>(w),&r,brush);DeleteObject(brush);return 1;}
   }
