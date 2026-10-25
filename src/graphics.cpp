@@ -134,7 +134,7 @@ bool GraphicsWarmup::Prepare() {
 
 HRESULT GraphicsWarmup::CreateTextFormats() {
   HRESULT hr = dwrite->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.5f, L"zh-CN",
+                                        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 14.0f, L"zh-CN",
                                         tabTitle.GetAddressOf());
   if (FAILED(hr)) {
     return hr;
@@ -146,6 +146,15 @@ HRESULT GraphicsWarmup::CreateTextFormats() {
   if (SUCCEEDED(dwrite->CreateEllipsisTrimmingSign(tabTitle.Get(), ellipsis.GetAddressOf()))) {
     tabTitle->SetTrimming(&trimming, ellipsis.Get());
   }
+
+  // Bookmarks keep their original compact type size; only tab titles follow the reference.
+  hr = dwrite->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.5f, L"zh-CN",
+                                bookmarkTitle.GetAddressOf());
+  if (FAILED(hr)) return hr;
+  bookmarkTitle->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+  bookmarkTitle->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+  if (ellipsis) bookmarkTitle->SetTrimming(&trimming, ellipsis.Get());
 
   hr = dwrite->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
                                 DWRITE_FONT_STRETCH_NORMAL, 14.0f, L"zh-CN", message.GetAddressOf());
@@ -163,6 +172,7 @@ HRESULT ChromePainter::CreateTarget(const GraphicsWarmup& graphics, HWND hwnd, R
   factory_ = graphics.d2d;
   dwrite_ = graphics.dwrite;
   tabTitle_ = graphics.tabTitle;
+  bookmarkTitle_ = graphics.bookmarkTitle;
   message_ = graphics.message;
   hwnd_ = hwnd;
   kind_ = kind;
@@ -337,8 +347,11 @@ void ChromePainter::Paint(const Palette& palette, const ChromeLayout& layout, co
 
   // 标签条：当前标签与工具栏同色并向下延伸，两者连成一体
   Fill(D2D1::RectF(0, 0, width, stripBottom), palette.frame);
-  for (size_t i = 0; i < layout.tabs.size() && i < state.tabs.size(); ++i) {
-    DrawTab(palette, layout, state, i);
+  // Draw the selected tab last: its concave feet must stay above neighboring hover fills.
+  for (const bool active : {false, true}) {
+    for (size_t i = 0; i < layout.tabs.size() && i < state.tabs.size(); ++i) {
+      if (state.tabs[i].active == active) DrawTab(palette, layout, state, i);
+    }
   }
   if (state.hover.kind == ChromeHit::kNewTab) {
     FillRounded(layout.newTab, 6.0f, palette.tabHover);
@@ -417,47 +430,77 @@ void ChromePainter::Paint(const Palette& palette, const ChromeLayout& layout, co
   }
 }
 
+void ChromePainter::FillActiveTab(const D2D1_RECT_F& rect, Rgb color) {
+  const float width = rect.right - rect.left;
+  const float height = rect.bottom - rect.top;
+  if (width <= 0 || height <= 0) return;
+  if (!activeTabShape_ || activeTabWidth_ != width || activeTabHeight_ != height) {
+    ComPtr<ID2D1PathGeometry> shape;
+    ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(factory_->CreatePathGeometry(shape.GetAddressOf())) || FAILED(shape->Open(sink.GetAddressOf()))) return;
+    const float radius = std::min(12.0f, width * 0.25f);
+    constexpr float c = 0.44771525f;
+    // Rounded shoulders and concave feet, not a floating rounded rectangle.
+    sink->BeginFigure(D2D1::Point2F(-radius, height), D2D1_FIGURE_BEGIN_FILLED);
+    sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(-radius*c, height), D2D1::Point2F(0, height-radius*c), D2D1::Point2F(0, height-radius)));
+    sink->AddLine(D2D1::Point2F(0, radius));
+    sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(0, radius*c), D2D1::Point2F(radius*c, 0), D2D1::Point2F(radius, 0)));
+    sink->AddLine(D2D1::Point2F(width-radius, 0));
+    sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(width-radius*c, 0), D2D1::Point2F(width, radius*c), D2D1::Point2F(width, radius)));
+    sink->AddLine(D2D1::Point2F(width, height-radius));
+    sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(width, height-radius*c), D2D1::Point2F(width+radius*c, height), D2D1::Point2F(width+radius, height)));
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    if (FAILED(sink->Close())) return;
+    activeTabShape_ = shape;
+    activeTabWidth_ = width;
+    activeTabHeight_ = height;
+  }
+  SetColor(color);
+  target_->SetTransform(D2D1::Matrix3x2F::Translation(rect.left, rect.top));
+  target_->FillGeometry(activeTabShape_.Get(), brush_.Get());
+  target_->SetTransform(D2D1::Matrix3x2F::Identity());
+}
+
 void ChromePainter::DrawTab(const Palette& palette, const ChromeLayout& layout, const ChromeState& state,
                             size_t index) {
   const D2D1_RECT_F r = layout.tabs[index];
+  const float width = r.right - r.left;
+  if (width <= 0) return;
   const ChromeTab& tab = state.tabs[index];
   const int i = static_cast<int>(index);
   const bool hovered = IsTabHover(state.hover, i);
   if (tab.active) {
-    FillRounded(D2D1::RectF(r.left, r.top, r.right, layout.tabStripHeight + 8.0f), 8.0f, palette.toolbar);
-  } else if (hovered) {
-    FillRounded(D2D1::RectF(r.left + 2.0f, r.top + 2.0f, r.right - 2.0f, r.bottom - 4.0f), 6.0f, palette.tabHover);
+    FillActiveTab(r, palette.toolbar);
+  } else if (hovered && width > 4.0f) {
+    FillRounded(D2D1::RectF(r.left + 2.0f, r.top, r.right - 2.0f, r.bottom - 5.0f), 8.0f, palette.tabHover);
   } else if (index + 1 < state.tabs.size() && !state.tabs[index + 1].active && !IsTabHover(state.hover, i + 1)) {
-    // 相邻两个普通标签之间的细竖线
     const float x = std::floor(r.right * layout.scale) / layout.scale;
-    Fill(D2D1::RectF(x, r.top + 9.0f, x + 1.0f / layout.scale, r.bottom - 11.0f), palette.separator);
+    SetColor(palette.textMuted, 0.35f);
+    target_->FillRectangle(D2D1::RectF(x, kTabCenterY - 7.0f, x + 1.0f / layout.scale, kTabCenterY + 7.0f), brush_.Get());
   }
 
-  float textLeft = r.left + 12.0f;
-  const D2D1_POINT_2F dot = D2D1::Point2F(r.left + 15.0f, (r.top + r.bottom) * 0.5f - 1.0f);
-  if (tab.agent) {
-    // 智能体标签：空心圈；正在执行命令或加载中：实心
-    SetColor(palette.accent);
-    if (tab.agentAwake || tab.loading) {
-      target_->FillEllipse(D2D1::Ellipse(dot, 4.0f, 4.0f), brush_.Get());
-    } else {
-      target_->DrawEllipse(D2D1::Ellipse(dot, 3.5f, 3.5f), brush_.Get(), 1.5f);
-    }
-    textLeft += 12.0f;
-  } else if (tab.loading) {
-    SetColor(palette.accent);
-    target_->FillEllipse(D2D1::Ellipse(dot, 3.0f, 3.0f), brush_.Get());
-    textLeft += 12.0f;
-  } else if (DrawFavicon(tab.favicon, dot, 16.0f)) {
-    textLeft += 22.0f;
-  }
-  const bool showClose = tab.active || hovered;
   const D2D1_RECT_F close = layout.tabCloses[index];
-  const float textRight = showClose ? close.left - 2.0f : r.right - 10.0f;
-  if (textRight > textLeft && tabTitle_) {
-    SetColor(tab.active ? palette.text : palette.textMuted);
+  const bool showClose = (tab.active || hovered) && close.right > close.left;
+  const D2D1_POINT_2F dot = D2D1::Point2F(r.left + std::min(21.0f, width * 0.5f), kTabCenterY);
+  const bool showIcon = width >= 28.0f && (!showClose || width >= 64.0f);
+  if (showIcon) {
+    if (tab.agent || tab.loading) {
+      // Keep the native agent indicator; never disguise an agent tab as a normal page.
+      SetColor(palette.accent);
+      if (tab.agentAwake || tab.loading) target_->FillEllipse(D2D1::Ellipse(dot, 4.0f, 4.0f), brush_.Get());
+      else target_->DrawEllipse(D2D1::Ellipse(dot, 3.5f, 3.5f), brush_.Get(), 1.5f);
+    } else if (!DrawFavicon(tab.favicon, dot, 20.0f)) {
+      SetColor(palette.accent);
+      DrawPageGlyph(dot);
+    }
+  }
+  const float textLeft = r.left + 41.0f;
+  // Reserve the close slot even when hidden, so hovering never changes title trimming.
+  const float textRight = close.left - 8.0f;
+  if (width >= 80.0f && textRight > textLeft && tabTitle_) {
+    SetColor(palette.text, tab.active ? 1.0f : 0.85f);
     target_->DrawText(tab.title.c_str(), static_cast<UINT32>(tab.title.size()), tabTitle_.Get(),
-                      D2D1::RectF(textLeft, r.top, textRight, r.bottom - 2.0f), brush_.Get(),
+                      D2D1::RectF(textLeft, 0, textRight, layout.tabStripHeight), brush_.Get(),
                       D2D1_DRAW_TEXT_OPTIONS_CLIP);
   }
   if (showClose) {
@@ -466,7 +509,7 @@ void ChromePainter::DrawTab(const Palette& palette, const ChromeLayout& layout, 
       SetColor(palette.buttonHover);
       target_->FillEllipse(D2D1::Ellipse(c, 8.0f, 8.0f), brush_.Get());
     }
-    SetColor(tab.active ? palette.text : palette.textMuted);
+    SetColor(palette.text);
     DrawCross(c, 3.5f);
   }
 }
@@ -499,9 +542,9 @@ float ChromePainter::MeasureBookmark(const std::wstring& title, bool folder) con
     return kPadding * 2.0f + 14.0f;  // 只有图标
   }
   float textWidth = 7.5f * static_cast<float>(title.size());  // 估算：还没有排版对象时
-  if (dwrite_ && tabTitle_) {
+  if (dwrite_ && bookmarkTitle_) {
     ComPtr<IDWriteTextLayout> textLayout;
-    if (SUCCEEDED(dwrite_->CreateTextLayout(title.c_str(), static_cast<UINT32>(title.size()), tabTitle_.Get(), 1000.0f,
+    if (SUCCEEDED(dwrite_->CreateTextLayout(title.c_str(), static_cast<UINT32>(title.size()), bookmarkTitle_.Get(), 1000.0f,
                                             30.0f, textLayout.GetAddressOf()))) {
       DWRITE_TEXT_METRICS metrics{};
       if (SUCCEEDED(textLayout->GetMetrics(&metrics))) {
@@ -532,9 +575,9 @@ void ChromePainter::DrawBookmarkBar(const Palette& palette, const ChromeLayout& 
     } else if (!DrawFavicon(item.favicon, icon, 16.0f)) {
       DrawPageGlyph(icon);
     }
-    if (!item.title.empty() && tabTitle_) {
+    if (!item.title.empty() && bookmarkTitle_) {
       SetColor(palette.text);
-      target_->DrawText(item.title.c_str(), static_cast<UINT32>(item.title.size()), tabTitle_.Get(),
+      target_->DrawText(item.title.c_str(), static_cast<UINT32>(item.title.size()), bookmarkTitle_.Get(),
                         D2D1::RectF(r.left + 8.0f + 20.0f, r.top, r.right - 8.0f, r.bottom), brush_.Get(),
                         D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }

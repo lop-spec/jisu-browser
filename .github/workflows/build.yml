@@ -44,9 +44,20 @@ jobs:
         shell: pwsh
         run: cmake --build build --config Release --parallel
 
-      - name: 原生标签策略门禁（保护当前页、智能体和扩展页）
+      - name: 原生 UI 门禁（标签布局、真实绘制、书签与标签保护）
         shell: pwsh
         run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: 保存标签条真实绘制证据
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tab-chrome-evidence-${{ github.sha }}
+          path: |
+            build/tab-chrome-evidence/
+            build/Release/tab-chrome-render-test.exe
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: 打包（exe + ntp/ 为运行包；PDB 单独放 symbols/）
         shell: pwsh

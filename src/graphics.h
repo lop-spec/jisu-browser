@@ -4,6 +4,7 @@
 #include "common.h"
 #include "options.h"
 #include "palette.h"
+#include "tab_strip.h"
 
 #include <d2d1.h>
 #include <d3d11.h>
@@ -35,6 +36,7 @@ class GraphicsWarmup {
   ComPtr<ID2D1Factory> d2d;
   ComPtr<IDWriteFactory> dwrite;
   ComPtr<IDWriteTextFormat> tabTitle;
+  ComPtr<IDWriteTextFormat> bookmarkTitle;
   ComPtr<IDWriteTextFormat> message;
 
  private:
@@ -63,7 +65,7 @@ struct ChromeHit {
 struct ChromeLayout {
   float scale = 1.0f;
   float width = 0;
-  float tabStripHeight = 38;
+  float tabStripHeight = kTabStripHeight;
   float toolbarHeight = 40;
   float bookmarkBarHeight = 0;  // 书签栏隐藏时为 0
   std::vector<D2D1_RECT_F> tabs;
@@ -134,6 +136,7 @@ class ChromePainter {
   void FillRounded(const D2D1_RECT_F& rect, float radius, Rgb color);
   void Stroke(D2D1_POINT_2F from, D2D1_POINT_2F to, float width = 1.5f);
   void DrawTab(const Palette& palette, const ChromeLayout& layout, const ChromeState& state, size_t index);
+  void FillActiveTab(const D2D1_RECT_F& rect, Rgb color);
   void DrawToolbarButton(const Palette& palette, const D2D1_RECT_F& rect, bool hovered, bool enabled);
   void DrawArrow(D2D1_POINT_2F center, bool left);
   void DrawCross(D2D1_POINT_2F center, float half);
@@ -150,7 +153,11 @@ class ChromePainter {
   ComPtr<ID2D1Factory> factory_;
   ComPtr<IDWriteFactory> dwrite_;
   ComPtr<IDWriteTextFormat> tabTitle_;
+  ComPtr<IDWriteTextFormat> bookmarkTitle_;
   ComPtr<IDWriteTextFormat> message_;
+  ComPtr<ID2D1PathGeometry> activeTabShape_;
+  float activeTabWidth_ = 0;
+  float activeTabHeight_ = 0;
   ComPtr<ID2D1HwndRenderTarget> target_;
   ComPtr<ID2D1SolidColorBrush> brush_;
   ComPtr<ID2D1StrokeStyle> roundStroke_;

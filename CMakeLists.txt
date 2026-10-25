@@ -104,5 +104,20 @@ target_compile_options(bookmark-editor-test PRIVATE /utf-8)
 target_link_libraries(bookmark-editor-test PRIVATE ole32 gdi32 user32 advapi32)
 add_test(NAME native-bookmark-edit-move COMMAND bookmark-editor-test)
 
+add_executable(tab-strip-test tests/tab-strip-test.cpp)
+target_include_directories(tab-strip-test PRIVATE src)
+target_compile_definitions(tab-strip-test PRIVATE UNICODE _UNICODE NOMINMAX)
+add_test(NAME native-tab-strip-layout COMMAND tab-strip-test)
+
+# Same renderer as the browser, but no WebView/profile is created. Off-screen,
+# no-activate HWNDs exercise actual Direct2D output at desktop/narrow/DPI sizes.
+add_executable(tab-chrome-render-test WIN32 tests/tab-chrome-render-test.cpp src/graphics.cpp src/palette.cpp src/metrics.cpp src/common.cpp)
+target_include_directories(tab-chrome-render-test PRIVATE src)
+target_compile_definitions(tab-chrome-render-test PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+target_compile_options(tab-chrome-render-test PRIVATE /utf-8 /EHsc)
+target_link_libraries(tab-chrome-render-test PRIVATE d2d1 dwrite d3d11 dwmapi windowscodecs ole32 gdi32 user32 advapi32)
+add_test(NAME native-tab-chrome-render COMMAND tab-chrome-render-test "${CMAKE_BINARY_DIR}/tab-chrome-evidence")
+set_tests_properties(native-tab-chrome-render PROPERTIES TIMEOUT 60)
+
 add_custom_command(TARGET jisu-browser POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/ntp" "$<TARGET_FILE_DIR:jisu-browser>/ntp")

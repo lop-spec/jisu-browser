@@ -2585,27 +2585,13 @@ void BrowserWindow::Relayout() {
   l.scale = static_cast<float>(dpi_) / 96.0f;
   l.width = static_cast<float>(client.right - client.left) / l.scale;
 
-  constexpr float kLeft = 8.0f;
-  constexpr float kTabTop = 6.0f;
-  constexpr float kNewTabWidth = 28.0f;
-  constexpr float kRightReserve = 154.0f;
   l.minimize = D2D1::RectF(l.width - 138, 0, l.width - 92, l.tabStripHeight);
   l.maximize = D2D1::RectF(l.width - 92, 0, l.width - 46, l.tabStripHeight);
   l.windowClose = D2D1::RectF(l.width - 46, 0, l.width, l.tabStripHeight);
-  const size_t count = tabs_.size();
-  const float available = std::max(0.0f, l.width - kLeft - kNewTabWidth - kRightReserve);
-  const float tabWidth = count == 0 ? 0.0f : std::clamp(available / static_cast<float>(count), 40.0f, 240.0f);
-  l.tabs.clear();
-  l.tabCloses.clear();
-  for (size_t i = 0; i < count; ++i) {
-    const float left = kLeft + static_cast<float>(i) * tabWidth;
-    const D2D1_RECT_F tab = D2D1::RectF(left, kTabTop, left + tabWidth, l.tabStripHeight);
-    l.tabs.push_back(tab);
-    const float centerY = (tab.top + tab.bottom) * 0.5f;
-    l.tabCloses.push_back(D2D1::RectF(tab.right - 25.0f, centerY - 9.0f, tab.right - 7.0f, centerY + 9.0f));
-  }
-  const float newTabLeft = kLeft + static_cast<float>(count) * tabWidth + 4.0f;
-  l.newTab = D2D1::RectF(newTabLeft, kTabTop + 3.0f, newTabLeft + kNewTabWidth, kTabTop + 29.0f);
+  auto strip = LayoutTabStrip(l.width, tabs_.size());
+  l.tabs = std::move(strip.tabs);
+  l.tabCloses = std::move(strip.closes);
+  l.newTab = strip.newTab;
 
   const float top = l.tabStripHeight;
   l.back = D2D1::RectF(8.0f, top + 4.0f, 40.0f, top + 36.0f);
