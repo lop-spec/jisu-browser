@@ -37,6 +37,9 @@ for(const {id,folder,browser} of candidates){if(extensions.has(id))continue;cons
 if(apply&&extensions.has('auto-close-old-tabs')){
  const e=extensions.get('auto-close-old-tabs');
  for(const file of ['background.js','popup.js'])backup(path.join(e.path,file));
+ // Chrome rejects unknown directories beginning with _. Keep physical backups outside the program snapshot.
+ const history=path.join(e.path,'_历史版本');
+ if(fs.existsSync(history)){const safe=path.join(profile,'_历史版本','old-tabs-adapter-'+Date.now());fs.mkdirSync(path.dirname(safe),{recursive:true});fs.renameSync(history,safe);}
  fs.writeFileSync(path.join(e.path,'background.js'),'// Native Jisu policy manages ordinary tabs; never touch agent leases.\n');
  fs.writeFileSync(path.join(e.path,'popup.js'),fs.readFileSync(new URL('./old-tabs-webview-popup.js',import.meta.url)));
  e.nativeAdapter=true;
