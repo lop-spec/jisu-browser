@@ -1,4 +1,7 @@
 $ErrorActionPreference='Stop'
+# CTest is launched by pwsh on CI; PS 5.1 must not inherit PS 7-only modules.
+$env:PSModulePath=(Join-Path $PSHOME 'Modules')+';'+(Join-Path $env:ProgramFiles 'WindowsPowerShell/Modules')
+Import-Module Microsoft.PowerShell.Utility
 . (Join-Path $PSScriptRoot '../tools/atomic-exe-swap.ps1')
 $root=Join-Path $env:TEMP ('jisu-atomic-swap-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root|Out-Null
