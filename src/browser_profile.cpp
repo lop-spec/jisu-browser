@@ -7,7 +7,7 @@ using Microsoft::WRL::Callback;
 
 namespace jisu {
 void BrowserWindow::ConfigureProfile(Tab& tab) {
-  if (profileConfigured_) return;
+  if (profileConfigured_ || options_.appMode) return; // Daily browser alone manages shared profile settings/extensions.
   ComPtr<ICoreWebView2_13> view;
   ComPtr<ICoreWebView2Profile> profile;
   if (FAILED(tab.webview.As(&view)) || FAILED(view->get_Profile(profile.GetAddressOf()))) return;

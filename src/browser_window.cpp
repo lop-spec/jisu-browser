@@ -317,6 +317,7 @@ BrowserWindow::~BrowserWindow() {
 DWORD WINAPI BrowserWindow::ProfileThreadMain(void* param) {
   auto* self = static_cast<BrowserWindow*>(param);
   Metrics::Get().Mark("profileBegin");
+  if (self->options_.appMode) { Metrics::Get().Mark("profileReady"); return 0; }
   self->LoadSettings();
   if (!self->profileDir_.empty()) {
     self->bookmarks_.Load(self->profileDir_ + L"\\Bookmarks");
@@ -373,14 +374,21 @@ bool BrowserWindow::Create(HINSTANCE instance) {
     height = MulDiv(860, dpi, 96);
   }
   // WS_CLIPCHILDREN：Direct2D 重画标签条时不覆盖地址栏和网页子窗口
-  const HWND created = CreateWindowExW(0, kWindowClass, kAppName, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, width,
+  const HWND created = CreateWindowExW(0, kWindowClass, options_.appMode ? options_.appTitle.c_str() : kAppName, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, width,
                                        height, nullptr, nullptr, instance, this);
   if (!created) {
     return false;
   }
   SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-  if (options_.metricsPath.empty() && options_.preheatSeconds <= 0) favicons_.Start(profileDir_, hwnd_, kMsgFavicon);
-  SetPropW(hwnd_, kProfileProp, reinterpret_cast<HANDLE>(static_cast<uintptr_t>(ProfileHash(profileDir_))));
+  if (!options_.appMode && options_.metricsPath.empty() && options_.preheatSeconds <= 0) favicons_.Start(profileDir_, hwnd_, kMsgFavicon);
+  SetPropW(hwnd_, kProfileProp, reinterpret_cast<HANDLE>(static_cast<uintptr_t>(ProfileHash(options_.InstanceKey()))));
+  if (options_.appMode) {
+    SetPropW(hwnd_, L"JisuBrowser.AppMode", reinterpret_cast<HANDLE>(1));
+    if (!options_.appIcon.empty()) {
+      HICON icon = static_cast<HICON>(LoadImageW(nullptr, options_.appIcon.c_str(), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE));
+      if (icon) { SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon)); SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(icon)); }
+    }
+  }
   if (options_.preheatSeconds > 0) {
     SetTimer(hwnd_, kTimerPreheat, static_cast<UINT>(options_.preheatSeconds) * 1000u, nullptr);
   }
@@ -409,7 +417,7 @@ void BrowserWindow::ShowFirstFrame(int showCmd) {
   metrics.Mark("firstPaint");
   warmup_.NotifyFirstPaint();
   // Register after the first frame, never in the latency-sensitive startup path.
-  if (options_.metricsPath.empty()) PostMessageW(hwnd_, kMsgInstallTray, 0, 0);
+  if (!options_.appMode && options_.metricsPath.empty()) PostMessageW(hwnd_, kMsgInstallTray, 0, 0);
 
   if (!options_.noActivate) {
     SetFocus(edit_);
@@ -1191,6 +1199,21 @@ void BrowserWindow::OnPageMessage(Tab& tab, const std::string& text) {
 }
 
 void BrowserWindow::OpenNewWindowAsTab(ICoreWebView2NewWindowRequestedEventArgs* args, bool activate) {
+  if (options_.appMode) {
+    args->put_Handled(TRUE);
+    CoTaskString uri;
+    if (SUCCEEDED(args->get_Uri(uri.Put()))) {
+      const std::wstring url = uri.Str();
+      if ((url.starts_with(L"https://") || url.starts_with(L"http://")) && url.find(L'"') == std::wstring::npos) {
+        wchar_t exe[MAX_PATH];
+        if (GetModuleFileNameW(nullptr, exe, MAX_PATH)) {
+          const std::wstring command = L"--no-activate \"" + url + L"\"";
+          ShellExecuteW(hwnd_, L"open", exe, command.c_str(), nullptr, SW_SHOWNOACTIVATE);
+        }
+      }
+    }
+    return;
+  }
   auto tab = std::make_unique<Tab>();
   tab->id = nextTabId_++;
   args->GetDeferral(tab->newWindowDeferral.GetAddressOf());
@@ -1692,6 +1715,8 @@ bool BrowserWindow::DispatchShortcut(UINT key, bool repeat) {
   const bool ctrl = GetKeyState(VK_CONTROL) < 0;
   const bool shift = GetKeyState(VK_SHIFT) < 0;
   const bool alt = GetKeyState(VK_MENU) < 0;
+  // App windows have one page: let Pi handle its own shortcuts, without browser tab/omnibox commands.
+  if (options_.appMode && ((ctrl && key != 'R' && key != 'W' && key != VK_F4) || (alt && key == 'D') || key == VK_F6)) return false;
   WPARAM command = kCmdNone;
   bool once = false;  // 按住不连发
   if (ctrl && !alt) {
@@ -1889,6 +1914,7 @@ void BrowserWindow::UpdateAddressBar() {
 }
 
 void BrowserWindow::UpdateWindowTitle() {
+  if (options_.appMode) { SetWindowTextW(hwnd_, options_.appTitle.c_str()); return; }
   const Tab* tab = ActiveTab();
   const std::wstring title =
       (tab && !tab->title.empty() ? tab->title : std::wstring(kNewTabTitle)) + L" - " + kAppName;
@@ -2260,6 +2286,13 @@ void BrowserWindow::ShowAbout() {
 }
 
 void BrowserWindow::OnCopyData(const COPYDATASTRUCT& data) {
+  if (options_.appMode && (data.dwData == kCopyDataOpenUrl || data.dwData == kCopyDataOpenUrl + 1)) {
+    // Reopening never resets the current conversation or joins the daily browser.
+    const bool passive = data.dwData == kCopyDataOpenUrl + 1;
+    ShowWindow(hwnd_, passive ? SW_SHOWNOACTIVATE : (IsIconic(hwnd_) ? SW_RESTORE : SW_SHOW));
+    if (!passive) SetForegroundWindow(hwnd_);
+    return;
+  }
   if (data.dwData != kCopyDataOpenUrl || data.cbData % sizeof(wchar_t) != 0 || data.cbData > 64 * 1024) {
     return;
   }
@@ -2343,6 +2376,7 @@ LRESULT CALLBACK BrowserWindow::WndProcThunk(HWND hwnd, UINT msg, WPARAM wParam,
 }
 
 LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
+  if (options_.appMode && !fullscreen_.Active() && (msg == WM_NCCALCSIZE || msg == WM_NCHITTEST)) return DefWindowProcW(hwnd_, msg, wParam, lParam);
   if (tray_.HandleExplorerRestart(msg)) {
     trayInstallAttempts_ = 0;
     InstallTrayIcon();
@@ -2402,10 +2436,10 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_ERASEBKGND:
       return 1;  // 整个客户区由 Direct2D 画，不让 GDI 先擦一遍
     case WM_PAINT:
-      if (fullscreen_.Active()) {
+      if (options_.appMode || fullscreen_.Active()) {
         PAINTSTRUCT paint{};
         HDC dc = BeginPaint(hwnd_, &paint);
-        FillRect(dc, &paint.rcPaint, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        FillRect(dc, &paint.rcPaint, static_cast<HBRUSH>(GetStockObject(options_.appMode ? WHITE_BRUSH : BLACK_BRUSH)));
         EndPaint(hwnd_, &paint);
       } else {
         painter_.Paint(palette_, layout_, BuildChromeState());
@@ -2613,7 +2647,7 @@ void BrowserWindow::OnCreate() {
   ApplyWindowTheme();
   omniboxBrush_ = CreateSolidBrush(ToColorRef(palette_.omnibox));
   // 地址栏用系统 EDIT：自带中文输入法、选择、剪贴板与无障碍
-  edit_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | ES_LEFT | ES_AUTOHSCROLL, 0, 0,
+  edit_ = options_.appMode ? nullptr : CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | ES_LEFT | ES_AUTOHSCROLL, 0, 0,
                           0, 0, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kAddressBarId)), instance_,
                           nullptr);
   SendMessageW(edit_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"搜索或输入网址"));
@@ -2634,7 +2668,7 @@ void BrowserWindow::OnCreate() {
 }
 
 void BrowserWindow::InstallTrayIcon() {
-  if (destroyed_ || options_.preheatSeconds > 0 || !options_.metricsPath.empty()) return;
+  if (destroyed_ || options_.appMode || options_.preheatSeconds > 0 || !options_.metricsPath.empty()) return;
   ++trayInstallAttempts_;
   const std::wstring version = FromUtf8(JISU_VERSION) + L" · " + FromUtf8(std::string(JISU_COMMIT).substr(0, 7));
   if (!tray_.Install(hwnd_, instance_, version) && trayInstallAttempts_ < 6) {
@@ -2645,7 +2679,7 @@ void BrowserWindow::InstallTrayIcon() {
 }
 
 void BrowserWindow::WriteTrayState() {
-  if (!options_.defaultUserData || !options_.metricsPath.empty() || options_.preheatSeconds > 0) return;
+  if (options_.appMode || !options_.defaultUserData || !options_.metricsPath.empty() || options_.preheatSeconds > 0) return;
   const std::wstring file = ParentDirectory(profileDir_) + L"\\tray-status.json";
   std::string state = "{\"pid\":" + std::to_string(GetCurrentProcessId()) +
       ",\"hwnd\":" + std::to_string(reinterpret_cast<uintptr_t>(hwnd_)) +
@@ -2817,7 +2851,7 @@ void BrowserWindow::Relayout() {
   ChromeLayout& l = layout_;
   l.scale = static_cast<float>(dpi_) / 96.0f;
   l.width = static_cast<float>(client.right - client.left) / l.scale;
-  if (fullscreen_.Active()) {
+  if (options_.appMode || fullscreen_.Active()) {
     l.contentTopPx = 0;
     if (edit_) ShowWindow(edit_, SW_HIDE);
     if (extensionsButton_) ShowWindow(extensionsButton_, SW_HIDE);

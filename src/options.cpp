@@ -81,7 +81,16 @@ Options ParseOptions(const wchar_t* commandLine) {
   for (size_t i = 1; i < args.size(); ++i) {
     const std::wstring& arg = args[i];
     auto next = [&]() -> std::wstring { return i + 1 < args.size() ? args[++i] : std::wstring(); };
-    if (arg == L"--udf") {
+    if (arg == L"--app" || arg.starts_with(L"--app=")) {
+      options.appMode = true;
+      options.startUrl = arg == L"--app" ? next() : arg.substr(6);
+    } else if (arg == L"--app-id") {
+      options.appId = next();
+    } else if (arg == L"--app-title") {
+      options.appTitle = next();
+    } else if (arg == L"--app-icon") {
+      options.appIcon = next();
+    } else if (arg == L"--udf") {
       options.userDataFolder = next();
       options.defaultUserData = false;
     } else if (arg == L"--agent-config") {
@@ -120,6 +129,11 @@ Options ParseOptions(const wchar_t* commandLine) {
     } else if (!arg.starts_with(L"--") && options.startUrl.empty()) {
       options.startUrl = arg;
     }
+  }
+  if (options.appMode) {
+    options.noAgent = true; // Never competes with the daily browser's broker leases.
+    options.spare = false;
+    if (options.appId.empty()) options.appId = L"web-app";
   }
   const std::wstring root = AppDataRoot();
   if (options.userDataFolder.empty() && !root.empty()) {

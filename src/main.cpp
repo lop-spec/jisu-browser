@@ -7,6 +7,7 @@
 #include "metrics.h"
 #include "options.h"
 
+#include <shobjidl.h>
 #include <cstdint>
 #include <cstdio>
 #include <cwctype>
@@ -20,7 +21,7 @@ bool ForwardToRunningInstance(const jisu::Options& options) {
     return false;  // 测量与预热运行各自独立
   }
   uint32_t hash = 2166136261u;
-  for (const wchar_t c : options.userDataFolder) {
+  for (const wchar_t c : options.InstanceKey()) {
     hash ^= static_cast<uint32_t>(towlower(c));
     hash *= 16777619u;
   }
@@ -32,13 +33,13 @@ bool ForwardToRunningInstance(const jisu::Options& options) {
     return false;
   }
   for (int attempt = 0; attempt < 30; ++attempt) {  // 主实例可能还在建窗：最多等 3 秒
-    const HWND target = BrowserWindow::FindRunningWindow(options.userDataFolder);
+    const HWND target = BrowserWindow::FindRunningWindow(options.InstanceKey());
     if (target) {
       DWORD pid = 0;
       GetWindowThreadProcessId(target, &pid);
-      AllowSetForegroundWindow(pid);
+      if (!options.noActivate) AllowSetForegroundWindow(pid);
       COPYDATASTRUCT data{};
-      data.dwData = BrowserWindow::kCopyDataOpenUrl;
+      data.dwData = options.appMode && options.noActivate ? BrowserWindow::kCopyDataOpenUrl + 1 : BrowserWindow::kCopyDataOpenUrl;
       data.cbData = static_cast<DWORD>((options.startUrl.size() + 1) * sizeof(wchar_t));
       data.lpData = const_cast<wchar_t*>(options.startUrl.c_str());
       DWORD_PTR result = 0;
@@ -62,6 +63,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
   const Options options = ParseOptions(GetCommandLineW());
   if (ForwardToRunningInstance(options)) {
     return 0;
+  }
+  if (options.appMode) {
+    const std::wstring identity = L"JisuBrowser.App." + options.appId;
+    SetCurrentProcessExplicitAppUserModelID(identity.c_str());
   }
   const bool preheat = options.preheatSeconds > 0;
 

@@ -36,6 +36,11 @@ struct Options {
   // --no-agent 关掉。带 --metrics 的测量运行不开桥，除非显式给了 --agent-config
   std::wstring agentConfigPath;
   bool noAgent = false;
+  bool appMode = false;           // --app <URL>: independent, single-page native app window
+  std::wstring appId = L"web-app"; // --app-id: singleton/taskbar identity, not a new profile
+  std::wstring appTitle = L"Web App";
+  std::wstring appIcon;            // --app-icon: local .ico path
+  std::wstring InstanceKey() const { return appMode ? userDataFolder + L"|app:" + appId : userDataFolder; }
   std::wstring startUrl;           // 第一个非选项参数：启动时打开的网址
   std::wstring commandLine;        // 原始命令行，写进时间线
 };
