@@ -166,7 +166,7 @@ target_include_directories(tab-strip-test PRIVATE src)
 target_compile_definitions(tab-strip-test PRIVATE UNICODE _UNICODE NOMINMAX)
 add_test(NAME native-tab-strip-layout COMMAND tab-strip-test)
 
-add_executable(tab-drag-test tests/tab-drag-test.cpp)
+add_executable(tab-drag-test tests/tab-drag-test.cpp res/app.manifest)
 target_include_directories(tab-drag-test PRIVATE src)
 target_compile_definitions(tab-drag-test PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)
 target_compile_options(tab-drag-test PRIVATE /utf-8 /EHsc)

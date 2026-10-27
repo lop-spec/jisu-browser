@@ -81,6 +81,7 @@ int wmain(int argc, wchar_t** argv) {
   PROCESS_INFORMATION pi{};
   int result = 0;
   try {
+    Require(AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) != FALSE, "test uses per-monitor DPI like browser");
     const auto a = Fixture(directory, 'A'), b = Fixture(directory, 'B'), c = Fixture(directory, 'C');
     std::wstring command = L"\"" + std::wstring(argv[1]) + L"\" --no-activate --no-agent --no-spare --bounds 50,50,1024,768 --udf \"" +
         (directory / L"profile").wstring() + L"\" \"" + a + L"\"";
