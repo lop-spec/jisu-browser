@@ -22,18 +22,18 @@ bool BrowserWindow::EnsureMedia(Tab& tab){
   SetTimer(hwnd_,kMediaTimer,250,nullptr);PlaceTab(tab);return true;
 }
 void BrowserWindow::CaptureMedia(Tab& source){
-  const auto id=source.id;const auto url=source.url;const std::weak_ptr<int> alive=alive_;
+  const auto id=source.id;const auto url=source.url;const auto owner=source.owner;
   // Executed only in response to a user command. No all-page scanner or media hooks.
   source.webview->ExecuteScript(LR"JS((()=>{const videos=[...document.querySelectorAll('video,audio')].sort((a,b)=>b.clientWidth*b.clientHeight-a.clientWidth*a.clientHeight),v=videos[0];if(!v)return JSON.stringify({empty:true});if(v.mediaKeys)return JSON.stringify({error:'受保护的视频请继续使用网页播放器'});let lines=[];try{lines=JSON.parse(v.dataset.jisuLines||'[]');}catch{}return JSON.stringify({url:v.dataset.jisuSource||v.currentSrc||v.src,start:v.currentTime||0,title:v.dataset.jisuTitle||document.title,index:Number(v.dataset.jisuIndex),integration:v.dataset.jisuIntegration||'',intro:Number(v.dataset.jisuIntro)||0,outro:Number(v.dataset.jisuOutro)||0,auto:v.dataset.jisuAuto==='true',lines});})())JS",
-    Callback<ICoreWebView2ExecuteScriptCompletedHandler>([this,id,url,alive](HRESULT hr,LPCWSTR result)->HRESULT{
-      if(alive.expired())return S_OK;Tab* tab=FindTab(id);if(!tab||tab->url!=url)return S_OK;
+    Callback<ICoreWebView2ExecuteScriptCompletedHandler>([owner,id,url](HRESULT hr,LPCWSTR result)->HRESULT{
+      auto* self=*owner;if(!self||self->destroyed_)return S_OK;Tab* tab=self->FindTab(id);if(!tab||tab->url!=url)return S_OK;
       json::Value outer,offer;if(FAILED(hr)||!result||!json::Parse(ToUtf8(result),outer)||!json::Parse(outer.AsString(),offer))return S_OK;
-      if(offer["empty"].AsBool()){NewTab(kPlayerUrl);return S_OK;}
-      if(!offer["error"].AsString().empty()){message_=FromUtf8(offer["error"].AsString());InvalidateChrome();return S_OK;}
+      if(offer["empty"].AsBool()){self->NewTab(kPlayerUrl);return S_OK;}
+      if(!offer["error"].AsString().empty()){self->message_=FromUtf8(offer["error"].AsString());self->InvalidateChrome();return S_OK;}
       auto media=offer["url"].AsString();if(!(media.starts_with("http://")||media.starts_with("https://"))){
-        MessageBoxW(hwnd_,L"这个网页使用临时 blob/MSE 视频流，未提供可交接的媒体地址。请继续网页播放；清番可直接使用极速播放器。",L"极速播放器",MB_OK|MB_ICONINFORMATION);return S_OK;
+        MessageBoxW(self->hwnd_,L"这个网页使用临时 blob/MSE 视频流，未提供可交接的媒体地址。请继续网页播放；清番可直接使用极速播放器。",L"极速播放器",MB_OK|MB_ICONINFORMATION);return S_OK;
       }
-      StartMedia(id,json::Serialize(offer));return S_OK;
+      self->StartMedia(id,json::Serialize(offer));return S_OK;
     }).Get());
 }
 void BrowserWindow::StartMedia(uint32_t sourceId,const std::string& text){
@@ -42,6 +42,7 @@ void BrowserWindow::StartMedia(uint32_t sourceId,const std::string& text){
   Tab* source=FindTab(sourceId);if(!source||source->agent)return;
   Tab* target=FindTab(source->mediaTarget);
   if(!target||!PlayerUrl(target->url)){NewTab(kPlayerUrl);target=ActiveTab();source=FindTab(sourceId);if(!target||!source)return;source->mediaTarget=target->id;target->mediaSource=sourceId;target->mediaPage=ToUtf8(source->url);}
+  if(auto* owner=*target->owner;owner&&owner!=this){owner->StartMedia(sourceId,text);return;}
   target->mediaIntegration=offer["integration"].AsString()=="qingfan";
   target->mediaAuto=offer["auto"].AsBool();target->mediaOffer=text;
   if(source->webview)source->webview->ExecuteScript(L"document.querySelectorAll('video,audio').forEach(v=>v.pause());window.dispatchEvent(new Event('jisu-native-start'));",nullptr);
@@ -58,8 +59,8 @@ bool BrowserWindow::HandleMediaMessage(Tab& tab,const std::wstring& origin,const
   json::Value message;if(!json::Parse(text,message))return false;const auto type=message["type"].AsString();
   if(type=="media.request"){
     if(tab.agent||!IsActive(tab)||origin!=tab.url||!tab.webview)return true;
-    const auto id=tab.id;const auto page=tab.url;const std::weak_ptr<int> alive=alive_;
-    tab.webview->ExecuteScript(L"navigator.userActivation.isActive",Callback<ICoreWebView2ExecuteScriptCompletedHandler>([this,id,page,alive](HRESULT hr,LPCWSTR result)->HRESULT{if(alive.expired())return S_OK;json::Value active;if(SUCCEEDED(hr)&&result&&json::Parse(ToUtf8(result),active)&&active.AsBool()){auto* source=FindTab(id);if(source&&source->url==page&&IsActive(*source))CaptureMedia(*source);}return S_OK;}).Get());
+    const auto id=tab.id;const auto page=tab.url;const auto owner=tab.owner;
+    tab.webview->ExecuteScript(L"navigator.userActivation.isActive",Callback<ICoreWebView2ExecuteScriptCompletedHandler>([owner,id,page](HRESULT hr,LPCWSTR result)->HRESULT{auto* self=*owner;if(!self||self->destroyed_)return S_OK;json::Value active;if(SUCCEEDED(hr)&&result&&json::Parse(ToUtf8(result),active)&&active.AsBool()){auto* source=self->FindTab(id);if(source&&source->url==page&&self->IsActive(*source))self->CaptureMedia(*source);}return S_OK;}).Get());
     return true;
   }
   if(type=="media.offer"){

@@ -61,6 +61,7 @@ add_executable(jisu-browser WIN32
   src/menu_icons.cpp
   src/bookmark_editor.cpp
   src/bookmark_drag.cpp
+  src/tab_drag.cpp
   res/app.rc
   res/app.manifest)
 
@@ -164,6 +165,15 @@ add_executable(tab-strip-test tests/tab-strip-test.cpp)
 target_include_directories(tab-strip-test PRIVATE src)
 target_compile_definitions(tab-strip-test PRIVATE UNICODE _UNICODE NOMINMAX)
 add_test(NAME native-tab-strip-layout COMMAND tab-strip-test)
+
+add_executable(tab-drag-test tests/tab-drag-test.cpp)
+target_include_directories(tab-drag-test PRIVATE src)
+target_compile_definitions(tab-drag-test PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+target_compile_options(tab-drag-test PRIVATE /utf-8 /EHsc)
+target_link_libraries(tab-drag-test PRIVATE user32)
+add_dependencies(tab-drag-test jisu-browser)
+add_test(NAME native-tab-drag-transfer COMMAND tab-drag-test "$<TARGET_FILE:jisu-browser>")
+set_tests_properties(native-tab-drag-transfer PROPERTIES TIMEOUT 90)
 
 # Same renderer as the browser, but no WebView/profile/window is created.
 # WIC targets exercise actual Direct2D output at desktop/narrow/DPI sizes.

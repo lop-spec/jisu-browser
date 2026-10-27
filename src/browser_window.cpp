@@ -284,8 +284,11 @@ bool SetRegString(HKEY root, const std::wstring& key, const wchar_t* name, const
 
 }  // namespace
 
-BrowserWindow::BrowserWindow(const Options& options, GraphicsWarmup& warmup)
-    : options_(options), warmup_(warmup), palette_(LoadPalette()) {}
+BrowserWindow::BrowserWindow(const Options& options, GraphicsWarmup& warmup, BrowserWindow* root)
+    : options_(options), root_(root ? root : this), ownsPrimary_(!root),
+      profile_(root ? root->profile_ : std::make_shared<ProfileState>()),
+      warmup_(warmup), palette_(LoadPalette()), bookmarks_(profile_->bookmarks),
+      history_(profile_->history), settings_(profile_->settings) {}
 
 HWND BrowserWindow::FindRunningWindow(const std::wstring& profileDir) {
   const uintptr_t hash = ProfileHash(profileDir);
@@ -341,9 +344,9 @@ bool BrowserWindow::Create(HINSTANCE instance) {
   instance_ = instance;
   profileDir_ = options_.userDataFolder;
   // 书签与设置在后台读，和建窗、预热并行；首帧前汇合
-  profileThread_ = CreateThread(nullptr, 0, &BrowserWindow::ProfileThreadMain, this, 0, nullptr);
-  if (!profileThread_) {
-    ProfileThreadMain(this);
+  if (root_ == this) {
+    profileThread_ = CreateThread(nullptr, 0, &BrowserWindow::ProfileThreadMain, this, 0, nullptr);
+    if (!profileThread_) ProfileThreadMain(this);
   }
 
   WNDCLASSEXW windowClass{};
@@ -356,7 +359,9 @@ bool BrowserWindow::Create(HINSTANCE instance) {
   windowClass.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(1));
   windowClass.lpszClassName = kWindowClass;
   if (!RegisterClassExW(&windowClass)) {
-    return false;
+    const DWORD error = GetLastError();
+    DeleteObject(windowClass.hbrBackground);
+    if (error != ERROR_CLASS_ALREADY_EXISTS) return false;
   }
 
   int x = CW_USEDEFAULT;
@@ -392,6 +397,7 @@ bool BrowserWindow::Create(HINSTANCE instance) {
   if (options_.preheatSeconds > 0) {
     SetTimer(hwnd_, kTimerPreheat, static_cast<UINT>(options_.preheatSeconds) * 1000u, nullptr);
   }
+  liveWindows_.push_back(this);
   return true;
 }
 
@@ -417,7 +423,7 @@ void BrowserWindow::ShowFirstFrame(int showCmd) {
   metrics.Mark("firstPaint");
   warmup_.NotifyFirstPaint();
   // Register after the first frame, never in the latency-sensitive startup path.
-  if (!options_.appMode && options_.metricsPath.empty()) PostMessageW(hwnd_, kMsgInstallTray, 0, 0);
+  if (ownsPrimary_ && !options_.appMode && options_.metricsPath.empty()) PostMessageW(hwnd_, kMsgInstallTray, 0, 0);
 
   if (!options_.noActivate) {
     SetFocus(edit_);
@@ -674,6 +680,9 @@ void BrowserWindow::AbandonNewWindow(Tab& tab) {
 }
 
 void BrowserWindow::ConfigureWebView(Tab& tab) {
+  auto* self = this;
+  const auto owner = tab.owner;
+  *owner = this;
   // 新标签页与书签管理页：虚拟主机映射到随包的 ntp\ 目录（内置新标签页模式下书签管理页也要用）
   ComPtr<ICoreWebView2_3> webview3;
   if (SUCCEEDED(tab.webview.As(&webview3))) {
@@ -682,26 +691,28 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
   }
   ComPtr<ICoreWebView2_3> faviconMapping;
   if (SUCCEEDED(tab.webview.As(&faviconMapping))) {
-    const std::wstring cache = profileDir_ + L"\\Favicons";
+    const std::wstring cache = self->profileDir_ + L"\\Favicons";
     faviconMapping->SetVirtualHostNameToFolderMapping(L"favicons.jisu.example", cache.c_str(), COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
   }
-  ConfigureProfile(tab);
+  self->ConfigureProfile(tab);
   const uint32_t id = tab.id;
   EventRegistrationToken token{};
   ComPtr<ICoreWebView2_15> faviconView;
   if (SUCCEEDED(tab.webview.As(&faviconView))) {
-    std::weak_ptr<int> alive = alive_;
     faviconView->add_FaviconChanged(Callback<ICoreWebView2FaviconChangedEventHandler>(
-      [this, id, alive](ICoreWebView2* sender, IUnknown*) -> HRESULT {
-        if (alive.expired()) return S_OK;
-        const Tab* current = FindTab(id);
+      [owner, id](ICoreWebView2* sender, IUnknown*) -> HRESULT {
+        auto* self = *owner;
+        if (!self || self->destroyed_) return S_OK;
+        const Tab* current = self->FindTab(id);
         if (!current || current->agent) return S_OK;
         const std::wstring url = current->url;
         ComPtr<ICoreWebView2_15> view;
         if (SUCCEEDED(sender->QueryInterface(IID_PPV_ARGS(view.GetAddressOf())))) {
           view->GetFavicon(COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG, Callback<ICoreWebView2GetFaviconCompletedHandler>(
-            [this, url, alive](HRESULT hr, IStream* image) -> HRESULT {
-              if (!alive.expired() && SUCCEEDED(hr)) favicons_.Store(url, image);
+            [owner, url](HRESULT hr, IStream* image) -> HRESULT {
+              auto* self = *owner;
+              if (!self || self->destroyed_) return S_OK;
+              if (SUCCEEDED(hr)) self->favicons_.Store(url, image);
               return S_OK;
             }).Get());
         }
@@ -714,14 +725,14 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
     if (SUCCEEDED(tab.webview->get_Settings(settings.GetAddressOf()))) {
       settings->put_AreDefaultScriptDialogsEnabled(FALSE);
     }
-    if (agentConfig_.blockAutoplay) {
+    if (self->agentConfig_.blockAutoplay) {
       tab.webview->AddScriptToExecuteOnDocumentCreated(
           kAgentMediaScript,
           Callback<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler>(
               [](HRESULT, LPCWSTR) -> HRESULT { return S_OK; })
               .Get());
     }
-    if (agentConfig_.blockImages) {
+    if (self->agentConfig_.blockImages) {
       // 图片请求（含 iframe、worker 发起的）交给外壳：用户正看着这个标签时放行，否则回 404
       ComPtr<ICoreWebView2_22> webview22;
       if (SUCCEEDED(tab.webview.As(&webview22))) {
@@ -732,13 +743,15 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
       }
       tab.webview->add_WebResourceRequested(
           Callback<ICoreWebView2WebResourceRequestedEventHandler>(
-              [this, id](ICoreWebView2*, ICoreWebView2WebResourceRequestedEventArgs* args) -> HRESULT {
-                const Tab* t = FindTab(id);
-                if (!t || !t->agent || IsActive(*t) || !environment_) {
+              [owner, id](ICoreWebView2*, ICoreWebView2WebResourceRequestedEventArgs* args) -> HRESULT {
+                auto* self = *owner;
+                if (!self || self->destroyed_) return S_OK;
+                const Tab* t = self->FindTab(id);
+                if (!t || !t->agent || self->IsActive(*t) || !self->environment_) {
                   return S_OK;
                 }
                 ComPtr<ICoreWebView2WebResourceResponse> response;
-                if (SUCCEEDED(environment_->CreateWebResourceResponse(nullptr, 404, L"Blocked", L"",
+                if (SUCCEEDED(self->environment_->CreateWebResourceResponse(nullptr, 404, L"Blocked", L"",
                                                                       response.GetAddressOf()))) {
                   args->put_Response(response.Get());
                 }
@@ -751,15 +764,19 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
 
   tab.webview->add_WebMessageReceived(
       Callback<ICoreWebView2WebMessageReceivedEventHandler>(
-          [this, id](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
-            OnWebMessage(id, args);
+          [owner, id](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
+            auto* self = *owner;
+            if (!self || self->destroyed_) return S_OK;
+            self->OnWebMessage(id, args);
             return S_OK;
           })
           .Get(),
       &token);
   tab.webview->add_DocumentTitleChanged(
-      Callback<ICoreWebView2DocumentTitleChangedEventHandler>([this, id](ICoreWebView2* sender, IUnknown*) -> HRESULT {
-        if (Tab* t = FindTab(id)) {
+      Callback<ICoreWebView2DocumentTitleChangedEventHandler>([owner, id](ICoreWebView2* sender, IUnknown*) -> HRESULT {
+        auto* self = *owner;
+        if (!self || self->destroyed_) return S_OK;
+        if (Tab* t = self->FindTab(id)) {
           CoTaskString title;
           if (SUCCEEDED(sender->get_DocumentTitle(title.Put()))) {
             t->title = title.Str();
@@ -767,28 +784,30 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
           if (t->title.empty() && !IsNewTabPageUrl(t->url)) {
             t->title = t->url;
           }
-          if (!t->agent && !HistoryStore::SafeUrl(t->url).empty()) history_.Title(t->url, t->title);
-          if (IsActive(*t)) {
-            UpdateWindowTitle();
+          if (!t->agent && !HistoryStore::SafeUrl(t->url).empty()) self->history_.Title(t->url, t->title);
+          if (self->IsActive(*t)) {
+            self->UpdateWindowTitle();
           }
-          InvalidateChrome();
+          self->InvalidateChrome();
         }
         return S_OK;
       }).Get(),
       &token);
   tab.webview->add_SourceChanged(
       Callback<ICoreWebView2SourceChangedEventHandler>(
-          [this, id](ICoreWebView2* sender, ICoreWebView2SourceChangedEventArgs* args) -> HRESULT {
-            if (Tab* t = FindTab(id)) {
+          [owner, id](ICoreWebView2* sender, ICoreWebView2SourceChangedEventArgs* args) -> HRESULT {
+            auto* self = *owner;
+            if (!self || self->destroyed_) return S_OK;
+            if (Tab* t = self->FindTab(id)) {
               CoTaskString source;
               if (SUCCEEDED(sender->get_Source(source.Put()))) {
                 t->url = source.Str();
               }
               BOOL newDocument = TRUE; args->get_IsNewDocument(&newDocument);
-              if (!newDocument) RecordVisit(*t);
-              if (IsActive(*t)) {
-                UpdateAddressBar();
-                InvalidateChrome();  // 星标跟着网址变
+              if (!newDocument) self->RecordVisit(*t);
+              if (self->IsActive(*t)) {
+                self->UpdateAddressBar();
+                self->InvalidateChrome();  // 星标跟着网址变
               }
             }
             return S_OK;
@@ -797,21 +816,25 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
       &token);
   tab.webview->add_ContainsFullScreenElementChanged(
       Callback<ICoreWebView2ContainsFullScreenElementChangedEventHandler>(
-          [this, id](ICoreWebView2*, IUnknown*) -> HRESULT {
-            PostMessageW(hwnd_, kMsgFullscreenChanged, id, 0);
+          [owner, id](ICoreWebView2*, IUnknown*) -> HRESULT {
+            auto* self = *owner;
+            if (!self || self->destroyed_) return S_OK;
+            PostMessageW(self->hwnd_, kMsgFullscreenChanged, id, 0);
             return S_OK;
           }).Get(), &token);
   tab.webview->add_HistoryChanged(
-      Callback<ICoreWebView2HistoryChangedEventHandler>([this, id](ICoreWebView2* sender, IUnknown*) -> HRESULT {
-        if (Tab* t = FindTab(id)) {
+      Callback<ICoreWebView2HistoryChangedEventHandler>([owner, id](ICoreWebView2* sender, IUnknown*) -> HRESULT {
+        auto* self = *owner;
+        if (!self || self->destroyed_) return S_OK;
+        if (Tab* t = self->FindTab(id)) {
           BOOL back = FALSE;
           BOOL forward = FALSE;
           sender->get_CanGoBack(&back);
           sender->get_CanGoForward(&forward);
           t->canBack = back != FALSE;
           t->canForward = forward != FALSE;
-          if (IsActive(*t)) {
-            InvalidateChrome();
+          if (self->IsActive(*t)) {
+            self->InvalidateChrome();
           }
         }
         return S_OK;
@@ -819,14 +842,16 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
       &token);
   tab.webview->add_NavigationStarting(
       Callback<ICoreWebView2NavigationStartingEventHandler>(
-          [this, id](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
-            if (Tab* t = FindTab(id)) {
+          [owner, id](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
+            auto* self = *owner;
+            if (!self || self->destroyed_) return S_OK;
+            if (Tab* t = self->FindTab(id)) {
               CoTaskString uri; args->get_Uri(uri.Put());
-              if (t->media && uri.Str() != L"https://newtab.jisu.example/player.html") StopMedia(*t);
-              if (t->mediaTarget && uri.Str() != t->url) { if (auto* target=FindTab(t->mediaTarget)) target->mediaSource=0; t->mediaTarget=0; }
-              if (fullscreenTab_ == id) ExitContentFullscreen();
+              if (t->media && uri.Str() != L"https://newtab.jisu.example/player.html") self->StopMedia(*t);
+              if (t->mediaTarget && uri.Str() != t->url) { if (auto* target=self->FindTab(t->mediaTarget)) target->mediaSource=0; t->mediaTarget=0; }
+              if (self->fullscreenTab_ == id) self->ExitContentFullscreen();
               t->loading = true;
-              InvalidateChrome();
+              self->InvalidateChrome();
             }
             return S_OK;
           })
@@ -834,15 +859,17 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
       &token);
   tab.webview->add_NavigationCompleted(
       Callback<ICoreWebView2NavigationCompletedEventHandler>(
-          [this, id](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs* args) -> HRESULT {
-            if (Tab* t = FindTab(id)) {
-              BOOL success=FALSE; args->get_IsSuccess(&success); if(success) RecordVisit(*t);
+          [owner, id](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs* args) -> HRESULT {
+            auto* self = *owner;
+            if (!self || self->destroyed_) return S_OK;
+            if (Tab* t = self->FindTab(id)) {
+              BOOL success=FALSE; args->get_IsSuccess(&success); if(success) self->RecordVisit(*t);
               t->loading = false;
               Metrics& metrics = Metrics::Get();
-              if (id == firstTabId_ && !metrics.Has("ntpNavCompleted")) {
+              if (id == self->firstTabId_ && !metrics.Has("ntpNavCompleted")) {
                 metrics.Mark("ntpNavCompleted");
               }
-              InvalidateChrome();
+              self->InvalidateChrome();
               if (t->leaseDone) {
                 // 新建的智能体标签首次导航（about:blank）完成：交给桥
                 LeaseCallback done = std::move(t->leaseDone);
@@ -856,17 +883,21 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
       &token);
   tab.webview->add_NewWindowRequested(
       Callback<ICoreWebView2NewWindowRequestedEventHandler>(
-          [this, id](ICoreWebView2*, ICoreWebView2NewWindowRequestedEventArgs* args) -> HRESULT {
+          [owner, id](ICoreWebView2*, ICoreWebView2NewWindowRequestedEventArgs* args) -> HRESULT {
+            auto* self = *owner;
+            if (!self || self->destroyed_) return S_OK;
             // 智能体页面弹出的窗口作为普通后台标签打开，不抢用户的视线
-            const Tab* source = FindTab(id);
-            OpenNewWindowAsTab(args, !(source && source->agent));
+            const Tab* source = self->FindTab(id);
+            self->OpenNewWindowAsTab(args, !(source && source->agent));
             return S_OK;
           })
           .Get(),
       &token);
   tab.webview->add_ScriptDialogOpening(
       Callback<ICoreWebView2ScriptDialogOpeningEventHandler>(
-          [this, id](ICoreWebView2*, ICoreWebView2ScriptDialogOpeningEventArgs* args) -> HRESULT {
+          [owner, id](ICoreWebView2*, ICoreWebView2ScriptDialogOpeningEventArgs* args) -> HRESULT {
+            auto* self = *owner;
+            if (!self || self->destroyed_) return S_OK;
             // 只有关掉了默认弹框的智能体标签会走到这里：离开页面的确认放行，其余按 Playwright 默认当作取消
             COREWEBVIEW2_SCRIPT_DIALOG_KIND kind = COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT;
             args->get_Kind(&kind);
@@ -880,9 +911,11 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
       &token);
   tab.webview->add_PermissionRequested(
       Callback<ICoreWebView2PermissionRequestedEventHandler>(
-          [this, id](ICoreWebView2*, ICoreWebView2PermissionRequestedEventArgs* args) -> HRESULT {
-            const Tab* t = FindTab(id);
-            if (t && t->agent && !IsActive(*t)) {
+          [owner, id](ICoreWebView2*, ICoreWebView2PermissionRequestedEventArgs* args) -> HRESULT {
+            auto* self = *owner;
+            if (!self || self->destroyed_) return S_OK;
+            const Tab* t = self->FindTab(id);
+            if (t && t->agent && !self->IsActive(*t)) {
               args->put_State(COREWEBVIEW2_PERMISSION_STATE_DENY);  // 屏幕外的权限气泡没人能点
             }
             return S_OK;
@@ -891,32 +924,36 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
       &token);
   tab.webview->add_ProcessFailed(
       Callback<ICoreWebView2ProcessFailedEventHandler>(
-          [this, id](ICoreWebView2* sender, ICoreWebView2ProcessFailedEventArgs* args) -> HRESULT {
+          [owner, id](ICoreWebView2* sender, ICoreWebView2ProcessFailedEventArgs* args) -> HRESULT {
+            auto* self = *owner;
+            if (!self || self->destroyed_) return S_OK;
             COREWEBVIEW2_PROCESS_FAILED_KIND kind = COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED;
             args->get_ProcessFailedKind(&kind);
-            Tab* t = FindTab(id);
-            if (fullscreenTab_ == id) ExitContentFullscreen();
+            Tab* t = self->FindTab(id);
+            if (self->fullscreenTab_ == id) self->ExitContentFullscreen();
             if (!t || !t->agent || kind != COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED) {
               return S_OK;
             }
             // 智能体页面崩溃：断开当前连接、标签回池，并重新加载
-            if (bridge_) {
-              bridge_->OnAgentTabGone(id);
+            if (self->bridge_) {
+              self->bridge_->OnAgentTabGone(id);
             }
             t->leased = false;
             t->agentAwake = false;
             sender->Reload();
-            PlaceTab(*t);
-            InvalidateChrome();
+            self->PlaceTab(*t);
+            self->InvalidateChrome();
             return S_OK;
           })
           .Get(),
       &token);
   tab.controller->add_AcceleratorKeyPressed(
       Callback<ICoreWebView2AcceleratorKeyPressedEventHandler>(
-          [this, id](ICoreWebView2Controller*, ICoreWebView2AcceleratorKeyPressedEventArgs* args) -> HRESULT {
-            const Tab* source = FindTab(id);
-            if (!source || !IsActive(*source)) return S_OK;  // Background input cannot control native chrome.
+          [owner, id](ICoreWebView2Controller*, ICoreWebView2AcceleratorKeyPressedEventArgs* args) -> HRESULT {
+            auto* self = *owner;
+            if (!self || self->destroyed_) return S_OK;
+            const Tab* source = self->FindTab(id);
+            if (!source || !self->IsActive(*source)) return S_OK;  // Background input cannot control native chrome.
             COREWEBVIEW2_KEY_EVENT_KIND kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_UP;
             args->get_KeyEventKind(&kind);
             if (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN) {
@@ -926,7 +963,7 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
             args->get_VirtualKey(&key);
             COREWEBVIEW2_PHYSICAL_KEY_STATUS status{};
             args->get_PhysicalKeyStatus(&status);
-            if (DispatchShortcut(key, status.WasKeyDown != FALSE)) {
+            if (self->DispatchShortcut(key, status.WasKeyDown != FALSE)) {
               args->put_Handled(TRUE);
             }
             return S_OK;
@@ -934,9 +971,11 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
           .Get(),
       &token);
   tab.controller->add_GotFocus(Callback<ICoreWebView2FocusChangedEventHandler>(
-                                   [this](ICoreWebView2Controller*, IUnknown*) -> HRESULT {
-                                     if(extensionPopupWindow_) PostMessageW(hwnd_,kMsgCloseExtensionPopup,static_cast<WPARAM>(extensionPopupGeneration_),0);
-                                     focusInWebView_ = true;
+                                   [owner](ICoreWebView2Controller*, IUnknown*) -> HRESULT {
+                                     auto* self = *owner;
+                                     if (!self || self->destroyed_) return S_OK;
+                                     if(self->extensionPopupWindow_) PostMessageW(self->hwnd_,kMsgCloseExtensionPopup,static_cast<WPARAM>(self->extensionPopupGeneration_),0);
+                                     self->focusInWebView_ = true;
                                      return S_OK;
                                    })
                                    .Get(),
@@ -1508,6 +1547,7 @@ void BrowserWindow::CloseTab(size_t index) {
   if (index >= tabs_.size()) {
     return;
   }
+  CancelTabDrag(false);
   if (fullscreenTab_ == tabs_[index]->id) ExitContentFullscreen();
   StopMedia(*tabs_[index]);
   if(auto* target=FindTab(tabs_[index]->mediaTarget))target->mediaSource=0;
@@ -1521,6 +1561,7 @@ void BrowserWindow::CloseTab(size_t index) {
   if (closing->agent && bridge_) {
     bridge_->OnAgentTabGone(closing->id);
   }
+  *closing->owner = nullptr;
   AbandonNewWindow(*closing);
   if (closing->controller) {
     closing->controller->Close();
@@ -1653,6 +1694,11 @@ BrowserWindow::Tab* BrowserWindow::FindTab(uint32_t id) {
   if (spare_ && spare_->id == id) {
     return spare_.get();
   }
+  // Native media/source links survive moving either tab into a sibling window.
+  for (auto* window : liveWindows_) {
+    if (window == this || window->profile_ != profile_) continue;
+    for (auto& tab : window->tabs_) if (tab->id == id) return tab.get();
+  }
   return nullptr;
 }
 
@@ -1679,6 +1725,12 @@ bool BrowserWindow::IsSpare(const Tab& tab) const { return spare_.get() == &tab;
 // 地址栏与快捷键
 
 bool BrowserWindow::PreTranslate(const MSG& msg) {
+  if (root_ == this) {
+    for (auto* window : liveWindows_) {
+      if (window != this && (msg.hwnd == window->hwnd_ || msg.hwnd == window->edit_))
+        return window->PreTranslate(msg);
+    }
+  }
   if (msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN) {
     return false;
   }
@@ -1686,6 +1738,7 @@ bool BrowserWindow::PreTranslate(const MSG& msg) {
     return false;
   }
   const UINT key = static_cast<UINT>(msg.wParam);
+  if (key == VK_ESCAPE && dragTabId_) { CancelTabDrag(); return true; }
   if (key == VK_ESCAPE && extensionPopupWindow_) { CloseExtensionPopup(); return true; }
   if (key == VK_ESCAPE && dragBookmarkId_) { CancelBookmarkDrag(); return true; }
   const bool repeat = (msg.lParam & (1 << 30)) != 0;
@@ -1712,6 +1765,8 @@ bool BrowserWindow::PreTranslate(const MSG& msg) {
 }
 
 bool BrowserWindow::DispatchShortcut(UINT key, bool repeat) {
+  // WebView-focused keyboard events arrive through AcceleratorKeyPressed too.
+  if (key == VK_ESCAPE && dragTabId_) { CancelTabDrag(); return true; }
   const bool ctrl = GetKeyState(VK_CONTROL) < 0;
   const bool shift = GetKeyState(VK_SHIFT) < 0;
   const bool alt = GetKeyState(VK_MENU) < 0;
@@ -2188,10 +2243,13 @@ void BrowserWindow::OnBookmarksChanged() {
     return;
   }
   bookmarks_.Save();
-  Relayout();
-  PlaceAllTabs();  // 书签栏出现或消失时网页区上沿会变
-  InvalidateChrome();
-  BroadcastBookmarks();
+  for (auto* window : liveWindows_) {
+    if (window->profile_ != profile_) continue;
+    window->Relayout();
+    window->PlaceAllTabs();
+    window->InvalidateChrome();
+    window->BroadcastBookmarks();
+  }
 }
 
 void BrowserWindow::BroadcastBookmarks() {
@@ -2515,9 +2573,11 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       return 0;
     case WM_CAPTURECHANGED:
     case WM_CANCELMODE:
+      CancelTabDrag();
       CancelBookmarkDrag();
       break;
     case WM_KEYDOWN:
+      if (wParam == VK_ESCAPE && dragTabId_) { CancelTabDrag(); return 0; }
       if (wParam == VK_ESCAPE && dragBookmarkId_) { CancelBookmarkDrag(); return 0; }
       break;
     case WM_MOUSEMOVE:
@@ -2655,6 +2715,7 @@ void BrowserWindow::OnCreate() {
   UpdateEditFont();
   Metrics::Get().Mark("addressBarCreated");
 
+  if (root_ != this) { Relayout(); return; }  // A detached window adopts the existing controller.
   // 第一个标签先有，控件等环境就绪再建
   auto first = std::make_unique<Tab>();
   first->id = nextTabId_++;
@@ -2679,6 +2740,7 @@ void BrowserWindow::InstallTrayIcon() {
 }
 
 void BrowserWindow::WriteTrayState() {
+  if (!ownsPrimary_) return;
   if (options_.appMode || !options_.defaultUserData || !options_.metricsPath.empty() || options_.preheatSeconds > 0) return;
   const std::wstring file = ParentDirectory(profileDir_) + L"\\tray-status.json";
   std::string state = "{\"pid\":" + std::to_string(GetCurrentProcessId()) +
@@ -2696,8 +2758,10 @@ void BrowserWindow::ExecuteTrayCommand(UINT command) {
   if (command == TrayIcon::kExit) {
     // Same normal teardown as the window X: bridge, popups, all tabs and spare
     // WebViews are closed; no invisible shell is left behind.
-    tray_.SetExiting();
-    PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+    for (auto* window : liveWindows_) {
+      window->tray_.SetExiting();
+      PostMessageW(window->hwnd_, WM_CLOSE, 0, 0);
+    }
   } else if (command == TrayIcon::kOpen || command == TrayIcon::kNewTab) {
     if (command == TrayIcon::kNewTab) NewTab(L"");
     ShowWindow(hwnd_, IsIconic(hwnd_) ? SW_RESTORE : SW_SHOW);
@@ -2706,6 +2770,7 @@ void BrowserWindow::ExecuteTrayCommand(UINT command) {
 }
 
 void BrowserWindow::OnDestroy() {
+  CancelTabDrag(false);
   tray_.SetExiting();
   KillTimer(hwnd_, kTimerTrayRetry);
   WriteMetrics(true);  // 测量中被关掉也留下已有的时间线（已写过则不重复）
@@ -2715,8 +2780,10 @@ void BrowserWindow::OnDestroy() {
   CloseExtensionPopup();
   for (auto& e : extensions_) if(e.toolbarIcon){DestroyIcon(e.toolbarIcon);e.toolbarIcon=nullptr;}
   if(extensionTooltip_){DestroyWindow(extensionTooltip_);extensionTooltip_=nullptr;}
+  const bool hadBridge = bridge_ != nullptr;
   bridge_.reset();  // 先断开所有智能体连接，再关控件
   for (auto& tab : tabs_) {
+    *tab->owner = nullptr;
     StopMedia(*tab);
     if (tab->leaseDone) {
       LeaseCallback done = std::move(tab->leaseDone);
@@ -2729,6 +2796,7 @@ void BrowserWindow::OnDestroy() {
     }
   }
   if (spare_ && spare_->controller) {
+    *spare_->owner = nullptr;
     spare_->controller->Close();
   }
   tabs_.clear();
@@ -2742,7 +2810,14 @@ void BrowserWindow::OnDestroy() {
   RemovePropW(hwnd_, L"JisuBrowser.TrayRegistered");
   WriteTrayState();
   RemovePropW(hwnd_, kProfileProp);
-  PostQuitMessage(0);
+  liveWindows_.erase(std::remove(liveWindows_.begin(), liveWindows_.end(), this), liveWindows_.end());
+  if (liveWindows_.empty()) PostQuitMessage(0);
+  else if (ownsPrimary_) {
+    auto* primary = liveWindows_.front();
+    primary->ownsPrimary_ = true;
+    PostMessageW(primary->hwnd_, kMsgInstallTray, 0, 0);
+    if (hadBridge) primary->StartAgentBridge();
+  }
 }
 
 void BrowserWindow::ApplyWindowTheme() {
@@ -2817,6 +2892,7 @@ void BrowserWindow::OnContentFullscreenChanged(uint32_t id) {
 void BrowserWindow::UpdateFullscreen() {
   if (browserFullscreen_ || fullscreenTab_) {
     CloseExtensionPopup();
+    CancelTabDrag();
     CancelBookmarkDrag();
     hover_ = {}; pressed_ = {};
     if (!fullscreen_.Enter(hwnd_)) {
@@ -3015,6 +3091,7 @@ void BrowserWindow::InvalidateChrome() {
 }
 
 void BrowserWindow::OnMouseMove(POINT point) {
+  if (dragTabId_ && GetCapture() == hwnd_) { UpdateTabDrag(point); return; }
   if (dragBookmarkId_ && GetCapture() == hwnd_) {
     if (!draggingBookmark_ && (std::abs(point.x - dragStart_.x) >= GetSystemMetricsForDpi(SM_CXDRAG, dpi_) ||
                               std::abs(point.y - dragStart_.y) >= GetSystemMetricsForDpi(SM_CYDRAG, dpi_))) draggingBookmark_ = true;
@@ -3041,11 +3118,18 @@ void BrowserWindow::OnLButtonDown(POINT point) {
     SetCapture(hwnd_);
   }
   if (pressed_.kind == ChromeHit::kTab) {
-    Activate(static_cast<size_t>(pressed_.index));  // 标签按下即切换
+    const size_t index = static_cast<size_t>(pressed_.index);
+    Activate(index);  // 标签按下即切换
+    dragTabId_ = tabs_[index]->id;
+    dragTabOriginalIndex_ = index;
+    dragTabStart_ = point;
+    dragTabGrabX_ = point.x / layout_.scale - layout_.tabs[index].left;
+    SetCapture(hwnd_);
   }
 }
 
 void BrowserWindow::OnLButtonUp(POINT point) {
+  if (dragTabId_) { FinishTabDrag(point); return; }
   if (draggingBookmark_) { FinishBookmarkDrag(point); return; }
   if (dragBookmarkId_) { dragBookmarkId_ = 0; if (GetCapture() == hwnd_) ReleaseCapture(); }
   const ChromeHit hit = HitTest(point);

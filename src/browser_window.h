@@ -25,7 +25,7 @@ namespace jisu {
 
 class BrowserWindow : public AgentHost {
  public:
-  BrowserWindow(const Options& options, GraphicsWarmup& warmup);
+  BrowserWindow(const Options& options, GraphicsWarmup& warmup, BrowserWindow* root = nullptr);
   ~BrowserWindow() override;
   BrowserWindow(const BrowserWindow&) = delete;
   BrowserWindow& operator=(const BrowserWindow&) = delete;
@@ -49,6 +49,9 @@ class BrowserWindow : public AgentHost {
 
  private:
   struct Tab {
+    // Stable indirection follows the live WebView when it moves between windows.
+    std::shared_ptr<BrowserWindow*> owner = std::make_shared<BrowserWindow*>(nullptr);
+    ~Tab() { *owner = nullptr; }
     uint32_t id = 0;
     ComPtr<ICoreWebView2Controller> controller;
     ComPtr<ICoreWebView2> webview;
@@ -119,6 +122,12 @@ class BrowserWindow : public AgentHost {
   void OnLButtonUp(POINT point);
   void OnMButtonUp(POINT point);
   void OnRButtonUp(POINT point);
+  void UpdateTabDrag(POINT point);
+  void CancelTabDrag(bool restore = true);
+  void FinishTabDrag(POINT point);
+  void MoveTab(size_t from, size_t to);
+  bool MoveTabTo(uint32_t id, BrowserWindow& destination);
+  bool OutsideTabStrip(POINT point) const;
 
   void OnEnvironmentCreated(HRESULT result, ICoreWebView2Environment* environment);
   void StartAgentBridge();
@@ -216,7 +225,17 @@ class BrowserWindow : public AgentHost {
   void MaybeWriteMetrics();
   void WriteMetrics(bool forced);
 
-  const Options& options_;
+  Options options_;
+  BrowserWindow* root_ = nullptr;
+  bool ownsPrimary_ = true;
+  std::vector<std::unique_ptr<BrowserWindow>> detachedWindows_;
+  inline static std::vector<BrowserWindow*> liveWindows_;
+  struct ProfileState {
+    BookmarkStore bookmarks;
+    HistoryStore history;
+    Settings settings;
+  };
+  std::shared_ptr<ProfileState> profile_;
   GraphicsWarmup& warmup_;
   Palette palette_;
   ChromePainter painter_;
@@ -239,7 +258,7 @@ class BrowserWindow : public AgentHost {
   std::vector<std::unique_ptr<Tab>> tabs_;
   std::unique_ptr<Tab> spare_;
   size_t active_ = 0;
-  uint32_t nextTabId_ = 1;
+  inline static uint32_t nextTabId_ = 1;
   uint32_t firstTabId_ = 0;
   std::wstring inlineNtp_;
   std::wstring message_;
@@ -248,8 +267,8 @@ class BrowserWindow : public AgentHost {
   bool freezeTimerRunning_ = false;
 
   // 书签与设置：Create 时起后台线程读，首帧前等它读完
-  BookmarkStore bookmarks_;
-  HistoryStore history_;
+  BookmarkStore& bookmarks_;
+  HistoryStore& history_;
   mutable FaviconCache favicons_;
   bool profileConfigured_ = false;
   struct ExtensionEntry {
@@ -277,7 +296,7 @@ class BrowserWindow : public AgentHost {
   size_t removedExtensionCount_ = 0;
   ComPtr<ICoreWebView2Profile7> extensionProfile_;
   std::shared_ptr<int> alive_ = std::make_shared<int>(0);
-  Settings settings_;
+  Settings& settings_;
   HANDLE profileThread_ = nullptr;
   std::wstring profileDir_;     // 用户数据目录（书签、设置文件所在）
   bool profileLoaded_ = false;
@@ -286,6 +305,11 @@ class BrowserWindow : public AgentHost {
 
   ChromeHit hover_;
   ChromeHit pressed_;
+  uint32_t dragTabId_ = 0;
+  size_t dragTabOriginalIndex_ = 0;
+  POINT dragTabStart_{};
+  float dragTabGrabX_ = 0;
+  bool draggingTab_ = false;
   int64_t dragBookmarkId_ = 0;
   POINT dragStart_{};
   bool draggingBookmark_ = false;

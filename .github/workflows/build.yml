@@ -66,6 +66,8 @@ jobs:
             build/Release/fullscreen-window-test.exe
             build/Release/history-test.exe
             build/Release/media-host-test.exe
+            build/Release/tab-drag-test.exe
+            build/Testing/Temporary/LastTest.log
           if-no-files-found: warn
           retention-days: 30
 
