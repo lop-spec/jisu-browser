@@ -108,6 +108,13 @@ add_custom_command(TARGET jisu-media POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_directory "${MPV_DIR}/shaders" "$<TARGET_FILE_DIR:jisu-media>/media/shaders")
 
 enable_testing()
+add_executable(extension-popup-focus-test tests/extension-popup-focus-test.cpp)
+target_include_directories(extension-popup-focus-test PRIVATE src)
+target_compile_definitions(extension-popup-focus-test PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+target_compile_options(extension-popup-focus-test PRIVATE /utf-8 /EHsc)
+target_link_libraries(extension-popup-focus-test PRIVATE user32)
+add_test(NAME native-extension-popup-focus COMMAND extension-popup-focus-test)
+
 add_executable(app-window-test tests/app-window-test.cpp src/options.cpp src/common.cpp)
 target_include_directories(app-window-test PRIVATE src)
 target_compile_definitions(app-window-test PRIVATE UNICODE _UNICODE NOMINMAX)

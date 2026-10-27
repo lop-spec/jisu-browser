@@ -4,6 +4,7 @@
 #include "metrics.h"
 #include "menu_icons.h"
 #include "bookmark_editor.h"
+#include "extension_popup_focus.h"
 #include "extension_toolbar.h"
 #include "ntp_html.h"
 
@@ -2616,14 +2617,14 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       break;
     case kMsgCloseExtensionPopup:
-      if(static_cast<uint64_t>(wParam) == extensionPopupGeneration_) CloseExtensionPopup();
+      if(static_cast<uint64_t>(wParam) == extensionPopupGeneration_ && MayProcessExtensionPopupClose(hwnd_)) CloseExtensionPopup();
       return 0;
     case kMsgOpenExtensionSettings: {
       std::unique_ptr<std::wstring> url(reinterpret_cast<std::wstring*>(lParam));
       CloseExtensionPopup(); if(url) NewTab(*url); return 0;
     }
     case WM_ACTIVATE:
-      if (LOWORD(wParam) == WA_INACTIVE && reinterpret_cast<HWND>(lParam) != extensionPopupWindow_) CloseExtensionPopup();
+      if (LOWORD(wParam) == WA_INACTIVE && ShouldCloseExtensionPopupOnDeactivate(hwnd_, extensionPopupWindow_, reinterpret_cast<HWND>(lParam))) CloseExtensionPopup();
       break;
     case WM_COMMAND:
       if (LOWORD(wParam) >= TrayIcon::kOpen && LOWORD(wParam) <= TrayIcon::kExit) {
