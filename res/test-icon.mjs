@@ -42,18 +42,18 @@ for (const [i, size] of sizes.entries()) {
     assert.equal(raw[y * (size * 4 + 1)], 0);
     for (let x = 0; x < size; x++) {
       const p = pixel(x,y);
-      if (p[0] === 255 && p[1] === 192 && p[2] === 100 && p[3] === 255) orange++;
+      if (p[0] === 255 && p[1] === 224 && p[2] === 77 && p[3] === 255) orange++;
       coverage += Math.max(0, (p[0] - 27) / (255 - 27)) * p[3] / 255;
       if (p[0] > 40) { top = Math.min(top,y); bottom = Math.max(bottom,y); }
       assert.equal(p[3], pixel(size - 1 - x,y)[3], 'circle alpha must be symmetric');
     }
   }
-  assert.ok(orange > 0, `bright amber-orange fill must remain at ${size}px`);
-  assert.ok(coverage / (size * size) > 0.12, `enlarged bolt must occupy >12% including antialiasing at ${size}px`);
-  assert.ok((bottom - top + 1) / size >= 0.65, `bolt must remain tall at ${size}px`);
+  assert.ok(orange > 0, `bright golden fill must remain at ${size}px`);
+  assert.ok(coverage / (size * size) > 0.17, `enlarged bolt must occupy >17% including antialiasing at ${size}px`);
+  assert.ok((bottom - top + 1) / size >= 0.80, `bolt must remain tall at ${size}px`);
   for (const [x,y] of [[0,0],[0,size-1],[size-1,0],[size-1,size-1]]) assert.equal(pixel(x,y)[3], 0);
-  assert.deepEqual([...pixel(Math.floor(size/5),Math.floor(size/2))], [27,27,27,255]);
+  assert.deepEqual([...pixel(Math.floor(size/10),Math.floor(size/2))], [27,27,27,255]);
 }
 assert.equal(expectedOffset, ico.length);
 assert.match(fs.readFileSync(new URL('./app.svg', import.meta.url), 'utf8'), /<circle[^>]+fill="#1b1b1b"/);
-console.log(`PASS: reproducible ICO; transparent circle + warm orange; ${sizes.join(', ')} px`);
+console.log(`PASS: reproducible ICO; transparent circle + bright golden bolt; ${sizes.join(', ')} px`);
