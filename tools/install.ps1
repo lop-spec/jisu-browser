@@ -51,6 +51,10 @@ foreach ($component in @('jisu-media.exe','media','THIRD-PARTY.md')) {
 $hashSource = (Get-FileHash -Algorithm SHA256 -LiteralPath $exeSource).Hash
 $hashDest = (Get-FileHash -Algorithm SHA256 -LiteralPath $destExe).Hash
 if ($hashSource -ne $hashDest) { throw "复制后校验不一致" }
+# 固定中完整性：从管理员 shell/VSCodium 启动也降到 Medium，与 Pi（node.exe 同为 Medium）共用同一 WebView2 浏览器进程；
+# 否则高完整性日常实例占住资料目录后，Pi 托盘开出的应用窗口建不起 WebView2，只剩白屏
+& icacls.exe $destExe /setintegritylevel medium | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "设置中完整性标签失败" }
 
 # 智能体桥配置：只在给了令牌文件时写；已有配置不覆盖，除非 -ForceAgentConfig
 $configRoot = Join-Path $env:LOCALAPPDATA "JisuBrowser"

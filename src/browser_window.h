@@ -134,6 +134,10 @@ class BrowserWindow : public AgentHost {
   void CreateController(Tab& tab);
   void OnControllerCreated(uint32_t id, HRESULT result, ICoreWebView2Controller* controller);
   void OnControllerFailed(Tab& tab, HRESULT result);
+  // 独立应用窗口没有标签条可以重开：内核建不起来或中途退出时自己重建（delayMs 为 0 = 按退避）
+  void ScheduleAppRecovery(UINT delayMs, const wchar_t* message);
+  void RecoverAppWebView();
+  bool AppWebViewLive() const;
   void AbandonNewWindow(Tab& tab);
   void ConfigureWebView(Tab& tab);
   void ConfigureProfile(Tab& tab);
@@ -255,6 +259,8 @@ class BrowserWindow : public AgentHost {
   uint32_t fullscreenTab_ = 0;
 
   ComPtr<ICoreWebView2Environment> environment_;
+  uint32_t envGeneration_ = 0;   // 每次重建环境加一：旧环境迟到的回调直接丢弃
+  UINT appRecoverDelay_ = 0;     // 应用窗口重建退避（毫秒），成功后清零
   std::vector<std::unique_ptr<Tab>> tabs_;
   std::unique_ptr<Tab> spare_;
   size_t active_ = 0;

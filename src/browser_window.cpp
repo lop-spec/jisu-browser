@@ -61,6 +61,8 @@ constexpr UINT_PTR kTimerWatchdog = 3;
 constexpr UINT_PTR kTimerPreheat = 4;
 constexpr UINT_PTR kTimerAgentFreeze = 5;
 constexpr UINT_PTR kTimerTrayRetry = 6;
+constexpr UINT_PTR kTimerAppRecover = 8;  // 7 是媒体轮询
+constexpr UINT kAppWatchdogMs = 15000;     // 应用窗口环境/控件迟迟建不好（卡住而非失败）也重建
 
 // 智能体标签里媒体不自动播放：play() 像被浏览器自动播放策略拒绝一样返回 NotAllowedError，autoplay 属性起播的立即暂停。
 // 只装在智能体标签上；window.__jisuAllowMedia = true 可放行
@@ -446,11 +448,17 @@ void BrowserWindow::StartEnvironment() {
     environmentOptions->put_EnableTrackingPrevention(FALSE);
   }
   const wchar_t* userDataFolder = options_.userDataFolder.empty() ? nullptr : options_.userDataFolder.c_str();
+  const uint32_t generation = ++envGeneration_;
+  if (options_.appMode) {
+    SetTimer(hwnd_, kTimerAppRecover, kAppWatchdogMs, nullptr);
+  }
   const HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
       nullptr, userDataFolder, environmentOptions.Get(),
       Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-          [this](HRESULT result, ICoreWebView2Environment* environment) -> HRESULT {
-            OnEnvironmentCreated(result, environment);
+          [this, generation](HRESULT result, ICoreWebView2Environment* environment) -> HRESULT {
+            if (generation == envGeneration_) {
+              OnEnvironmentCreated(result, environment);
+            }
             return S_OK;
           })
           .Get());
@@ -476,6 +484,11 @@ void BrowserWindow::OnEnvironmentCreated(HRESULT result, ICoreWebView2Environmen
                static_cast<unsigned>(result));
     message_ = text;
     InvalidateChrome();
+    if (options_.appMode) {
+      // 常见于同一资料目录的内核进程以另一完整性级别（管理员）运行：它退出后重试即可接上
+      swprintf_s(text, L"网页内核连接失败（0x%08X），正在自动重试…", static_cast<unsigned>(result));
+      ScheduleAppRecovery(0, text);
+    }
     // 延后写出：默认 early 模式下这里可能早于首帧，首帧相关时间点还没记
     if (!options_.metricsPath.empty()) {
       SetTimer(hwnd_, kTimerMetrics, 500, nullptr);
@@ -533,8 +546,13 @@ void BrowserWindow::CreateController(Tab& tab) {
   }
   tab.parent = parent;
   const uint32_t id = tab.id;
+  const uint32_t generation = envGeneration_;
   auto handler = Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-      [this, id](HRESULT result, ICoreWebView2Controller* controller) -> HRESULT {
+      [this, id, generation](HRESULT result, ICoreWebView2Controller* controller) -> HRESULT {
+        if (generation != envGeneration_) {  // 环境已重建：旧环境的控件不要
+          if (controller) controller->Close();
+          return S_OK;
+        }
         OnControllerCreated(id, result, controller);
         return S_OK;
       });
@@ -596,6 +614,11 @@ void BrowserWindow::OnControllerCreated(uint32_t id, HRESULT result, ICoreWebVie
     return;
   }
   ConfigureWebView(*tab);
+  if (options_.appMode) {
+    KillTimer(hwnd_, kTimerAppRecover);
+    appRecoverDelay_ = 0;
+    message_.clear();
+  }
   if (id == firstTabId_) {
     metrics.Mark("controllerReady");
   }
@@ -663,9 +686,47 @@ void BrowserWindow::OnControllerFailed(Tab& tab, HRESULT result) {
   swprintf_s(text, L"无法创建网页控件（0x%08X）。", static_cast<unsigned>(result));
   message_ = text;
   InvalidateChrome();
+  if (options_.appMode) {
+    swprintf_s(text, L"网页控件创建失败（0x%08X），正在自动重试…", static_cast<unsigned>(result));
+    ScheduleAppRecovery(0, text);
+  }
   if (first && !options_.metricsPath.empty()) {
     SetTimer(hwnd_, kTimerMetrics, 500, nullptr);
   }
+}
+
+bool BrowserWindow::AppWebViewLive() const {
+  return environment_ && !tabs_.empty() && tabs_.front()->webview;
+}
+
+void BrowserWindow::ScheduleAppRecovery(UINT delayMs, const wchar_t* message) {
+  if (!options_.appMode || destroyed_) return;
+  if (message) message_ = message;
+  InvalidateRect(hwnd_, nullptr, FALSE);
+  if (delayMs == 0) {  // 3 秒起，每次翻倍，封顶 30 秒
+    appRecoverDelay_ = appRecoverDelay_ ? std::min<UINT>(appRecoverDelay_ * 2, 30000) : 3000;
+    delayMs = appRecoverDelay_;
+  }
+  SetTimer(hwnd_, kTimerAppRecover, delayMs, nullptr);
+}
+
+// 丢掉当前环境和控件，按原网址重建；页面本身的状态（草稿、登录）在资料目录里，不受影响
+void BrowserWindow::RecoverAppWebView() {
+  KillTimer(hwnd_, kTimerAppRecover);
+  if (!options_.appMode || destroyed_ || AppWebViewLive()) return;
+  for (auto& tab : tabs_) {
+    if (tab->controller) tab->controller->Close();
+    tab->controller.Reset();
+    tab->webview.Reset();
+    tab->creating = false;
+    tab->retried = false;
+    if (tab->pendingUrl.empty()) tab->pendingUrl = tab->url;
+    if (tab->pendingUrl.empty()) tab->pendingUrl = ToNavigableUrl(options_.startUrl);
+  }
+  environment_.Reset();
+  if (message_.empty()) message_ = L"正在重新连接网页内核…";  // 看门狗到点：上一次是卡住而不是报错
+  InvalidateRect(hwnd_, nullptr, FALSE);
+  StartEnvironment();
 }
 
 // 放弃 window.open 请求：标记已处理，内核就不会自己再弹一个外壳管不到的窗口
@@ -932,6 +993,16 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
             args->get_ProcessFailedKind(&kind);
             Tab* t = self->FindTab(id);
             if (self->fullscreenTab_ == id) self->ExitContentFullscreen();
+            if (self->options_.appMode) {
+              if (kind == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED) {
+                // 共享内核进程没了（例如日常实例连同子进程被结束）：控件已失效，整套重建
+                self->environment_.Reset();
+                self->ScheduleAppRecovery(500, L"网页内核已退出，正在重新连接…");
+              } else if (kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED) {
+                sender->Reload();
+              }
+              return S_OK;
+            }
             if (!t || !t->agent || kind != COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED) {
               return S_OK;
             }
@@ -2350,6 +2421,8 @@ void BrowserWindow::OnCopyData(const COPYDATASTRUCT& data) {
     const bool passive = data.dwData == kCopyDataOpenUrl + 1;
     ShowWindow(hwnd_, passive ? SW_SHOWNOACTIVATE : (IsIconic(hwnd_) ? SW_RESTORE : SW_SHOW));
     if (!passive) SetForegroundWindow(hwnd_);
+    // 只有网页控件不在时才重建（不等退避）；控件好好的就不打断当前页面
+    RecoverAppWebView();
     return;
   }
   if (data.dwData != kCopyDataOpenUrl || data.cbData % sizeof(wchar_t) != 0 || data.cbData > 64 * 1024) {
@@ -2499,6 +2572,19 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
         PAINTSTRUCT paint{};
         HDC dc = BeginPaint(hwnd_, &paint);
         FillRect(dc, &paint.rcPaint, static_cast<HBRUSH>(GetStockObject(options_.appMode ? WHITE_BRUSH : BLACK_BRUSH)));
+        if (options_.appMode && !message_.empty()) {  // 没有标签条：内核出错时把原因画在窗口中央，不留纯白
+          RECT client{};
+          GetClientRect(hwnd_, &client);
+          HFONT font = CreateFontW(-MulDiv(15, static_cast<int>(dpi_), 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                   DEFAULT_PITCH, L"Microsoft YaHei UI");
+          HGDIOBJ previous = SelectObject(dc, font ? font : GetStockObject(DEFAULT_GUI_FONT));
+          SetBkMode(dc, TRANSPARENT);
+          SetTextColor(dc, RGB(96, 96, 96));
+          DrawTextW(dc, message_.c_str(), -1, &client, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+          SelectObject(dc, previous);
+          if (font) DeleteObject(font);
+        }
         EndPaint(hwnd_, &paint);
       } else {
         painter_.Paint(palette_, layout_, BuildChromeState());
@@ -2663,6 +2749,10 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       return TRUE;
     case WM_TIMER:
       if (wParam == 7) { PollMedia(); return 0; }
+      if (wParam == kTimerAppRecover) {
+        RecoverAppWebView();
+        return 0;
+      }
       if (wParam == kTimerTrayRetry) {
         KillTimer(hwnd_, kTimerTrayRetry);
         InstallTrayIcon();

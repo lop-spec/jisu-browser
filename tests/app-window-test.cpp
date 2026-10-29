@@ -19,6 +19,18 @@ static PROCESS_INFORMATION Start(const std::wstring& exe, const std::wstring& ar
   return pi;
 }
 static HWND Await(PROCESS_INFORMATION& pi) {for(int i=0;i<150;i++){if(HWND w=Find(pi.dwProcessId);w&&IsWindowVisible(w))return w;Sleep(100);}return nullptr;}
+// WebView2 content host inside the app window; its owner is the shared browser process.
+static HWND ContentHost(HWND app, DWORD* pid) {
+  struct Search { HWND hwnd; } search{nullptr};
+  EnumChildWindows(app,[](HWND hwnd, LPARAM data)->BOOL {
+    wchar_t cls[64]{}; GetClassNameW(hwnd,cls,64);
+    if(std::wstring(cls)==L"Chrome_WidgetWin_1") {reinterpret_cast<Search*>(data)->hwnd=hwnd;return FALSE;} return TRUE;
+  },reinterpret_cast<LPARAM>(&search));
+  *pid=0; if(search.hwnd)GetWindowThreadProcessId(search.hwnd,pid); return search.hwnd;
+}
+static HWND AwaitHost(HWND app, DWORD* pid, DWORD notPid, int attempts) {
+  for(int i=0;i<attempts;i++){if(HWND h=ContentHost(app,pid);h&&*pid!=notPid)return h;Sleep(100);}return nullptr;
+}
 static void Close(PROCESS_INFORMATION& pi, HWND hwnd) {
   if(hwnd)PostMessageW(hwnd,WM_CLOSE,0,0);
   if(WaitForSingleObject(pi.hProcess,10000)!=WAIT_OBJECT_0)TerminateProcess(pi.hProcess,3);
@@ -41,11 +53,19 @@ int wmain(int argc,wchar_t** argv) {
   ok=ok&&FindWindowExW(aw,nullptr,L"EDIT",nullptr)==nullptr&&FindWindowExW(bw,nullptr,L"EDIT",nullptr)!=nullptr;
   ok=ok&&(GetWindowLongW(aw,GWL_STYLE)&WS_CAPTION)==WS_CAPTION;
   printf("title/edit/caption pass=%d appEdit=%p dailyEdit=%p title=%ls\n",ok,FindWindowExW(aw,nullptr,L"EDIT",nullptr),FindWindowExW(bw,nullptr,L"EDIT",nullptr),title);
+  DWORD hostPid=0;HWND host=AwaitHost(aw,&hostPid,0,200);
+  printf("content host=%p browserPid=%lu\n",host,hostPid);ok=ok&&host;
   auto again=Start(argv[1],common+L" --app about:blank --app-id ci-pi-web --app-title \"Pi Web\"");
   const auto wait=WaitForSingleObject(again.hProcess,15000);
-  printf("reuse wait=%lu original=%d second=%p\n",wait,IsWindow(aw),Find(again.dwProcessId));
-  ok=ok&&wait==WAIT_OBJECT_0&&IsWindow(aw)&&!Find(again.dwProcessId);
+  DWORD keptPid=0;const HWND kept=ContentHost(aw,&keptPid);
+  printf("reuse wait=%lu original=%d second=%p hostKept=%d\n",wait,IsWindow(aw),Find(again.dwProcessId),kept==host);
+  ok=ok&&wait==WAIT_OBJECT_0&&IsWindow(aw)&&!Find(again.dwProcessId)&&kept==host;  // reopening a live page must not rebuild it
   CloseHandle(again.hThread);CloseHandle(again.hProcess);
+  // The shared browser process dies (e.g. the daily instance is tree-killed): the app must reconnect by itself, not stay white.
+  if(HANDLE shared=OpenProcess(PROCESS_TERMINATE|SYNCHRONIZE,FALSE,hostPid)){TerminateProcess(shared,9);WaitForSingleObject(shared,10000);CloseHandle(shared);}
+  DWORD newPid=0;const HWND rebuilt=AwaitHost(aw,&newPid,hostPid,300);
+  printf("recovered host=%p browserPid=%lu (old %lu)\n",rebuilt,newPid,hostPid);
+  ok=ok&&rebuilt&&newPid&&newPid!=hostPid;
   Close(app,aw);printf("daily retained=%d\n",IsWindow(bw));ok=ok&&IsWindow(bw);Close(browser,bw);
   return ok?0:5;
 }
