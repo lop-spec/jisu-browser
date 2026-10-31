@@ -86,7 +86,7 @@ class BrowserWindow : public AgentHost {
     // window.open 等新窗口请求：控件建好后交给它
     ComPtr<ICoreWebView2NewWindowRequestedEventArgs> newWindowArgs;
     ComPtr<ICoreWebView2Deferral> newWindowDeferral;
-    uint32_t openerId = 0;  // 发起请求的标签：它先关掉的话请求要先放弃，内核在 put_NewWindow 里会崩
+    uint32_t openerId = 0;  // 发起请求的标签，弹出页首次导航完成前有效：它先关掉的话请求要先放弃，内核在 put_NewWindow 里会崩
   };
 
   struct Settings {

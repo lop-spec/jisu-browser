@@ -634,7 +634,6 @@ void BrowserWindow::OnControllerCreated(uint32_t id, HRESULT result, ICoreWebVie
       tab->newWindowDeferral->Complete();
       tab->newWindowArgs.Reset();
       tab->newWindowDeferral.Reset();
-      PostMessageW(hwnd_, kMsgTabLimit, 0, 0);  // 打开者在交接期间受保护，交接完再按上限收
     }
   } else if (!tab->pendingUrl.empty()) {
     tab->webview->Navigate(tab->pendingUrl.c_str());
@@ -929,6 +928,10 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
             if (Tab* t = self->FindTab(id)) {
               BOOL success=FALSE; args->get_IsSuccess(&success); if(success) self->RecordVisit(*t);
               t->loading = false;
+              if (t->openerId) {
+                t->openerId = 0;  // 弹出页已经落地：打开者不再需要保护，按标签上限再收一次
+                PostMessageW(self->hwnd_, kMsgTabLimit, 0, 0);
+              }
               Metrics& metrics = Metrics::Get();
               if (id == self->firstTabId_ && !metrics.Has("ntpNavCompleted")) {
                 metrics.Mark("ntpNavCompleted");
