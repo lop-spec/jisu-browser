@@ -86,6 +86,7 @@ class BrowserWindow : public AgentHost {
     // window.open 等新窗口请求：控件建好后交给它
     ComPtr<ICoreWebView2NewWindowRequestedEventArgs> newWindowArgs;
     ComPtr<ICoreWebView2Deferral> newWindowDeferral;
+    uint32_t openerId = 0;  // 发起请求的标签：它先关掉的话请求要先放弃，内核在 put_NewWindow 里会崩
   };
 
   struct Settings {
@@ -174,7 +175,7 @@ class BrowserWindow : public AgentHost {
   void OnWebMessage(uint32_t id, ICoreWebView2WebMessageReceivedEventArgs* args);
   void OnPageMessage(Tab& tab, const std::string& json);
   void PostToPage(Tab& tab, const std::string& json);
-  void OpenNewWindowAsTab(ICoreWebView2NewWindowRequestedEventArgs* args, bool activate);
+  void OpenNewWindowAsTab(ICoreWebView2NewWindowRequestedEventArgs* args, bool activate, uint32_t openerId);
   void CreateSpare();
 
   void NewTab(const std::wstring& url, bool activate = true);

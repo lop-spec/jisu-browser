@@ -629,10 +629,12 @@ void BrowserWindow::OnControllerCreated(uint32_t id, HRESULT result, ICoreWebVie
   if (tab->newWindowArgs) {
     if (FAILED(tab->newWindowArgs->put_NewWindow(tab->webview.Get()))) {
       AbandonNewWindow(*tab);
+      tab->webview->Navigate(tab->url.empty() ? L"about:blank" : tab->url.c_str());
     } else {
       tab->newWindowDeferral->Complete();
       tab->newWindowArgs.Reset();
       tab->newWindowDeferral.Reset();
+      PostMessageW(hwnd_, kMsgTabLimit, 0, 0);  // 打开者在交接期间受保护，交接完再按上限收
     }
   } else if (!tab->pendingUrl.empty()) {
     tab->webview->Navigate(tab->pendingUrl.c_str());
@@ -950,7 +952,7 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
             if (!self || self->destroyed_) return S_OK;
             // 智能体页面弹出的窗口作为普通后台标签打开，不抢用户的视线
             const Tab* source = self->FindTab(id);
-            self->OpenNewWindowAsTab(args, !(source && source->agent));
+            self->OpenNewWindowAsTab(args, !(source && source->agent), id);
             return S_OK;
           })
           .Get(),
@@ -1309,7 +1311,7 @@ void BrowserWindow::OnPageMessage(Tab& tab, const std::string& text) {
   }
 }
 
-void BrowserWindow::OpenNewWindowAsTab(ICoreWebView2NewWindowRequestedEventArgs* args, bool activate) {
+void BrowserWindow::OpenNewWindowAsTab(ICoreWebView2NewWindowRequestedEventArgs* args, bool activate, uint32_t openerId) {
   if (options_.appMode) {
     args->put_Handled(TRUE);
     CoTaskString uri;
@@ -1327,6 +1329,7 @@ void BrowserWindow::OpenNewWindowAsTab(ICoreWebView2NewWindowRequestedEventArgs*
   }
   auto tab = std::make_unique<Tab>();
   tab->id = nextTabId_++;
+  tab->openerId = openerId;
   args->GetDeferral(tab->newWindowDeferral.GetAddressOf());
   tab->newWindowArgs = args;
   CoTaskString uri;
@@ -1634,6 +1637,14 @@ void BrowserWindow::CloseTab(size_t index) {
     bridge_->OnAgentTabGone(closing->id);
   }
   *closing->owner = nullptr;
+  // 打开者关掉之前，先把它还没交接的弹出请求放弃掉、改成普通导航：
+  // 打开者没了再 put_NewWindow，WebView2 内核会空指针崩溃（EmbeddedBrowserWebView.dll 0xc0000005）
+  for (auto& tab : tabs_) {
+    if (tab->newWindowArgs && tab->openerId == closing->id) {
+      AbandonNewWindow(*tab);
+      if (tab->pendingUrl.empty()) tab->pendingUrl = tab->url;
+    }
+  }
   AbandonNewWindow(*closing);
   if (closing->controller) {
     closing->controller->Close();
