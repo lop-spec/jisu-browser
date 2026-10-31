@@ -11,8 +11,9 @@ New-Item -ItemType Directory -Path $ext|Out-Null
 [IO.File]::WriteAllText((Join-Path $ext 'manifest.json'),'{"manifest_version":3,"name":"Auto Close Old Tabs","version":"1.0.0"}')
 $entry=@{sourceId='auto-close-old-tabs';name='Auto Close Old Tabs';path=$ext;popup='';options='';enabled=$true;pinned=$true}
 [IO.File]::WriteAllText((Join-Path $root 'extensions.json'),(@{removeUnlisted=$false;extensions=@($entry)}|ConvertTo-Json -Depth 4))
-[IO.File]::WriteAllText((Join-Path $root 'jisu-settings.json'),'{"bookmarkBar":false,"importedDefaultBrowser":true,"maxRegularTabs":1}')
 $port=Get-Random -Minimum 20000 -Maximum 40000
+# The page opens its popup from a timer (no user gesture): the native popup blocker must be told this origin is allowed.
+[IO.File]::WriteAllText((Join-Path $root 'jisu-settings.json'),('{"bookmarkBar":false,"importedDefaultBrowser":true,"maxRegularTabs":1,"popupAllow":["http://localhost:'+$port+'"]}'))
 $listener=New-Object Net.HttpListener
 $listener.Prefixes.Add("http://localhost:$port/")
 $listener.Start()
@@ -26,7 +27,7 @@ try{
   if(-not $pending.Wait(100)){continue}
   $context=$pending.Result;$pending=$listener.GetContextAsync()
   $path=$context.Request.Url.AbsolutePath;$requests+=$path
-  $html=if($path -eq '/'){'<!doctype html><title>opener</title><script>setTimeout(()=>window.open("/child"),500)</script>'}else{'<!doctype html><title>child</title>'}
+  $html=if($path -eq '/'){'<!doctype html><title>opener</title><script>setTimeout(()=>window.open("/child"),1500)</script>'}else{'<!doctype html><title>child</title>'}
   $bytes=[Text.Encoding]::UTF8.GetBytes($html)
   $context.Response.ContentType='text/html';$context.Response.OutputStream.Write($bytes,0,$bytes.Length);$context.Response.Close()
   if($path -eq '/child'){Start-Sleep -Seconds 4;break}

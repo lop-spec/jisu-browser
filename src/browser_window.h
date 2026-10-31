@@ -7,9 +7,11 @@
 #include "common.h"
 #include "graphics.h"
 #include "favicons.h"
+#include "file_writer.h"
 #include "fullscreen_window.h"
 #include "history.h"
 #include "media_session.h"
+#include "menu_icons.h"
 #include "options.h"
 #include "palette.h"
 #include "tray_icon.h"
@@ -17,7 +19,10 @@
 #include <WebView2.h>
 
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -44,6 +49,9 @@ class BrowserWindow : public AgentHost {
   std::string AgentTabInfo(uint32_t tabId) override;
 
   static constexpr ULONG_PTR kCopyDataOpenUrl = 0x4A495355;  // 'JISU'：另一个实例转来的网址
+  // 不激活的转发：有网址开在后台标签，没网址只是确认在运行（不新开空白页、不抢焦点、不闪任务栏）
+  static constexpr ULONG_PTR kCopyDataPassive = kCopyDataOpenUrl + 2;
+  static constexpr LRESULT kCopyDataPassiveAck = 0x4A53;  // 认得「不激活」转发的版本回这个值；旧版回 TRUE
   // 同一用户数据目录已经开着的主窗口（没有返回 nullptr）
   static HWND FindRunningWindow(const std::wstring& profileDir);
 
@@ -87,6 +95,21 @@ class BrowserWindow : public AgentHost {
     ComPtr<ICoreWebView2NewWindowRequestedEventArgs> newWindowArgs;
     ComPtr<ICoreWebView2Deferral> newWindowDeferral;
     uint32_t openerId = 0;  // 发起请求的标签，弹出页首次导航完成前有效：它先关掉的话请求要先放弃，内核在 put_NewWindow 里会崩
+    uint32_t openedBy = 0;  // 打开它的标签（一直保留）：新链接标签排在打开者右侧
+    bool scriptOpened = false;  // window.open 打开的：页面自己 window.close() 时可以关掉
+    bool fromAgent = false;     // 智能体页面弹出的：不计入、也不被「自动关旧标签」关掉
+    bool pinned = false;        // 固定：不被「自动关旧标签」关掉
+    bool lazy = false;          // 恢复出来、还没看过的后台标签：点到它才建网页控件
+    bool audible = false;       // 正在出声
+    bool muted = false;
+    bool allowInternal = false; // 下一次导航到内部页面由外壳发起（网页自己不能跳到书签、历史、扩展管理）
+    bool faviconHost = false;   // 当前映射了图标缓存虚拟主机（只在书签管理页期间）
+    ULONGLONG crashedAt = 0;    // 渲染进程上次崩溃的时刻：一分钟内再崩就不再自动重载
+    bool crashed = false;       // 后台时崩溃：切过来时重载
+    std::wstring error;         // 控件建不起来的原因，只在这个标签显示
+    std::wstring agentScript;   // 智能体「禁自动播放」脚本：用户接管这个标签时移除
+    std::vector<std::wstring> blockedPopups;  // 当前页面没经用户操作就要弹出的窗口（已拦截）
+    bool focusOnCreate = false;  // 切到它时控件还没建好：建好后把键盘焦点给网页
   };
 
   struct Settings {
@@ -94,6 +117,22 @@ class BrowserWindow : public AgentHost {
     bool importedDefaultBrowser = false;
     int maxRegularTabs = 10;
     int64_t bookmarkFolder = 1;
+    std::vector<std::wstring> popupAllow;  // 允许不经用户操作弹出窗口的站点（源站）
+    bool hasWindow = false;                // 上次关窗时的位置（工作区坐标）与是否最大化
+    RECT window{};
+    bool windowMaximized = false;
+  };
+
+  // 会话里的一个标签：非正常退出（崩溃、被结束、关机）后下次启动恢复
+  struct SessionTab {
+    std::wstring url;
+    std::wstring title;
+    bool active = false;
+    bool pinned = false;
+  };
+  struct ClosedTab {
+    std::wstring url;
+    std::wstring title;
   };
 
   static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -147,7 +186,8 @@ class BrowserWindow : public AgentHost {
   void RemoveNextUnlistedExtension();
   void EnforceTabLimit();
   bool HandleTabLimitMessage(Tab& tab, const std::wstring& source, const std::string& text);
-  void SaveExtensionStatus();
+  void SaveExtensionStatus();   // 合并：同一轮消息里多次调用只写一次
+  void WriteExtensionStatus();
   void OpenExtensions();
   void OpenHistory();
   void RecordVisit(Tab& tab);
@@ -178,7 +218,8 @@ class BrowserWindow : public AgentHost {
   void OpenNewWindowAsTab(ICoreWebView2NewWindowRequestedEventArgs* args, bool activate, uint32_t openerId);
   void CreateSpare();
 
-  void NewTab(const std::wstring& url, bool activate = true);
+  void NewTab(const std::wstring& url, bool activate = true, size_t at = static_cast<size_t>(-1));
+  size_t InsertTab(std::unique_ptr<Tab> tab, size_t at);  // 普通标签不插进固定标签中间；返回下标
   void CloseTab(size_t index);
   void Activate(size_t index);
   void PlaceTab(Tab& tab);
@@ -199,11 +240,11 @@ class BrowserWindow : public AgentHost {
   SIZE AgentHostSize() const;   // 宿主窗口物理像素 = CSS 视口 × 光栅化比例
 
   bool DispatchShortcut(UINT key, bool repeat);
-  void ExecuteCommand(WPARAM command);
+  void ExecuteCommand(WPARAM command, LPARAM arg = 0);
   void FocusAddressBar();
   void UpdateAddressBar();
   void UpdateWindowTitle();
-  void NavigateFromAddressBar();
+  void NavigateFromAddressBar(bool newTab = false);
   void OpenUrl(const std::wstring& url, bool newTab);
 
   // 书签
@@ -225,7 +266,57 @@ class BrowserWindow : public AgentHost {
   void SaveSettings();
   void RegisterAsDefaultBrowser();
   void ShowAbout();
-  void OnCopyData(const COPYDATASTRUCT& data);
+  LRESULT OnCopyData(const COPYDATASTRUCT& data);
+  void OpenFromAppWindow(const std::wstring& url, bool userInitiated);
+
+  // 标签：右键菜单、固定、静音、关闭的标签重开、会话恢复（browser_tabs.cpp）
+  void ShowTabContextMenu(size_t index, POINT screen);
+  void DuplicateTab(size_t index);
+  void CloseTabs(const std::vector<uint32_t>& ids);
+  void TogglePinned(size_t index);
+  void ToggleMuted(size_t index);
+  void RememberClosedTab(const Tab& tab);
+  void ReopenClosedTab();
+  size_t InsertIndexFor(uint32_t openerId) const;
+  void HardReload();
+  bool AdoptAgentTab(Tab& tab);
+  void NavigateTab(Tab& tab, const std::wstring& url);
+  void ScheduleSessionSave();
+  void SaveSession(bool clean, bool durable);
+  void RestoreSession();
+  std::wstring SessionFile() const;
+  void OnProcessFailed(uint32_t id, COREWEBVIEW2_PROCESS_FAILED_KIND kind, ICoreWebView2* sender);
+  void ScheduleEnvironmentRecovery();
+  void RecoverEnvironment();
+  BrowserWindow& PrimaryWindow();  // 同一资料里管智能体桥、扩展与内核重建的那个窗口
+  void ResetTabWebView(Tab& tab);
+  void UpdateMemoryTarget(Tab& tab);
+  void FocusActiveContent();
+
+  // 外壳界面：悬停提示、地址栏菜单与按键、书签栏菜单、弹窗拦截（browser_chrome.cpp）
+  void UpdateChromeTooltip();
+  std::wstring TooltipText(const ChromeHit& hit) const;
+  static LRESULT CALLBACK AddressBarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR id, DWORD_PTR data);
+  static LRESULT CALLBACK ExtensionButtonProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR id,
+                                              DWORD_PTR data);
+  void ShowAddressBarMenu(POINT screen);
+  void PasteAndGo();
+  bool PasteIntoAddressBar();
+  void DeletePreviousWord();
+  void ShowBookmarkBarMenu(POINT screen);
+  void ShowPopupBlockedMenu(POINT screen);
+  void OnPopupBlocked(Tab& source, const std::wstring& url);
+  void OnFaviconUpdated(uint64_t hash);
+  bool PopupAllowed(const std::wstring& url) const;
+  void ShowNotice(const std::wstring& text);
+  void PostTask(std::function<void()> task);
+  void ScheduleBookmarkSave();
+  void FlushBookmarkSave();
+  void SaveWindowPlacement();
+  int ApplyWindowPlacement(int showCmd);
+  std::wstring AppPlacementFile() const;
+  void StartExtensions();
+  void FlushForEndSession();
 
   void MaybeWriteMetrics();
   void WriteMetrics(bool forced);
@@ -239,6 +330,14 @@ class BrowserWindow : public AgentHost {
     BookmarkStore bookmarks;
     HistoryStore history;
     Settings settings;
+    FaviconCache favicons;   // 所有窗口共用一份：不再每个窗口各起一个抓图标线程
+    FileWriter writer;       // 书签、会话、设置在后台写盘
+    std::vector<ClosedTab> closedTabs;   // 最近关闭的标签（Ctrl+Shift+T）
+    std::vector<SessionTab> restoreTabs;  // 上次非正常退出时开着的标签
+    bool bookmarksDirty = false;
+    bool sessionWritable = false;  // 日常主实例才写会话
+    bool endingSession = false;    // 关机/注销中：之后的关窗不算正常退出，下次照样恢复
+    bool recovering = false;       // 内核退出后正在重建（各窗口的标签各报一次，只处理一次）
   };
   std::shared_ptr<ProfileState> profile_;
   GraphicsWarmup& warmup_;
@@ -276,8 +375,37 @@ class BrowserWindow : public AgentHost {
   // 书签与设置：Create 时起后台线程读，首帧前等它读完
   BookmarkStore& bookmarks_;
   HistoryStore& history_;
-  mutable FaviconCache favicons_;
+  FaviconCache& favicons_;
   bool profileConfigured_ = false;
+  bool extensionsConfigLoaded_ = false;  // extensions.json 只读一次：内核重建后重装扩展不重复加条目
+  bool extensionsStarted_ = false;       // 首个页面加载完才开始装扩展，不和首屏抢
+  bool extensionStatusQueued_ = false;   // 扩展状态合并成一次写
+  std::string lastToolbarState_;         // 工具栏状态没变就不再写文件
+  HWND chromeTooltip_ = nullptr;         // 标签与图标按钮的悬停提示
+  ChromeHit tooltipHit_;
+  std::wstring tooltipText_;
+  HWND hoverExtensionButton_ = nullptr;
+  float frozenTabWidth_ = 0;             // 用鼠标连续关标签时保持的宽度，鼠标离开标签条后展开
+  UINT recoverDelay_ = 0;                // 日常窗口内核重建的退避（毫秒）
+  bool sessionTimerPending_ = false;
+  RECT editRect_{};                      // 地址栏上次的位置：没变就不再 MoveWindow 重画
+  HICON appIconBig_ = nullptr;           // --app-icon 的大小两档
+  HICON appIconSmall_ = nullptr;
+  bool firstFrameShown_ = false;
+  // 书签菜单子菜单在展开时才填（WM_INITMENUPOPUP），命令号对应书签 id，菜单返回后再按 id 取
+  struct BookmarkMenuState {
+    BookmarkMenuIcons* icons = nullptr;
+    std::map<HMENU, int64_t> folders;
+    std::set<HMENU> filled;
+    std::vector<int64_t> urls;
+    std::vector<int64_t> openAll;
+  };
+  BookmarkMenuState* bookmarkMenu_ = nullptr;
+  void FillBookmarkMenu(HMENU menu, const std::vector<BookmarkNode*>& nodes, BookmarkNode* owner);
+  // 当前页是否已收藏：按网址与书签版本缓存，重绘不再整树查找
+  mutable std::wstring starredUrl_;
+  mutable uint64_t starredRevision_ = 0;
+  mutable bool starredValue_ = false;
   struct ExtensionEntry {
     std::wstring path, name, id, popup, options;
     bool pinned = true;

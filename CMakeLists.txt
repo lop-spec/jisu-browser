@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(jisu_browser VERSION 0.3.0 LANGUAGES CXX RC)
+project(jisu_browser VERSION 0.4.0 LANGUAGES CXX RC)
 
 if(NOT MSVC)
   message(FATAL_ERROR "只支持 MSVC 构建（GitHub Actions windows-latest）")
@@ -50,6 +50,8 @@ add_executable(jisu-browser WIN32
   src/bookmarks.cpp
   src/agent_bridge.cpp
   src/browser_window.cpp
+  src/browser_tabs.cpp
+  src/browser_chrome.cpp
   src/browser_profile.cpp
   src/browser_history.cpp
   src/browser_media.cpp
@@ -124,6 +126,14 @@ add_dependencies(app-window-test jisu-browser)
 add_test(NAME native-independent-app-window COMMAND app-window-test "$<TARGET_FILE:jisu-browser>")
 add_test(NAME native-popup-opener-auto-close COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/popup-opener-close-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
 set_tests_properties(native-popup-opener-auto-close PROPERTIES TIMEOUT 60)
+# 无手势弹窗拦截、网页跳不进内部页面、非正常退出后恢复标签、正常关闭不恢复
+add_test(NAME native-session-and-web-guards COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/session-guard-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
+set_tests_properties(native-session-and-web-guards PROPERTIES TIMEOUT 150)
+add_executable(url-options-test tests/url-options-test.cpp src/options.cpp src/common.cpp)
+target_include_directories(url-options-test PRIVATE src)
+target_compile_definitions(url-options-test PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+target_compile_options(url-options-test PRIVATE /utf-8 /EHsc)
+add_test(NAME native-url-options COMMAND url-options-test)
 set_tests_properties(native-independent-app-window PROPERTIES TIMEOUT 60)
 add_test(NAME native-media-codecs-decode COMMAND jisu-media --selftest)
 add_executable(media-host-test tests/media-host-test.cpp src/media_session.cpp src/common.cpp src/json.cpp)

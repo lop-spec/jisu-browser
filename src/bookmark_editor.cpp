@@ -82,6 +82,8 @@ INT_PTR CALLBACK DialogProc(HWND h,UINT msg,WPARAM w,LPARAM l) {
       SetDlgItemTextW(h,kFolderName,L"");SetDlgItemTextW(h,kError,L"新文件夹将在点击“保存”后创建");return TRUE;
     }
     if(id==IDOK){
+      // 「新建文件夹」里填了名字却直接点保存 / 回车：先建成这个文件夹并存进去，不静默丢掉
+      if(!Trimmed(Text(h,kFolderName)).empty())SendMessageW(h,WM_COMMAND,kCreate,0);
       e->edit.title=Trimmed(Text(h,kName));e->edit.url=Trimmed(Text(h,kUrl));e->edit.parent=Selected(h,*e);
       std::wstring lower=e->edit.url;std::transform(lower.begin(),lower.end(),lower.begin(),[](wchar_t c){return static_cast<wchar_t>(std::towlower(c));});
       if(!(lower.starts_with(L"https://")||lower.starts_with(L"http://"))||lower.find_first_of(L"\r\n\t")!=std::wstring::npos){SetDlgItemTextW(h,kError,L"请输入 http:// 或 https:// 开头的网址");return TRUE;}

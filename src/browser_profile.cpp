@@ -18,52 +18,77 @@ void BrowserWindow::ConfigureProfile(Tab& tab) {
     autofill->put_IsGeneralAutofillEnabled(TRUE);
   }
   if (!options_.metricsPath.empty() || options_.preheatSeconds > 0) return;
-  std::string text;
-  json::Value config;
-  if (!ReadFileBytes(profileDir_ + L"\\extensions.json", text) || !json::Parse(text, config)) return;
-  removeUnlistedExtensions_ = config["removeUnlisted"].AsBool(false);
-  for (const auto& item : config["extensions"].Items()) {
-    const std::wstring path = FromUtf8(item["path"].AsString());
-    // Only immutable, machine-local snapshots under this profile are accepted.
-    const std::wstring prefix = profileDir_ + L"\\Extensions\\";
-    if (path.size() <= prefix.size() || _wcsnicmp(path.c_str(), prefix.c_str(), prefix.size()) != 0 ||
-        path.find(L"..") != std::wstring::npos || extensions_.size() >= 100) continue;
-    ExtensionEntry entry;
-    entry.path = path; entry.name = FromUtf8(item["name"].AsString());
-    entry.popup = FromUtf8(item["popup"].AsString()); entry.options = FromUtf8(item["options"].AsString());
-    entry.enabled = item["enabled"].AsBool();
-    entry.pinned = item["pinned"].AsBool(true);
-    entry.nativeTabLimit = item["sourceId"].AsString() == "auto-close-old-tabs";
-    extensions_.push_back(std::move(entry));
+  // extensions.json 只读一次：内核退出重建后在新内核里重装同一批扩展，不重复加条目
+  if (!extensionsConfigLoaded_) {
+    std::string text;
+    json::Value config;
+    if (!ReadFileBytes(profileDir_ + L"\\extensions.json", text) || !json::Parse(text, config)) return;
+    extensionsConfigLoaded_ = true;
+    removeUnlistedExtensions_ = config["removeUnlisted"].AsBool(false);
+    for (const auto& item : config["extensions"].Items()) {
+      const std::wstring path = FromUtf8(item["path"].AsString());
+      // Only immutable, machine-local snapshots under this profile are accepted.
+      const std::wstring prefix = profileDir_ + L"\\Extensions\\";
+      if (path.size() <= prefix.size() || _wcsnicmp(path.c_str(), prefix.c_str(), prefix.size()) != 0 ||
+          path.find(L"..") != std::wstring::npos || extensions_.size() >= 100) continue;
+      ExtensionEntry entry;
+      entry.path = path; entry.name = FromUtf8(item["name"].AsString());
+      entry.popup = FromUtf8(item["popup"].AsString()); entry.options = FromUtf8(item["options"].AsString());
+      entry.enabled = item["enabled"].AsBool();
+      entry.pinned = item["pinned"].AsBool(true);
+      entry.nativeTabLimit = item["sourceId"].AsString() == "auto-close-old-tabs";
+      extensions_.push_back(std::move(entry));
+    }
   }
   if (FAILED(profile.As(&extensionProfile_))) { SaveExtensionStatus(); return; }
-  InstallNextExtension();
+  // 真正开始装要等首个页面加载完（StartExtensions），不和首屏抢
 }
 void BrowserWindow::InstallNextExtension() {
   if (destroyed_ || !extensionProfile_) return;
-  if (extensionIndex_ >= extensions_.size()) { SaveExtensionStatus(); PruneUnlistedExtensions(); return; }
+  if (extensionIndex_ >= extensions_.size()) {
+    SaveExtensionStatus();
+    PruneUnlistedExtensions();
+    PostTask([this] { EnforceTabLimit(); });  // 「自动关旧标签」刚生效：恢复的会话、启动参数开的标签按上限收一次
+    return;
+  }
   const size_t index = extensionIndex_++;
   const std::weak_ptr<int> alive = alive_;
-  const HRESULT started = extensionProfile_->AddBrowserExtension(extensions_[index].path.c_str(),
-    Callback<ICoreWebView2ProfileAddBrowserExtensionCompletedHandler>([this,index,alive](HRESULT hr, ICoreWebView2BrowserExtension* extension) -> HRESULT {
+  const std::wstring path = extensions_[index].path;
+  const HRESULT started = extensionProfile_->AddBrowserExtension(path.c_str(),
+    Callback<ICoreWebView2ProfileAddBrowserExtensionCompletedHandler>([this,path,alive](HRESULT hr, ICoreWebView2BrowserExtension* extension) -> HRESULT {
       if (alive.expired()) return S_OK;
-      auto& e = extensions_[index]; e.result = hr;
+      // 回调到达前列表可能变了：按路径找回这一项
+      const auto e = std::find_if(extensions_.begin(), extensions_.end(), [&path](const ExtensionEntry& item) { return item.path == path; });
+      if (e == extensions_.end()) { InstallNextExtension(); return S_OK; }
+      e->result = hr;
       if (SUCCEEDED(hr) && extension) {
-        e.handle = extension;
-        CoTaskString id; extension->get_Id(id.Put()); e.id = id.Str();
-        const HRESULT enable = extension->Enable(e.enabled ? TRUE : FALSE,
-          Callback<ICoreWebView2BrowserExtensionEnableCompletedHandler>([this,index,alive](HRESULT result) -> HRESULT {
-            if (!alive.expired()) { extensions_[index].result = result; SaveExtensionStatus(); InstallNextExtension(); }
+        e->handle = extension;
+        CoTaskString id; extension->get_Id(id.Put()); e->id = id.Str();
+        const HRESULT enable = extension->Enable(e->enabled ? TRUE : FALSE,
+          Callback<ICoreWebView2BrowserExtensionEnableCompletedHandler>([this,path,alive](HRESULT result) -> HRESULT {
+            if (alive.expired()) return S_OK;
+            const auto item = std::find_if(extensions_.begin(), extensions_.end(), [&path](const ExtensionEntry& x) { return x.path == path; });
+            if (item != extensions_.end()) item->result = result;
+            SaveExtensionStatus(); InstallNextExtension();
             return S_OK;
           }).Get());
         if (SUCCEEDED(enable)) return S_OK;
-        e.result = enable;
+        e->result = enable;
       }
       SaveExtensionStatus(); InstallNextExtension(); return S_OK;
     }).Get());
   if (FAILED(started)) { extensions_[index].result = started; SaveExtensionStatus(); InstallNextExtension(); }
 }
+// 同一轮消息里多次调用（装扩展时每个回调都会调）只写一次文件、刷新一次工具栏
 void BrowserWindow::SaveExtensionStatus() {
+  if (destroyed_ || profileDir_.empty() || extensionStatusQueued_) return;
+  extensionStatusQueued_ = true;
+  PostTask([this] {
+    extensionStatusQueued_ = false;
+    WriteExtensionStatus();
+  });
+}
+void BrowserWindow::WriteExtensionStatus() {
   if (destroyed_ || profileDir_.empty()) return;
   std::string out = "{\"extensions\":[";
   bool first = true;
@@ -81,7 +106,7 @@ void BrowserWindow::SaveExtensionStatus() {
     out += '}';
   }
   out += "]}";
-  WriteFileAtomic(profileDir_ + L"\\extensions-status.json", out);
+  WriteFileAtomic(profileDir_ + L"\\extensions-status.json", out, false);  // 状态文件：不等落盘
   RefreshExtensionToolbar();
   for (auto& tab : tabs_) if (tab->url.starts_with(L"https://newtab.jisu.example/extensions.html")) PostToPage(*tab, "{\"type\":\"ext.list\",\"data\":" + out + "}");
 }
@@ -107,7 +132,7 @@ void BrowserWindow::PruneUnlistedExtensions() {
 void BrowserWindow::RemoveNextUnlistedExtension() {
   if (destroyed_) return;
   if (unlistedExtensions_.empty()) {
-    WriteFileAtomic(profileDir_ + L"\\extensions-cleanup.json", "{\"completed\":true,\"removed\":" + std::to_string(removedExtensionCount_) + "}");
+    WriteFileAtomic(profileDir_ + L"\\extensions-cleanup.json", "{\"completed\":true,\"removed\":" + std::to_string(removedExtensionCount_) + "}", false);
     return;
   }
   const auto extension = unlistedExtensions_.back();
@@ -129,7 +154,9 @@ void BrowserWindow::EnforceTabLimit() {
     const auto& tab = *tabs_[i];
     // 弹出页落地前不关它的打开者：交接中关会让内核崩，交接后立刻关会丢掉弹出页的首次导航；落地后会再收一次
     const bool opener = std::any_of(tabs_.begin(), tabs_.end(), [&](const auto& t) { return t->openerId == tab.id; });
-    candidates.push_back({tab.id, i == active_, tab.agent || tab.leased || tab.media != nullptr || tab.mediaTarget != 0 || opener, tab.url.starts_with(L"chrome-extension://")});
+    // 固定的标签、智能体页面弹出的标签不计数也不关：用户的标签不会因为 Pi 点开的链接被挤掉
+    const bool privileged = tab.url.starts_with(L"chrome-extension://") || tab.pinned || tab.fromAgent;
+    candidates.push_back({tab.id, i == active_, tab.agent || tab.leased || tab.media != nullptr || tab.mediaTarget != 0 || opener, privileged});
   }
   for (const uint32_t id : OldTabsToClose(candidates, static_cast<size_t>(settings_.maxRegularTabs))) {
     if (const Tab* tab = FindTab(id)) CloseTab(IndexOf(*tab));

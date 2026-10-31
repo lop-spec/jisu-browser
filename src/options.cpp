@@ -72,10 +72,41 @@ std::wstring AppDataRoot() {
 
 }  // namespace
 
+constexpr std::wstring_view kSingleArgument = L"--single-argument";
+
+// 「--single-argument」作为独立参数出现的位置（引号外、前后是空白或行尾）
+static size_t FindSingleArgument(std::wstring_view line) {
+  constexpr std::wstring_view kMarker = kSingleArgument;
+  bool inQuotes = false;
+  for (size_t i = 0; i < line.size(); ++i) {
+    if (line[i] == L'"') {
+      inQuotes = !inQuotes;
+    } else if (!inQuotes && (line[i] == L' ' || line[i] == L'\t') && line.substr(i + 1).starts_with(kMarker)) {
+      const size_t end = i + 1 + kMarker.size();
+      if (end == line.size() || line[end] == L' ' || line[end] == L'\t') {
+        return i + 1;
+      }
+    }
+  }
+  return std::wstring_view::npos;
+}
+
 Options ParseOptions(const wchar_t* commandLine) {
   Options options;
   options.commandLine = commandLine ? commandLine : L"";
-  const std::vector<std::wstring> args = SplitCommandLine(options.commandLine);
+  std::wstring_view parsed = options.commandLine;
+  if (const size_t marker = FindSingleArgument(parsed); marker != std::wstring_view::npos) {
+    // 原文照收：外壳替换 %1 时不加引号，网址里的空格、引号都属于这一个参数
+    std::wstring rest(parsed.substr(marker + kSingleArgument.size()));
+    const size_t first = rest.find_first_not_of(L" \t");
+    rest = first == std::wstring::npos ? std::wstring() : rest.substr(first);
+    while (!rest.empty() && (rest.back() == L' ' || rest.back() == L'\t')) rest.pop_back();
+    if (rest.size() >= 2 && rest.front() == L'"' && rest.back() == L'"') rest = rest.substr(1, rest.size() - 2);
+    options.singleArgument = true;
+    options.startUrl = rest;
+    parsed = parsed.substr(0, marker);
+  }
+  const std::vector<std::wstring> args = SplitCommandLine(parsed);
   bool agentConfigExplicit = false;
   // args[0] 是程序路径
   for (size_t i = 1; i < args.size(); ++i) {

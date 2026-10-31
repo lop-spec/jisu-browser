@@ -29,9 +29,10 @@ void BrowserWindow::CaptureMedia(Tab& source){
       auto* self=*owner;if(!self||self->destroyed_)return S_OK;Tab* tab=self->FindTab(id);if(!tab||tab->url!=url)return S_OK;
       json::Value outer,offer;if(FAILED(hr)||!result||!json::Parse(ToUtf8(result),outer)||!json::Parse(outer.AsString(),offer))return S_OK;
       if(offer["empty"].AsBool()){self->NewTab(kPlayerUrl);return S_OK;}
-      if(!offer["error"].AsString().empty()){self->message_=FromUtf8(offer["error"].AsString());self->InvalidateChrome();return S_OK;}
+      // 提示用对话框：原先写进内容区的文字被网页盖住看不见；也不在 WebView2 回调里弹模态框
+      if(!offer["error"].AsString().empty()){self->ShowNotice(FromUtf8(offer["error"].AsString()));return S_OK;}
       auto media=offer["url"].AsString();if(!(media.starts_with("http://")||media.starts_with("https://"))){
-        MessageBoxW(self->hwnd_,L"这个网页使用临时 blob/MSE 视频流，未提供可交接的媒体地址。请继续网页播放；清番可直接使用极速播放器。",L"极速播放器",MB_OK|MB_ICONINFORMATION);return S_OK;
+        self->ShowNotice(L"这个网页使用临时 blob/MSE 视频流，未提供可交接的媒体地址。请继续网页播放；清番可直接使用极速播放器。");return S_OK;
       }
       self->StartMedia(id,json::Serialize(offer));return S_OK;
     }).Get());

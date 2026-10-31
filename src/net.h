@@ -10,6 +10,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace jisu::net {
 
@@ -42,6 +43,7 @@ class WebSocket {
   std::mutex mutex_;
   std::condition_variable wake_;
   std::deque<std::string> outbox_;
+  std::vector<char> receiveBuffer_;  // 只由读线程使用
   std::thread writer_;
   HINTERNET session_ = nullptr;
   HINTERNET connection_ = nullptr;

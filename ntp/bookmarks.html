@@ -3,19 +3,13 @@
 <head>
 <meta charset="utf-8">
 <title>书签管理器</title>
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="light">
 <link rel="icon" href="data:,">
 <style>
-/* 底色与外壳 palette.cpp 的 content 一致（浅 #ffffff / 深 #202020） */
+/* 底色与外壳 palette.cpp 的 content 一致（固定浅色，不随 Windows 深色模式变） */
 :root {
   --bg: #ffffff; --fg: #1f1f1f; --muted: #5f6368; --line: #e3e5e8; --hover: #f1f3f4;
   --sel: #e8f0fe; --accent: #1a73e8; --danger: #c5221f; --input: #f1f3f4;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #202020; --fg: #e8e8e8; --muted: #a0a0a0; --line: #3a3a3a; --hover: #2b2b2b;
-    --sel: #263a55; --accent: #4c8bf5; --danger: #f28b82; --input: #2b2b2b;
-  }
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); }
@@ -286,7 +280,9 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top
   $("editCancel").onclick = function () { editing = null; $("editDialog").close(); };
   $("addBookmark").onclick = function () { openEdit(null, false); };
   $("addFolder").onclick = function () { openEdit(null, true); };
-  $("search").addEventListener("input", render);
+  // 搜索防抖：连续输入时不再每个字都整页重画、重取全部图标
+  var searchTimer = 0;
+  $("search").addEventListener("input", function () { clearTimeout(searchTimer); searchTimer = setTimeout(render, 150); });
 
   function openImport() {
     $("status").textContent = "";
@@ -313,6 +309,10 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top
       $("editSave").disabled = false;
       if (data.ok) { editing = null; $("editDialog").close(); }
       else $("editError").textContent = data.error || '保存失败，请重试';
+    } else if (data.type === 'bm.icons.refresh') {
+      // 外壳存了新的网站图标：只重取当前列表的图标，不整页重画（滚动位置、展开的对话框都不动）
+      var ids = Array.from(document.querySelectorAll('[data-bookmark-id]'), function (e) { return Number(e.dataset.bookmarkId); });
+      if (ids.length) send({ type: 'bm.icons', ids: ids });
     } else if (data.type === 'bm.icons') {
       (data.icons || []).forEach(function (item) {
         var img = document.querySelector('[data-bookmark-id="' + Number(item.id) + '"]');

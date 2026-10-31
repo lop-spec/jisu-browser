@@ -153,13 +153,16 @@ class Parser {
   bool ParseString(std::string& out) {
     ++pos_;  // 开头的引号
     while (pos_ < text_.size()) {
+      // 没有转义的一段整段拷贝：书签、历史这类大文件在首帧前后解析，逐字符追加太慢
+      const size_t stop = text_.find_first_of("\"\\", pos_);
+      if (stop == std::string_view::npos) {
+        break;
+      }
+      out.append(text_.data() + pos_, stop - pos_);
+      pos_ = stop;
       const char c = text_[pos_++];
       if (c == '"') {
         return true;
-      }
-      if (c != '\\') {
-        out.push_back(c);
-        continue;
       }
       if (pos_ >= text_.size()) {
         return Fail("bad escape");

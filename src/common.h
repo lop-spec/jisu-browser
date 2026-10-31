@@ -26,11 +26,14 @@ class ProcessClock {
 std::string ToUtf8(std::wstring_view text);
 std::wstring FromUtf8(std::string_view text);
 
-// 小文件读写：读出原始字节（去掉 UTF-8 BOM）；写入先写临时文件再替换，读取方不会读到半截
+// 小文件读写：读出原始字节（去掉 UTF-8 BOM）；写入先写临时文件再替换，读取方不会读到半截。
+// durable=false 用于缓存、诊断这类丢了能重建的文件：照样原子替换，但不等落盘，不在界面线程上卡 fsync
 bool ReadFileBytes(const std::wstring& path, std::string& out);
-bool WriteFileAtomic(const std::wstring& path, const std::string& bytes);
+bool WriteFileAtomic(const std::wstring& path, const std::string& bytes, bool durable = true);
 bool EnsureDirectory(const std::wstring& path);  // 逐级创建
 std::wstring ParentDirectory(const std::wstring& path);
+// 按 UTF-16 单元截断，不把代理对切成两半（emoji 等不变成乱码）
+std::wstring TruncateUtf16(std::wstring text, size_t limit);
 
 // WebView2 getter 返回的 CoTaskMem 字符串。
 class CoTaskString {

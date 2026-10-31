@@ -1,5 +1,7 @@
 #include "common.h"
 
+#include <atomic>
+
 namespace jisu {
 namespace {
 
@@ -81,21 +83,39 @@ bool ReadFileBytes(const std::wstring& path, std::string& out) {
   return true;
 }
 
-bool WriteFileAtomic(const std::wstring& path, const std::string& bytes) {
-  const std::wstring temp = path + L".tmp";
+bool WriteFileAtomic(const std::wstring& path, const std::string& bytes, bool durable) {
+  // 每次写用自己的临时名：两个线程/窗口同时写同一文件不会互相截断，失败也不留下别人的半截文件
+  static std::atomic<unsigned> sequence{0};
+  const std::wstring temp = path + L".tmp" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                            std::to_wstring(sequence.fetch_add(1, std::memory_order_relaxed));
   HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE) {
     return false;
   }
   DWORD written = 0;
   const BOOL ok = WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr);
-  FlushFileBuffers(file);
+  if (durable) {
+    FlushFileBuffers(file);
+  }
   CloseHandle(file);
-  if (!ok || written != bytes.size()) {
+  if (!ok || written != bytes.size() ||
+      !MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | (durable ? MOVEFILE_WRITE_THROUGH : 0))) {
     DeleteFileW(temp.c_str());
     return false;
   }
-  return MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != FALSE;
+  return true;
+}
+
+std::wstring TruncateUtf16(std::wstring text, size_t limit) {
+  if (text.size() <= limit) {
+    return text;
+  }
+  // 截断点落在高位代理之后就再退一位
+  if (limit > 0 && text[limit - 1] >= 0xD800 && text[limit - 1] <= 0xDBFF) {
+    --limit;
+  }
+  text.resize(limit);
+  return text;
 }
 
 bool EnsureDirectory(const std::wstring& path) {

@@ -101,7 +101,8 @@ void SaveResume(bool force=false){
   auto item=json::Value::MakeObject();item.Set("position",json::Value::Number(position>=duration-5?0:position));
   item.Set("at",json::Value::Number(static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count())));
   resumes.Set(resumeKey,std::move(item));if(resumes.Members().size()>500)resumes.MutableMembers().erase(resumes.MutableMembers().begin());
-  WriteFileAtomic(resumeFile,json::Serialize(resumes));resumePosition=position;resumeSaved=GetTickCount64();
+  // 续播位置丢了能重来：不等落盘；播放中 10 秒一次，暂停、换片、停止、退出时立即写
+  WriteFileAtomic(resumeFile,json::Serialize(resumes),false);resumePosition=position;resumeSaved=GetTickCount64();
 }
 std::string ResumeHash(const std::string& value){
   unsigned char bytes[32]{};if(BCryptHash(BCRYPT_SHA256_ALG_HANDLE,nullptr,0,reinterpret_cast<PUCHAR>(const_cast<char*>(value.data())),static_cast<ULONG>(value.size()),bytes,sizeof(bytes))<0)return {};
@@ -130,7 +131,7 @@ void Handle(const std::string& text) {
   }else if(type=="load"){
     skipIntro=std::clamp(c["intro"].AsNumber(),0.0,600.0);skipOutro=std::clamp(c["outro"].AsNumber(),0.0,600.0);
     Load(c["url"].AsString(),c["start"].AsNumber(-1),c["title"].AsString(),false);
-  } else if(type=="pause")Command({"cycle","pause"});
+  } else if(type=="pause"){Command({"cycle","pause"});if(Get("pause").AsBool())SaveResume(true);}
   else if(type=="seek"){progressAt=GetTickCount64();progressPosition=-1;const auto value=std::to_string(std::clamp(c["value"].AsNumber(),-86400.0,864000.0));Command({"seek",value.c_str(),c["absolute"].AsBool()?"absolute+exact":"relative+exact"});}
   else if(type=="set"){
     const auto key=c["key"].AsString(),value=c["value"].AsString();
@@ -173,14 +174,14 @@ void Handle(const std::string& text) {
 }
 LRESULT CALLBACK Proc(HWND window,UINT message,WPARAM w,LPARAM l){
   if(message==kCommand){auto* text=reinterpret_cast<std::string*>(l);Handle(*text);delete text;return 0;}
-  if(message==WM_LBUTTONDOWN){SetFocus(window);Command({"cycle","pause"});return 0;}
+  if(message==WM_LBUTTONDOWN){SetFocus(window);Command({"cycle","pause"});if(Get("pause").AsBool())SaveResume(true);return 0;}
   if(message==WM_LBUTTONDBLCLK){if(mini){if(miniFullscreen.Active())miniFullscreen.Exit(mini);else miniFullscreen.Enter(mini);}else Event("player.fullscreen");return 0;}
   if(message==WM_KEYDOWN){
     const bool ctrl=GetKeyState(VK_CONTROL)<0,alt=GetKeyState(VK_MENU)<0,shift=GetKeyState(VK_SHIFT)<0;const char* shortcut=nullptr;
     if(ctrl&&!alt){if(w=='H')shortcut="history";else if(w=='L')shortcut="address";else if(w=='T')shortcut="new-tab";else if(w=='W')shortcut="close-tab";else if(w==VK_TAB)shortcut=shift?"prev-tab":"next-tab";else if(w=='R')shortcut="reload";else if(w=='D')shortcut="bookmark";else if(w=='M'&&shift)shortcut="media";}
     else if((alt&&w=='D')||w==VK_F6)shortcut="address";
     if(shortcut){if(!(l&(1LL<<30))){auto event=json::Value::MakeObject();event.Set("type",json::Value::String("player.shortcut"));event.Set("command",json::Value::String(shortcut));Emit(event);}return 0;}
-    if(w==VK_SPACE)Command({"cycle","pause"});else if(w==VK_LEFT)Command({"seek","-10","relative"});else if(w==VK_RIGHT)Command({"seek","10","relative"});
+    if(w==VK_SPACE){Command({"cycle","pause"});if(Get("pause").AsBool())SaveResume(true);}else if(w==VK_LEFT)Command({"seek","-10","relative"});else if(w==VK_RIGHT)Command({"seek","10","relative"});
     else if(w==VK_ESCAPE){if(mini&&miniFullscreen.Active())miniFullscreen.Exit(mini);else Event("player.escape");}else if(w=='F'||w==VK_F11){if(mini){if(miniFullscreen.Active())miniFullscreen.Exit(mini);else miniFullscreen.Enter(mini);}else Event("player.fullscreen");}else if(w==VK_OEM_PERIOD)Command({"frame-step"});return 0;
   }
   if(message==WM_TIMER){
@@ -197,7 +198,7 @@ LRESULT CALLBACK Proc(HWND window,UINT message,WPARAM w,LPARAM l){
     if(watching&&!paused&&!outroSent&&GetTickCount64()-progressAt>20000){watching=false;Error("片源连续 20 秒未推进，请重试或切换线路",true);Command({"stop"});}
     if(!outroSent&&Get("eof-reached").AsBool()){outroSent=true;Event("player.ended");}
     if(enhanced&&GetTickCount64()-qualityTick>3000){const double dropped=Number("frame-drop-count");if(dropped-qualityDrops>=12&&!Get("pause").AsBool()){api.set_property_string(player,"glsl-shaders","");enhanced=false;Event("player.enhancement-reduced");}qualityDrops=dropped;qualityTick=GetTickCount64();}
-    if(GetTickCount64()-resumeSaved>2000)SaveResume();
+    if(GetTickCount64()-resumeSaved>10000)SaveResume();
     Status();return 0;
   }
   if(message==WM_CLOSE){DestroyWindow(window);return 0;}

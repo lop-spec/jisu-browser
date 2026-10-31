@@ -63,6 +63,8 @@ void BrowserWindow::RefreshExtensionToolbar() {
   if (!extensionsButton_) {
     extensionsButton_ = CreateWindowExW(0, L"BUTTON", L"扩展程序", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
       0,0,0,0,hwnd_,reinterpret_cast<HMENU>(static_cast<INT_PTR>(kExtensionsButton)),instance_,nullptr);
+    // 悬停底色；点击不拿走键盘焦点
+    if (extensionsButton_) SetWindowSubclass(extensionsButton_, &BrowserWindow::ExtensionButtonProc, 1, reinterpret_cast<DWORD_PTR>(this));
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_WIN95_CLASSES}; InitCommonControlsEx(&controls);
     extensionTooltip_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE, TOOLTIPS_CLASSW, nullptr,
       WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,hwnd_,nullptr,instance_,nullptr);
@@ -73,6 +75,7 @@ void BrowserWindow::RefreshExtensionToolbar() {
     if (!e.button) {
       e.button = CreateWindowExW(0,L"BUTTON",e.name.c_str(),WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
         0,0,0,0,hwnd_,reinterpret_cast<HMENU>(static_cast<INT_PTR>(kExtensionButtonBase+i)),instance_,nullptr);
+      if (e.button) SetWindowSubclass(e.button, &BrowserWindow::ExtensionButtonProc, 1, reinterpret_cast<DWORD_PTR>(this));
       if (extensionTooltip_) Tool(extensionTooltip_,e.button,e.name);
     }
     if (!e.toolbarIcon) e.toolbarIcon=ProgramIcon(e.path,dpi_);
@@ -97,7 +100,8 @@ float BrowserWindow::LayoutExtensionToolbar(float right,float top,float scale) {
 }
 void BrowserWindow::DrawExtensionButton(const DRAWITEMSTRUCT& d) {
   const bool down=(d.itemState&ODS_SELECTED)!=0,disabled=(d.itemState&ODS_DISABLED)!=0;
-  HBRUSH background=CreateSolidBrush(ToColorRef(down?palette_.buttonHover:palette_.toolbar));FillRect(d.hDC,&d.rcItem,background);DeleteObject(background);
+  const bool hot=down||(d.hwndItem==hoverExtensionButton_&&!disabled);  // 悬停与按下同一底色，和其他工具栏按钮一致
+  HBRUSH background=CreateSolidBrush(ToColorRef(hot?palette_.buttonHover:palette_.toolbar));FillRect(d.hDC,&d.rcItem,background);DeleteObject(background);
   HICON icon=nullptr;std::wstring fallback=L"扩";
   if (d.CtlID>=kExtensionButtonBase && d.CtlID-kExtensionButtonBase<extensions_.size()) {
     const auto& e=extensions_[d.CtlID-kExtensionButtonBase];icon=e.toolbarIcon;
@@ -110,7 +114,7 @@ void BrowserWindow::DrawExtensionButton(const DRAWITEMSTRUCT& d) {
     HPEN pen=CreatePen(PS_SOLID,std::max(1,MulDiv(1,static_cast<int>(dpi_),96)),ToColorRef(palette_.text));
     HBRUSH fill=CreateSolidBrush(ToColorRef(palette_.text));auto oldPen=SelectObject(d.hDC,pen);auto oldBrush=SelectObject(d.hDC,fill);
     RoundRect(d.hDC,cx-a,cy-a,cx+a,cy+a,2,2);Ellipse(d.hDC,cx-r,cy-a-r,cx+r,cy-a+r);Ellipse(d.hDC,cx+a-r,cy-r,cx+a+r,cy+r);
-    HBRUSH cut=CreateSolidBrush(ToColorRef(down?palette_.buttonHover:palette_.toolbar));SelectObject(d.hDC,cut);SelectObject(d.hDC,GetStockObject(NULL_PEN));Ellipse(d.hDC,cx-a-r,cy-r,cx-a+r,cy+r);Ellipse(d.hDC,cx-r,cy+a-r,cx+r,cy+a+r);
+    HBRUSH cut=CreateSolidBrush(ToColorRef(hot?palette_.buttonHover:palette_.toolbar));SelectObject(d.hDC,cut);SelectObject(d.hDC,GetStockObject(NULL_PEN));Ellipse(d.hDC,cx-a-r,cy-r,cx-a+r,cy+r);Ellipse(d.hDC,cx-r,cy+a-r,cx+r,cy+a+r);
     SelectObject(d.hDC,oldPen);SelectObject(d.hDC,oldBrush);DeleteObject(pen);DeleteObject(fill);DeleteObject(cut);
   }
   else if(icon)DrawIconEx(d.hDC,(d.rcItem.left+d.rcItem.right-size)/2,(d.rcItem.top+d.rcItem.bottom-size)/2,icon,size,size,0,nullptr,DI_NORMAL);
@@ -171,6 +175,8 @@ void BrowserWindow::WriteExtensionToolbarState() {
   out+="],\"popupOpen\":"+std::string(extensionPopupWindow_?"true":"false")+",\"popupLoaded\":"+std::string(extensionPopupLoaded_?"true":"false");
   out+=",\"popupId\":";json::AppendQuoted(out,popupExtensionIndex_<extensions_.size()?ToUtf8(extensions_[popupExtensionIndex_].id):"");
   out+=",\"popupWindow\":"+std::to_string(reinterpret_cast<uintptr_t>(extensionPopupWindow_))+"}";
-  WriteFileAtomic(profileDir_+L"\\extension-toolbar-state.json",out);
+  if(out==lastToolbarState_)return;  // 没变就不写：关弹层、改窗口大小时不再反复写盘
+  lastToolbarState_=out;
+  WriteFileAtomic(profileDir_+L"\\extension-toolbar-state.json",out,false);  // 状态文件：不等落盘
 }
 }  // namespace jisu

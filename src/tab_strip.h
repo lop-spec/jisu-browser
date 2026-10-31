@@ -19,7 +19,8 @@ struct TabStripLayout {
   D2D1_RECT_F newTab{};
 };
 
-inline TabStripLayout LayoutTabStrip(float width, size_t count) {
+// maxWidth：连续点关闭时先保持关之前的宽度，下一个关闭钮正好落在光标下，鼠标离开标签条再展开
+inline TabStripLayout LayoutTabStrip(float width, size_t count, float maxWidth = kTabPreferredWidth) {
   constexpr float left = 12.0f;
   constexpr float controls = 138.0f;
   constexpr float dragSpace = 16.0f;
@@ -27,7 +28,8 @@ inline TabStripLayout LayoutTabStrip(float width, size_t count) {
   constexpr float plusGap = 4.0f;
   const float available = std::max(0.0f, width - left - controls - dragSpace - plusWidth - plusGap);
   // No hard minimum: even a crowded strip must not cover the + or window buttons.
-  const float tabWidth = count ? std::min(kTabPreferredWidth, available / static_cast<float>(count)) : 0.0f;
+  const float tabWidth =
+      count ? std::min({kTabPreferredWidth, maxWidth, available / static_cast<float>(count)}) : 0.0f;
   TabStripLayout result;
   result.tabs.reserve(count);
   result.closes.reserve(count);

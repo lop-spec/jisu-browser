@@ -13,6 +13,7 @@ void BrowserWindow::MoveTab(size_t from, size_t to) {
   pressed_ = {}; hover_ = {};
   Relayout();
   InvalidateChrome();
+  ScheduleSessionSave();
 }
 
 bool BrowserWindow::OutsideTabStrip(POINT point) const {
@@ -37,7 +38,11 @@ void BrowserWindow::UpdateTabDrag(POINT point) {
   if (width <= 0) return;
   const float center = point.x / layout_.scale - dragTabGrabX_ + width * 0.5f;
   const float slot = (center - layout_.tabs.front().left) / width;
-  const size_t to = static_cast<size_t>(std::clamp(std::floor(slot), 0.0f, static_cast<float>(tabs_.size() - 1)));
+  size_t to = static_cast<size_t>(std::clamp(std::floor(slot), 0.0f, static_cast<float>(tabs_.size() - 1)));
+  // 固定的标签只在最左边那一组里排，普通标签也拖不进那一组
+  size_t pinned = 0;
+  while (pinned < tabs_.size() && tabs_[pinned]->pinned) ++pinned;
+  to = tab->pinned ? std::min(to, pinned - 1) : std::max(to, pinned);
   MoveTab(from, to);
 }
 
@@ -76,9 +81,9 @@ bool BrowserWindow::MoveTabTo(uint32_t id, BrowserWindow& destination) {
   auto moving = std::move(tabs_[from]);
   tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(from));
   *moving->owner = &destination;
-  destination.tabs_.push_back(std::move(moving));
+  const size_t at = destination.InsertTab(std::move(moving), destination.tabs_.size());
   destination.Relayout();
-  destination.Activate(destination.tabs_.size() - 1);
+  destination.Activate(at);
   if (tabs_.empty()) DestroyWindow(hwnd_);
   else {
     hover_ = {}; pressed_ = {};
@@ -104,7 +109,7 @@ void BrowserWindow::FinishTabDrag(POINT point) {
   RECT bounds{};
   GetWindowRect(hwnd_, &bounds);
   if (tabs_.size() == 1) {
-    if (IsZoomed(hwnd_)) ShowWindow(hwnd_, options_.noActivate ? SW_SHOWNOACTIVATE : SW_RESTORE);
+    if (IsZoomed(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);  // 用户在拖：照常还原，不按后台启动时的「不激活」
     SetWindowPos(hwnd_, nullptr, screen.x - static_cast<int>(grab * layout_.scale),
                  screen.y - static_cast<int>(kTabCenterY * layout_.scale), 0, 0,
                  SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -120,9 +125,13 @@ void BrowserWindow::FinishTabDrag(POINT point) {
   options.metricsPath.clear();
   options.exitAfterMetrics = false;
   options.preheatSeconds = 0;
+  // 用户亲手拖出来的窗口要到前台：主窗口当初是后台（--no-activate）启动的也一样
+  options.noActivate = false;
   auto window = std::make_unique<BrowserWindow>(options, warmup_, root_);
   window->environment_ = environment_;
   window->profileConfigured_ = true;  // Reuse the already-configured shared WebView profile.
+  window->extensionsConfigLoaded_ = extensionsConfigLoaded_;  // 接手主窗口后重建内核也不再重复读入扩展清单
+  window->extensionsStarted_ = extensionsStarted_;
   window->extensionProfile_ = extensionProfile_;
   for (const auto& source : extensions_) {
     ExtensionEntry entry = source;

@@ -34,13 +34,11 @@ if (Test-Path -LiteralPath $destExe) {
 }
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 Copy-Item -LiteralPath $exeSource -Destination $destExe -Force
-$ntpDest = Join-Path $Dest "ntp"
-if (Test-Path -LiteralPath $ntpDest) { Remove-Item -LiteralPath $ntpDest -Recurse -Force }
-Copy-Item -LiteralPath (Join-Path $Package "ntp") -Destination $ntpDest -Recurse
-foreach ($component in @('jisu-media.exe','media','THIRD-PARTY.md')) {
+# 页面、媒体组件替换前同样留一份旧版本（同一次安装放在同一个快照目录）
+$snapshot = Join-Path $Dest ("_历史版本\components-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+foreach ($component in @('ntp','jisu-media.exe','media','THIRD-PARTY.md')) {
   $target = Join-Path $Dest $component
   if (Test-Path -LiteralPath $target) {
-    $snapshot = Join-Path $Dest ("_历史版本\media-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
     New-Item -ItemType Directory -Force -Path $snapshot | Out-Null
     Copy-Item -LiteralPath $target -Destination $snapshot -Recurse
     Remove-Item -LiteralPath $target -Recurse -Force
@@ -68,8 +66,9 @@ if ($AgentTokenFile) {
       Copy-Item -LiteralPath $agentConfig -Destination "$agentConfig.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
     }
     # 只写连接所需的项；省电相关取程序里的默认值（见 README），以后升级跟着新默认走
+    # 极速走自己的模型桥 broker 18774（18773 留给显式选择的旧浏览器），两边不抢同一张邀请
     $config = [ordered]@{
-      broker    = "http://127.0.0.1:18773"
+      broker    = "http://127.0.0.1:18774"
       tokenFile = $AgentTokenFile
       yieldTo   = @($YieldTo)
     }

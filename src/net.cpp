@@ -238,16 +238,20 @@ bool WebSocket::Receive(std::string& message) {
     socket = socket_;
   }
   message.clear();
-  std::vector<char> buffer(64 * 1024);
+  // 只有读线程调用 Receive：缓冲复用，不为每条消息分配并清零 64KB
+  if (receiveBuffer_.empty()) {
+    receiveBuffer_.resize(64 * 1024);
+  }
   for (;;) {
     DWORD read = 0;
     WINHTTP_WEB_SOCKET_BUFFER_TYPE type = WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE;
     // Close() 关掉句柄时这里会以错误返回
-    const DWORD result = WinHttpWebSocketReceive(socket, buffer.data(), static_cast<DWORD>(buffer.size()), &read, &type);
+    const DWORD result = WinHttpWebSocketReceive(socket, receiveBuffer_.data(), static_cast<DWORD>(receiveBuffer_.size()),
+                                                 &read, &type);
     if (result != NO_ERROR || type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) {
       return false;
     }
-    message.append(buffer.data(), read);
+    message.append(receiveBuffer_.data(), read);
     if (type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE || type == WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE) {
       return true;
     }

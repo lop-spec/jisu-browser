@@ -42,6 +42,11 @@ struct Options {
   std::wstring appIcon;            // --app-icon: local .ico path
   std::wstring InstanceKey() const { return appMode ? userDataFolder + L"|app:" + appId : userDataFolder; }
   std::wstring startUrl;           // 第一个非选项参数：启动时打开的网址
+  // --single-argument：其后的全部原文是一个网址/路径（默认浏览器登记用），不再当作选项解析，
+  // 构造的链接夹带不了 --browser-args、--udf 之类的启动参数
+  bool singleArgument = false;
+  // 主实例卡住没响应时起的备用实例：不开智能体桥、不装托盘、不写会话，免得与主实例抢
+  bool secondary = false;
   std::wstring commandLine;        // 原始命令行，写进时间线
 };
 

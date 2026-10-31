@@ -313,6 +313,27 @@ HRESULT ChromePainter::EnsureGeometry() {
   if (SUCCEEDED(hr)) {
     star_ = star;
   }
+
+  // 加载中：半径 6、从 12 点方向顺时针 100° 的弧，画在一圈淡环上，和智能体的实心点、空心圈都区分得开
+  ComPtr<ID2D1PathGeometry> loading;
+  sink.Reset();
+  hr = factory_->CreatePathGeometry(loading.GetAddressOf());
+  if (SUCCEEDED(hr)) {
+    hr = loading->Open(sink.GetAddressOf());
+  }
+  if (SUCCEEDED(hr)) {
+    constexpr float arcRadius = 6.0f;
+    const float from = -0.5f * kPi;
+    const float to = from + kPi * 100.0f / 180.0f;
+    sink->BeginFigure(D2D1::Point2F(arcRadius * cosf(from), arcRadius * sinf(from)), D2D1_FIGURE_BEGIN_HOLLOW);
+    sink->AddArc(D2D1::ArcSegment(D2D1::Point2F(arcRadius * cosf(to), arcRadius * sinf(to)), D2D1::SizeF(arcRadius, arcRadius),
+                                  0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+    hr = sink->Close();
+  }
+  if (SUCCEEDED(hr)) {
+    loadingArc_ = loading;
+  }
   return S_OK;
 }
 
@@ -357,6 +378,13 @@ void ChromePainter::Paint(const Palette& palette, const ChromeLayout& layout, co
   EnsureGeometry();
   target_->BeginDraw();
   target_->SetTransform(D2D1::Matrix3x2F::Identity());
+  // 网页盖住内容区时只画顶部这一条：清屏和光栅化都限制在里面，悬停重绘不再每次清整个窗口（4K 约 33MB）
+  const D2D1_SIZE_F targetSize = target_->GetSize();
+  const float chromeBottom = static_cast<float>(layout.contentTopPx) / layout.scale;
+  const bool clipToChrome = !state.paintContent && chromeBottom > 0 && chromeBottom < targetSize.height;
+  if (clipToChrome) {
+    target_->PushAxisAlignedClip(D2D1::RectF(0, 0, targetSize.width, chromeBottom), D2D1_ANTIALIAS_MODE_ALIASED);
+  }
   target_->Clear(ToColor(palette.content));
 
   const float width = layout.width;
@@ -416,6 +444,13 @@ void ChromePainter::Paint(const Palette& palette, const ChromeLayout& layout, co
     SetColor(state.starred ? palette.accent : palette.text);
     DrawStar(Center(layout.star), state.starred);
   }
+  if (layout.popupBlocked.right > layout.popupBlocked.left) {
+    if (state.hover.kind == ChromeHit::kPopupBlocked) {
+      FillRounded(layout.popupBlocked, 5.0f, palette.buttonHover);
+    }
+    SetColor(palette.accent);
+    DrawPopupBlocked(Center(layout.popupBlocked));
+  }
   DrawToolbarButton(palette, layout.menu, state.hover.kind == ChromeHit::kMenu, true);
   DrawMenuDots(Center(layout.menu));
   const float hairline = 1.0f / layout.scale;
@@ -433,7 +468,7 @@ void ChromePainter::Paint(const Palette& palette, const ChromeLayout& layout, co
   // 工具栏（及书签栏）与网页区之间 1 物理像素的分隔线
   Fill(D2D1::RectF(0, toolbarBottom, width, toolbarBottom + hairline), palette.separator);
 
-  if (!state.message.empty() && message_) {
+  if (!state.message.empty() && message_ && state.paintContent) {
     const D2D1_SIZE_F size = target_->GetSize();
     const float top = static_cast<float>(layout.contentTopPx) / layout.scale;
     SetColor(palette.textMuted);
@@ -441,10 +476,17 @@ void ChromePainter::Paint(const Palette& palette, const ChromeLayout& layout, co
                       D2D1::RectF(24.0f, top, size.width - 24.0f, size.height), brush_.Get());
   }
 
+  if (clipToChrome) {
+    target_->PopAxisAlignedClip();
+  }
   if (target_->EndDraw() == D2DERR_RECREATE_TARGET) {
     target_.Reset();
     brush_.Reset();
     faviconBitmaps_.clear();
+    // 设备丢失（显卡驱动重置等）：下一帧用新渲染目标重画，不停在旧画面上
+    if (hwnd_) {
+      InvalidateRect(hwnd_, nullptr, FALSE);
+    }
   }
 }
 
@@ -502,19 +544,32 @@ void ChromePainter::DrawTab(const Palette& palette, const ChromeLayout& layout, 
   const D2D1_POINT_2F dot = D2D1::Point2F(r.left + std::min(21.0f, width * 0.5f), kTabCenterY);
   const bool showIcon = width >= 28.0f && (!showClose || width >= 64.0f);
   if (showIcon) {
-    if (tab.agent || tab.loading) {
+    if (tab.agent) {
       // Keep the native agent indicator; never disguise an agent tab as a normal page.
       SetColor(palette.accent);
       if (tab.agentAwake || tab.loading) target_->FillEllipse(D2D1::Ellipse(dot, 4.0f, 4.0f), brush_.Get());
       else target_->DrawEllipse(D2D1::Ellipse(dot, 3.5f, 3.5f), brush_.Get(), 1.5f);
+    } else if (tab.loading) {
+      // 普通页面加载中画一段圆弧，和智能体「执行中」的实心点区分开
+      SetColor(palette.accent);
+      DrawLoadingArc(dot);
     } else if (!DrawFavicon(tab.favicon, dot, 20.0f)) {
       SetColor(palette.accent);
       DrawPageGlyph(dot);
     }
   }
+  const D2D1_RECT_F audio = index < layout.tabAudio.size() ? layout.tabAudio[index] : D2D1_RECT_F{};
+  const bool showAudio = audio.right > audio.left;
+  if (showAudio) {
+    if (state.hover.kind == ChromeHit::kTabAudio && state.hover.index == i) {
+      FillRounded(audio, 4.0f, palette.buttonHover);
+    }
+    SetColor(tab.muted ? palette.textMuted : palette.text);
+    DrawSpeaker(Center(audio), tab.muted);
+  }
   const float textLeft = r.left + 41.0f;
   // Reserve the close slot even when hidden, so hovering never changes title trimming.
-  const float textRight = close.left - 8.0f;
+  const float textRight = (showAudio ? std::min(close.left, audio.left) : close.left) - 8.0f;
   if (width >= 80.0f && textRight > textLeft && tabTitle_) {
     SetColor(palette.text, tab.active ? 1.0f : 0.85f);
     target_->DrawText(tab.title.c_str(), static_cast<UINT32>(tab.title.size()), tabTitle_.Get(),
@@ -529,6 +584,9 @@ void ChromePainter::DrawTab(const Palette& palette, const ChromeLayout& layout, 
     }
     SetColor(palette.text);
     DrawCross(c, 3.5f);
+  } else if (tab.pinned && close.right > close.left) {
+    SetColor(palette.textMuted);
+    DrawPin(Center(close));
   }
 }
 
@@ -559,6 +617,10 @@ float ChromePainter::MeasureBookmark(const std::wstring& title, bool folder) con
   if (title.empty()) {
     return kPadding * 2.0f + 14.0f;  // 只有图标
   }
+  (void)folder;  // 文件夹与网页图标同宽
+  if (const auto cached = bookmarkWidths_.find(title); cached != bookmarkWidths_.end()) {
+    return cached->second;
+  }
   float textWidth = 7.5f * static_cast<float>(title.size());  // 估算：还没有排版对象时
   if (dwrite_ && bookmarkTitle_) {
     ComPtr<IDWriteTextLayout> textLayout;
@@ -570,11 +632,25 @@ float ChromePainter::MeasureBookmark(const std::wstring& title, bool folder) con
       }
     }
   }
-  (void)folder;  // 文件夹与网页图标同宽
-  return kPadding * 2.0f + kIcon + std::min(textWidth, kMaxText);
+  const float result = kPadding * 2.0f + kIcon + std::min(textWidth, kMaxText);
+  if (dwrite_ && bookmarkTitle_) {  // 估算值不缓存：排版对象就绪后要换成实测宽度
+    if (bookmarkWidths_.size() >= 4096) bookmarkWidths_.clear();
+    bookmarkWidths_.emplace(title, result);
+  }
+  return result;
 }
 
 void ChromePainter::DrawBookmarkBar(const Palette& palette, const ChromeLayout& layout, const ChromeState& state) {
+  if (state.bookmarkBarEmpty && bookmarkTitle_) {
+    // 开着书签栏却没有书签：留一句怎么加，不让「显示书签栏」看起来像没反应
+    static constexpr wchar_t kHint[] = L"按 Ctrl+D 或点地址栏右侧的星标，把常用网页放到这里";
+    const float top = layout.tabStripHeight + layout.toolbarHeight;
+    SetColor(palette.textMuted);
+    target_->DrawText(kHint, static_cast<UINT32>(ARRAYSIZE(kHint) - 1), bookmarkTitle_.Get(),
+                      D2D1::RectF(14.0f, top, layout.width - 14.0f, top + layout.bookmarkBarHeight - 2.0f), brush_.Get(),
+                      D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    return;
+  }
   for (size_t i = 0; i < layout.bookmarks.size() && i < state.bookmarks.size(); ++i) {
     const D2D1_RECT_F r = layout.bookmarks[i];
     const ChromeBookmark& item = state.bookmarks[i];
@@ -687,6 +763,69 @@ void ChromePainter::DrawReload(D2D1_POINT_2F center) {
   target_->DrawGeometry(reloadArc_.Get(), brush_.Get(), 1.5f, roundStroke_.Get());
   target_->FillGeometry(reloadHead_.Get(), brush_.Get());
   target_->SetTransform(D2D1::Matrix3x2F::Identity());
+}
+
+// 加载中：淡色整圈 + 一段实色弧（常见的加载样式），放在网站图标的位置
+void ChromePainter::DrawLoadingArc(D2D1_POINT_2F center) {
+  const D2D1_COLOR_F ink = brush_->GetColor();
+  brush_->SetColor(D2D1::ColorF(ink.r, ink.g, ink.b, ink.a * 0.25f));
+  target_->DrawEllipse(D2D1::Ellipse(center, 6.0f, 6.0f), brush_.Get(), 2.0f);
+  brush_->SetColor(ink);
+  if (!loadingArc_) return;
+  target_->SetTransform(D2D1::Matrix3x2F::Translation(center.x, center.y));
+  target_->DrawGeometry(loadingArc_.Get(), brush_.Get(), 2.0f, roundStroke_.Get());
+  target_->SetTransform(D2D1::Matrix3x2F::Identity());
+}
+
+// 扬声器：喇叭口 + 两道声波；静音时声波换成斜线
+void ChromePainter::DrawSpeaker(D2D1_POINT_2F c, bool muted) {
+  ComPtr<ID2D1PathGeometry> body;
+  ComPtr<ID2D1GeometrySink> sink;
+  if (SUCCEEDED(factory_->CreatePathGeometry(body.GetAddressOf())) && SUCCEEDED(body->Open(sink.GetAddressOf()))) {
+    sink->BeginFigure(D2D1::Point2F(c.x - 6.0f, c.y - 2.5f), D2D1_FIGURE_BEGIN_FILLED);
+    sink->AddLine(D2D1::Point2F(c.x - 3.5f, c.y - 2.5f));
+    sink->AddLine(D2D1::Point2F(c.x + 0.5f, c.y - 6.0f));
+    sink->AddLine(D2D1::Point2F(c.x + 0.5f, c.y + 6.0f));
+    sink->AddLine(D2D1::Point2F(c.x - 3.5f, c.y + 2.5f));
+    sink->AddLine(D2D1::Point2F(c.x - 6.0f, c.y + 2.5f));
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    if (SUCCEEDED(sink->Close())) target_->FillGeometry(body.Get(), brush_.Get());
+  }
+  if (muted) {
+    Stroke(D2D1::Point2F(c.x + 2.5f, c.y - 2.5f), D2D1::Point2F(c.x + 7.0f, c.y + 2.5f), 1.3f);
+    Stroke(D2D1::Point2F(c.x + 2.5f, c.y + 2.5f), D2D1::Point2F(c.x + 7.0f, c.y - 2.5f), 1.3f);
+    return;
+  }
+  for (const float radius : {3.5f, 6.5f}) {
+    ComPtr<ID2D1PathGeometry> wave;
+    ComPtr<ID2D1GeometrySink> waveSink;
+    if (FAILED(factory_->CreatePathGeometry(wave.GetAddressOf())) || FAILED(wave->Open(waveSink.GetAddressOf()))) return;
+    const float dx = radius * 0.7071f, dy = radius * 0.7071f;
+    waveSink->BeginFigure(D2D1::Point2F(c.x + 0.5f + dx, c.y - dy), D2D1_FIGURE_BEGIN_HOLLOW);
+    waveSink->AddArc(D2D1::ArcSegment(D2D1::Point2F(c.x + 0.5f + dx, c.y + dy), D2D1::SizeF(radius, radius), 0.0f,
+                                      D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+    waveSink->EndFigure(D2D1_FIGURE_END_OPEN);
+    if (SUCCEEDED(waveSink->Close())) target_->DrawGeometry(wave.Get(), brush_.Get(), 1.3f, roundStroke_.Get());
+  }
+}
+
+// 固定标签：钉帽 + 钉身
+void ChromePainter::DrawPin(D2D1_POINT_2F c) {
+  target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(c.x, c.y - 2.0f), 3.2f, 3.2f), brush_.Get());
+  Stroke(D2D1::Point2F(c.x, c.y + 1.0f), D2D1::Point2F(c.x, c.y + 6.0f), 1.4f);
+}
+
+// 已拦截弹出窗口：一个小窗口外框，右下角带斜杠圆
+void ChromePainter::DrawPopupBlocked(D2D1_POINT_2F c) {
+  target_->DrawRectangle(D2D1::RectF(c.x - 7.0f, c.y - 5.5f, c.x + 4.0f, c.y + 3.5f), brush_.Get(), 1.2f);
+  Stroke(D2D1::Point2F(c.x - 7.0f, c.y - 2.5f), D2D1::Point2F(c.x + 4.0f, c.y - 2.5f), 1.0f);
+  const D2D1_POINT_2F badge = D2D1::Point2F(c.x + 4.0f, c.y + 3.5f);
+  target_->FillEllipse(D2D1::Ellipse(badge, 4.2f, 4.2f), brush_.Get());
+  // 斜杠用网页底色挖出来，深浅底都看得清
+  const D2D1_COLOR_F ink = brush_->GetColor();
+  brush_->SetColor(D2D1::ColorF(1, 1, 1, 1));
+  Stroke(D2D1::Point2F(badge.x - 2.2f, badge.y + 2.2f), D2D1::Point2F(badge.x + 2.2f, badge.y - 2.2f), 1.2f);
+  brush_->SetColor(ink);
 }
 
 }  // namespace jisu

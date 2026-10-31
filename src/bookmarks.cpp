@@ -225,7 +225,15 @@ bool BookmarkStore::Load(const std::wstring& file) {
   json::Value roots;
   if (!ReadChromiumBookmarks(file, roots, nullptr)) {
     existed_ = GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES;
-    return !existed_;  // 不存在算成功（空书签）；存在却读不了算失败，此时不覆盖它
+    if (existed_) {
+      // 存在却读不了（损坏、被别的程序写坏）：之后任何一次保存都会写回整份书签，先把原文件另存，不让它被空书签覆盖
+      SYSTEMTIME now{};
+      GetLocalTime(&now);
+      wchar_t stamp[32];
+      swprintf_s(stamp, L"%04u%02u%02u-%02u%02u%02u", now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+      CopyFileW(file.c_str(), (file + L".unreadable-" + stamp).c_str(), TRUE);
+    }
+    return !existed_;  // 不存在算成功（空书签）；存在却读不了算失败（原文件已另存）
   }
   existed_ = true;
   int64_t maxId = 3;
@@ -280,10 +288,7 @@ bool BookmarkStore::Load(const std::wstring& file) {
   return true;
 }
 
-bool BookmarkStore::Save() {
-  if (file_.empty()) {
-    return false;
-  }
+std::string BookmarkStore::Serialized() const {
   std::string out = "{\"roots\":{\"bookmark_bar\":";
   SerializeNode(out, *bar_);
   out += ",\"other\":";
@@ -291,8 +296,15 @@ bool BookmarkStore::Save() {
   out += ",\"synced\":";
   SerializeNode(out, *mobile_);
   out += "},\"version\":1}";
+  return out;
+}
+
+bool BookmarkStore::Save() {
+  if (file_.empty()) {
+    return false;
+  }
   EnsureDirectory(ParentDirectory(file_));
-  const bool ok = WriteFileAtomic(file_, out);
+  const bool ok = WriteFileAtomic(file_, Serialized());
   existed_ = existed_ || ok;
   return ok;
 }
@@ -533,6 +545,22 @@ std::vector<BookmarkImportSource> BookmarkStore::DetectImportSources() {
     }
   }
   return sources;
+}
+
+bool BookmarkStore::IsImportSourceFile(const std::wstring& file) {
+  const std::wstring base = LocalAppData();
+  if (base.empty() || file.empty()) {
+    return false;
+  }
+  for (const KnownBrowser& browser : kKnownBrowsers) {
+    for (const wchar_t* profile : kProfiles) {
+      const std::wstring candidate = base + browser.dataDir + L"\\" + profile + L"\\Bookmarks";
+      if (_wcsicmp(candidate.c_str(), file.c_str()) == 0) {
+        return GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES;
+      }
+    }
+  }
+  return false;
 }
 
 std::wstring BookmarkStore::DefaultBrowserBookmarksFile(std::wstring* name) {

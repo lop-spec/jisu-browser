@@ -22,6 +22,8 @@ LRESULT CALLBACK BrowserWindow::ExtensionPopupProc(HWND h,UINT message,WPARAM w,
   return DefWindowProcW(h,message,w,l);
 }
 void BrowserWindow::CloseExtensionPopup() {
+  // 没有弹层就什么也不做：切标签、改窗口大小、点工具栏都会调到这里，不再每次写状态文件
+  if (!extensionPopupWindow_ && !extensionPopup_) return;
   ++extensionPopupGeneration_;
   extensionPopupLoaded_=false;
   if(extensionPopup_&&extensionPopup_->controller)extensionPopup_->controller->Close();
@@ -74,6 +76,23 @@ void BrowserWindow::ShowExtensionPopup(size_t index) {
       view->add_NavigationCompleted(Callback<ICoreWebView2NavigationCompletedEventHandler>([this,alive,generation,window](ICoreWebView2*,ICoreWebView2NavigationCompletedEventArgs* args)->HRESULT {
         if(alive.expired()||generation!=extensionPopupGeneration_)return S_OK;
         BOOL success=FALSE;args->get_IsSuccess(&success);extensionPopupLoaded_=success!=FALSE;WriteExtensionToolbarState();
+        // 弹层按页面内容定高（宽度跟页面自己写的宽度），不再一律 400×570：内容少留一大块空白、内容多出滚动条
+        if(success&&extensionPopup_&&extensionPopup_->webview)extensionPopup_->webview->ExecuteScript(
+          L"(()=>{const b=document.body,d=document.documentElement;if(!b)return null;const s=getComputedStyle(b),r=b.getBoundingClientRect();"
+          L"return [Math.ceil(r.width+parseFloat(s.marginLeft)+parseFloat(s.marginRight)),Math.ceil(Math.max(d.scrollHeight,r.height+parseFloat(s.marginTop)+parseFloat(s.marginBottom)))];})()",
+          Callback<ICoreWebView2ExecuteScriptCompletedHandler>([this,alive,generation,window](HRESULT hr,LPCWSTR result)->HRESULT{
+            if(alive.expired()||generation!=extensionPopupGeneration_||FAILED(hr)||!result||!IsWindow(window))return S_OK;
+            int cssWidth=0,cssHeight=0;if(swscanf_s(result,L"[%d,%d]",&cssWidth,&cssHeight)!=2||cssWidth<=0||cssHeight<=0)return S_OK;
+            RECT current{};GetWindowRect(window,&current);
+            MONITORINFO monitor{sizeof(monitor)};GetMonitorInfoW(MonitorFromWindow(window,MONITOR_DEFAULTTONEAREST),&monitor);
+            const int dpi=static_cast<int>(GetDpiForWindow(window));
+            const int border=(current.right-current.left)-[&]{RECT c{};GetClientRect(window,&c);return static_cast<int>(c.right);}();
+            const int width=std::clamp(MulDiv(cssWidth,dpi,96)+border,MulDiv(200,dpi,96),std::min<int>(MulDiv(800,dpi,96),monitor.rcWork.right-monitor.rcWork.left-16));
+            const int height=std::clamp(MulDiv(cssHeight,dpi,96)+border,MulDiv(80,dpi,96),std::min<int>(MulDiv(600,dpi,96),static_cast<int>(monitor.rcWork.bottom-current.top-4)));
+            const int x=std::clamp(static_cast<int>(current.right)-width,static_cast<int>(monitor.rcWork.left)+4,std::max<int>(monitor.rcWork.left+4,monitor.rcWork.right-width-4));
+            SetWindowPos(window,nullptr,x,current.top,width,height,SWP_NOZORDER|SWP_NOACTIVATE);
+            return S_OK;
+          }).Get());
         // Only a user-clicked foreground browser moves keyboard focus into its own popup.
         if(GetForegroundWindow()==hwnd_&&extensionPopup_)extensionPopup_->controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
         return S_OK;

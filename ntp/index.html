@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <title>新标签页</title>
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="light">
 <link rel="icon" href="data:,">
 <style>
-/* 底色必须与外壳 palette.cpp 的 content 一致（浅 #ffffff / 深 #202020），否则首屏会闪 */
+/* 底色必须与外壳 palette.cpp 的 content 一致（固定浅色 #ffffff）：外壳和网页默认底色都不随 Windows 深色模式变，
+   新标签页跟着变深就会先白后黑闪一下 */
 :root { --bg: #ffffff; --fg: #1f1f1f; --muted: #5f6368; }
-@media (prefers-color-scheme: dark) { :root { --bg: #202020; --fg: #e8e8e8; --muted: #a0a0a0; } }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); }
 body {
   font: 14px "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;

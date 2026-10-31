@@ -55,7 +55,10 @@ class GraphicsWarmup {
 };
 
 struct ChromeHit {
-  enum Kind { kNone, kTab, kTabClose, kNewTab, kBack, kForward, kReload, kStar, kMenu, kBookmark, kBookmarkOverflow, kMinimize, kMaximize, kWindowClose };
+  enum Kind { kNone, kTab, kTabClose, kNewTab, kBack, kForward, kReload, kStar, kMenu, kBookmark, kBookmarkOverflow, kMinimize, kMaximize, kWindowClose,
+              kTabAudio,      // 标签上的扬声器：点一下静音 / 取消静音
+              kPopupBlocked,  // 地址框里的「已拦截弹出窗口」
+              kBookmarkBar };  // 书签栏的空白处（右键菜单）
   Kind kind = kNone;
   int index = -1;
   bool operator==(const ChromeHit&) const = default;
@@ -70,7 +73,9 @@ struct ChromeLayout {
   float bookmarkBarHeight = 0;  // 书签栏隐藏时为 0
   std::vector<D2D1_RECT_F> tabs;
   std::vector<D2D1_RECT_F> tabCloses;
+  std::vector<D2D1_RECT_F> tabAudio;  // 播放声音或已静音的标签：扬声器位置；没有时为空矩形（可以整个为空）
   D2D1_RECT_F newTab{};
+  D2D1_RECT_F popupBlocked{};  // 当前页有被拦截的弹出窗口时的提示钮；没有时为空矩形
   D2D1_RECT_F minimize{}, maximize{}, windowClose{};
   D2D1_RECT_F back{};
   D2D1_RECT_F forward{};
@@ -92,6 +97,9 @@ struct ChromeTab {
   bool agent = false;       // 智能体标签：标题前画一个圈
   bool agentAwake = false;  // 正在执行命令：圈填实
   std::wstring favicon;
+  bool audible = false;     // 正在出声：画扬声器
+  bool muted = false;       // 已静音：扬声器加斜线
+  bool pinned = false;      // 固定：不被自动关闭，关闭钮的位置画一个钉
 };
 
 struct ChromeBookmark {
@@ -115,6 +123,10 @@ struct ChromeState {
   bool bookmarkDropIntoFolder = false;
   bool maximized = false;
   std::wstring message;  // 内容区提示，例如没有 WebView2 运行时
+  // 内容区没有可见的网页控件（启动中、建不起来、内核重连中）：这时才画内容区，
+  // 平时网页盖住内容区，只画顶部界面，悬停重绘不再清整个窗口
+  bool paintContent = true;
+  bool bookmarkBarEmpty = false;  // 书签栏开着但没有书签：画一句提示
 };
 
 class ChromePainter {
@@ -126,9 +138,10 @@ class ChromePainter {
   void SetDpi(UINT dpi);
   void Paint(const Palette& palette, const ChromeLayout& layout, const ChromeState& state);
   bool IsHardware() const;
-  // 书签栏一项的宽度（DIP，含内边距与图标）；渲染目标建好之前返回估算值
+  // 书签栏一项的宽度（DIP，含内边距与图标）；渲染目标建好之前返回估算值。按标题缓存，Relayout 不再逐项重新排版
   float MeasureBookmark(const std::wstring& title, bool folder) const;
   void ClearFaviconBitmaps() { faviconBitmaps_.clear(); }
+  void ForgetFavicon(const std::wstring& file) { faviconBitmaps_.erase(file); }
 
  private:
   HRESULT EnsureTarget();
@@ -149,7 +162,12 @@ class ChromePainter {
   void DrawPageGlyph(D2D1_POINT_2F center);
   void DrawBookmarkBar(const Palette& palette, const ChromeLayout& layout, const ChromeState& state);
   bool DrawFavicon(const std::wstring& file, D2D1_POINT_2F center, float size = 16.0f);
+  void DrawLoadingArc(D2D1_POINT_2F center);
+  void DrawSpeaker(D2D1_POINT_2F center, bool muted);
+  void DrawPin(D2D1_POINT_2F center);
+  void DrawPopupBlocked(D2D1_POINT_2F center);
   std::map<std::wstring, ComPtr<ID2D1Bitmap>> faviconBitmaps_;
+  mutable std::map<std::wstring, float> bookmarkWidths_;
   ComPtr<IWICImagingFactory> wic_;
 
   ComPtr<ID2D1Factory> factory_;
@@ -166,6 +184,7 @@ class ChromePainter {
   ComPtr<ID2D1PathGeometry> reloadArc_;
   ComPtr<ID2D1PathGeometry> reloadHead_;
   ComPtr<ID2D1PathGeometry> star_;
+  ComPtr<ID2D1PathGeometry> loadingArc_;  // 加载中：一圈淡环上的一段 100° 弧
   HWND hwnd_ = nullptr;
   RenderTargetKind kind_ = RenderTargetKind::kHardware;
   UINT dpi_ = 96;

@@ -36,6 +36,9 @@ class BookmarkStore {
   // 读入书签文件；文件不存在时得到三个空根目录。可在后台线程调用（之后只在 UI 线程用）
   bool Load(const std::wstring& file);
   bool Save();
+  // 整份文件内容：界面线程上生成（快），交给后台写盘；写出后调 MarkWritten
+  std::string Serialized() const;
+  void MarkWritten() { existed_ = true; }
   const std::wstring& File() const { return file_; }
   bool Existed() const { return existed_; }
 
@@ -57,7 +60,8 @@ class BookmarkStore {
 
   // 从 Chromium 系书签文件导入：本机书签栏为空时直接放进书签栏，否则放进书签栏里的「从 <名称> 导入」文件夹
   int Import(const std::wstring& file, const std::wstring& sourceName, std::string* error);
-  static std::vector<BookmarkImportSource> DetectImportSources();
+  static std::vector<BookmarkImportSource> DetectImportSources();  // 逐个解析统计条数：只在后台线程调用
+  static bool IsImportSourceFile(const std::wstring& file);       // 只比对已知浏览器的书签路径，不解析
   // 系统默认浏览器对应的导入源（不是 Chromium 系或没有书签文件时为空）
   static std::wstring DefaultBrowserBookmarksFile(std::wstring* name);
 
