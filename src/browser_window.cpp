@@ -401,9 +401,14 @@ void BrowserWindow::ShowFirstFrame(int showCmd) {
   }
 
   if (!options_.noActivate) {
-    // 新标签页给地址栏；带着网址启动或恢复了会话，焦点等网页建好后交给网页
-    if (const Tab* tab = ActiveTab(); tab && !tab->pendingUrl.empty()) {
-      tabs_[active_]->focusOnCreate = true;
+    // 新标签页给地址栏；带着网址启动或恢复了会话，焦点交给网页（控件可能已在首帧前建好，没建好就等建好）
+    Tab* tab = ActiveTab();
+    if (tab && (!tab->pendingUrl.empty() || !IsNewTabPageUrl(tab->url))) {
+      if (tab->controller) {
+        tab->controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+      } else {
+        tab->focusOnCreate = true;
+      }
     } else {
       SetFocus(edit_);
     }

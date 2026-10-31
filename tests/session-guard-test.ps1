@@ -32,17 +32,26 @@ function Start-Browser([string[]]$extra){
   $arguments=@('--udf',"`"$root`"",'--no-agent','--no-activate','--no-spare','--bounds','-3000,0,900,700')+$extra
   Start-Process -FilePath $Exe -ArgumentList $arguments -PassThru
 }
+$session=Join-Path $root 'Session.json'
+function Show-State([string]$label){
+  $text=if(Test-Path -LiteralPath $session){Get-Content -Raw -LiteralPath $session}else{'<missing>'}
+  $hosts=@(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" -ErrorAction SilentlyContinue|Where-Object {$_.CommandLine -like "*$(Split-Path -Leaf $root)*"}).Count
+  "[{0}] t={1:N1}s session={2} webview2Processes={3} requests={4}" -f $label,((Get-Date)-$script:started).TotalSeconds,$text,$hosts,($script:requests -join ',')
+}
 function Wait-Title([System.Diagnostics.Process]$process,[scriptblock]$accept,[int]$seconds){
   $deadline=(Get-Date).AddSeconds($seconds)
+  $report=(Get-Date).AddSeconds(5)
   while((Get-Date) -lt $deadline){
     Pump 200
     if($process.HasExited){throw ('Browser exited 0x{0:X8}' -f $process.ExitCode)}
     $process.Refresh()
     if(& $accept $process.MainWindowTitle){return $process.MainWindowTitle}
+    if((Get-Date) -gt $report){Write-Host (Show-State ('waiting title="'+$process.MainWindowTitle+'"'));$report=(Get-Date).AddSeconds(5)}
   }
+  Write-Host (Show-State 'timeout')
   throw ('Unexpected window title: "{0}" (requests: {1})' -f $process.MainWindowTitle,($script:requests -join ','))
 }
-$session=Join-Path $root 'Session.json'
+$script:started=Get-Date
 $process=$null
 try{
   $process=Start-Browser @("http://localhost:$port/")
@@ -54,8 +63,10 @@ try{
   $deadline=(Get-Date).AddSeconds(15)
   while((Get-Date) -lt $deadline -and -not ((Test-Path -LiteralPath $session) -and ((Get-Content -Raw -LiteralPath $session) -like "*localhost:$port*"))){Pump 200}
   if(-not (Test-Path -LiteralPath $session)){throw 'Session.json was not written'}
+  Write-Host (Show-State 'before kill')
   Stop-Process -Id $process.Id -Force
   $process.WaitForExit(10000)|Out-Null
+  Write-Host (Show-State 'after kill')
   'PASS popup without a gesture blocked; internal page navigation from a website blocked'
 
   $process=Start-Browser @()

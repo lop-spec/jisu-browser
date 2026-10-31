@@ -291,10 +291,13 @@ void BrowserWindow::RestoreSession() {
     restored.push_back(std::move(tab));
   }
   std::stable_partition(restored.begin(), restored.end(), [](const auto& tab) { return tab->pinned; });
-  // 空白启动：恢复的标签替换掉初始的新标签页；带网址启动：恢复的标签排在前面，新网址仍是当前标签
+  // 空白启动：恢复的标签替换掉初始的新标签页；带网址启动：恢复的标签排在前面，新网址仍是当前标签。
+  // 内核已在运行时（刚崩溃、被结束）环境回调会早于首帧到达，初始新标签页的控件可能已建好或正在建：照样替换
   const bool replaceFirst = options_.startUrl.empty() && tabs_.size() == 1 && tabs_[0]->pendingUrl.empty() &&
-                            !tabs_[0]->controller && !tabs_[0]->creating;
+                            !tabs_[0]->agent && IsNewTabPageUrl(tabs_[0]->url);
   if (replaceFirst) {
+    // 已建好的控件关掉；还在建的那个回来时找不到标签，会自己关掉
+    if (tabs_[0]->controller) tabs_[0]->controller->Close();
     tabs_.clear();
     for (auto& tab : restored) tabs_.push_back(std::move(tab));
     active_ = 0;
@@ -303,6 +306,7 @@ void BrowserWindow::RestoreSession() {
     }
     tabs_[active_]->lazy = false;
     firstTabId_ = tabs_[active_]->id;
+    CreateController(*tabs_[active_]);  // 环境已就绪就现在建；否则等环境回调
   } else {
     const uint32_t current = tabs_[active_]->id;
     tabs_.insert(tabs_.begin(), std::make_move_iterator(restored.begin()), std::make_move_iterator(restored.end()));
