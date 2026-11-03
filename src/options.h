@@ -15,6 +15,9 @@ struct Options {
   std::wstring metricsPath;        // --metrics <文件>：写启动时间线 JSON
   bool exitAfterMetrics = false;   // --exit-after-metrics：写完时间线即退出
   bool noActivate = false;         // --no-activate：显示窗口但不激活、不抢焦点
+  // --background：后台启动，不显示窗口（自动化只为智能体桥拉起浏览器时用）。进程、托盘、桥照常工作，
+  // 智能体页面一直在屏幕外宿主里执行；用户自己打开浏览器、点托盘或智能体请求交接时才显示窗口。隐含 --no-activate
+  bool background = false;
   bool hasBounds = false;          // --bounds x,y,w,h（物理像素）
   int x = 0;
   int y = 0;

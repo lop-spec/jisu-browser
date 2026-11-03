@@ -227,6 +227,7 @@ AgentBridgeConfig LoadAgentBridgeConfig(const std::wstring& file, std::string* e
     const double scale = root["rasterScale"].AsNumber();
     config.rasterScale = scale <= 0 ? 0 : (scale < 0.5 ? 0.5 : (scale > 4 ? 4 : scale));
   }
+  config.showTabs = root["showTabs"].AsBool(config.showTabs);
   config.blockAutoplay = root["blockAutoplay"].AsBool(config.blockAutoplay);
   config.blockImages = root["blockImages"].AsBool(config.blockImages);
   config.renderOnDemand = root["renderOnDemand"].AsBool(config.renderOnDemand);
@@ -576,8 +577,15 @@ void AgentBridge::OnRelayMessage(uint32_t connectionId, const std::string& text)
     Fail(connection, idJson, "Single fixed-tab mode: creating or closing tabs is disabled");
     return;
   }
-  if (cdpMethod == "Page.bringToFront" || cdpMethod == "Target.activateTarget") {
-    Reply(connection, idJson, "{}");  // 后台模式：不把标签或窗口拉到前台
+  if (cdpMethod == "Target.activateTarget") {
+    Reply(connection, idJson, "{}");  // 后台模式：内部流程触发的激活一律忽略，不把标签或窗口拉到前台
+    return;
+  }
+  if (cdpMethod == "Page.bringToFront") {
+    // 只有智能体明确调用 page.bringToFront()（Pi 的 browser action=handoff）才会到这里：需要用户登录、
+    // 过验证码、确认支付这类必须由人操作的页面，才交给用户并置前
+    host_.PresentAgentTab(connection.tabId);
+    Reply(connection, idJson, "{}");
     return;
   }
   const std::string childSession = target["sessionId"].AsString();

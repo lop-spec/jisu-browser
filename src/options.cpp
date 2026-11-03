@@ -135,6 +135,9 @@ Options ParseOptions(const wchar_t* commandLine) {
       options.exitAfterMetrics = true;
     } else if (arg == L"--no-activate") {
       options.noActivate = true;
+    } else if (arg == L"--background") {
+      options.background = true;
+      options.noActivate = true;
     } else if (arg == L"--bounds") {
       const std::wstring value = next();
       options.hasBounds = swscanf_s(value.c_str(), L"%d,%d,%d,%d", &options.x, &options.y, &options.width,

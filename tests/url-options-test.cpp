@@ -55,6 +55,12 @@ int main() {
   const Options normal = ParseOptions(L"jisu.exe --udf \"D:\\p\" https://c.example/");
   Check(!normal.singleArgument && normal.startUrl == L"https://c.example/" && normal.userDataFolder == L"D:\\p", "plain arguments");
 
+  // --background：后台启动，隐含不激活；不带它时窗口照常显示
+  const Options background = ParseOptions(L"jisu.exe --background");
+  Check(background.background && background.noActivate && background.startUrl.empty(), "--background implies --no-activate");
+  const Options visible = ParseOptions(L"jisu.exe --no-activate");
+  Check(!visible.background && visible.noActivate, "--no-activate alone still shows the window");
+
   // 截断不切开代理对
   const std::wstring emoji = L"ab\U0001F600cd";
   Check(TruncateUtf16(emoji, 3) == L"ab", "truncate before surrogate pair");
@@ -75,6 +81,6 @@ int main() {
   DeleteFileW(file.c_str());
   RemoveDirectoryW(ParentDirectory(file).c_str());
 
-  if (!failures) std::puts("PASS address-bar normalization; --single-argument; surrogate-safe truncation; background writer");
+  if (!failures) std::puts("PASS address-bar normalization; --single-argument; --background; surrogate-safe truncation; background writer");
   return failures ? 1 : 0;
 }

@@ -79,6 +79,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
     case Forward::kDone:
       return 0;
     case Forward::kHung:
+      // 自动化的后台启动不需要一个谁也看不见的备用窗口：主实例卡住就如实失败，由调用方的存活检查报告
+      if (options.background) {
+        return 0;
+      }
       // 主实例卡住时仍给用户一个能用的窗口，但不开智能体桥、不装托盘、不写会话：两边不抢 broker 邀请和会话文件
       options.secondary = true;
       options.noAgent = true;

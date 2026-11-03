@@ -36,13 +36,14 @@ class BrowserWindow : public AgentHost {
   BrowserWindow& operator=(const BrowserWindow&) = delete;
 
   bool Create(HINSTANCE instance);    // 建窗（暂不显示）与地址栏；后台读书签与设置
-  void ShowFirstFrame(int showCmd);   // 建渲染目标，显示窗口并同步画出首帧
+  void ShowFirstFrame(int showCmd);   // 建渲染目标，显示窗口并同步画出首帧（--background 时先不显示，见 RevealWindow）
   void StartEnvironment();            // 异步创建 WebView2 环境，不阻塞首帧
   bool PreTranslate(const MSG& msg);  // 地址栏回车/Esc 与外壳快捷键
 
   // AgentHost
   void LeaseAgentTab(LeaseCallback done) override;
   void ReturnAgentTab(uint32_t tabId) override;
+  void PresentAgentTab(uint32_t tabId) override;
   void SetAgentTabAwake(uint32_t tabId, bool awake) override;
   void ResumeAgentTab(uint32_t tabId) override;
   bool IsAgentTabViewed(uint32_t tabId) override;
@@ -86,6 +87,7 @@ class BrowserWindow : public AgentHost {
     // 智能体标签
     bool agent = false;
     bool leased = false;
+    bool presented = false;     // 智能体请求交接：从隐藏的智能体池搬进了标签条，租约结束时按用户是否在看决定去留
     bool agentAwake = false;
     bool suspended = false;     // 已 TrySuspend
     bool suspending = false;    // TrySuspend 进行中
@@ -144,6 +146,15 @@ class BrowserWindow : public AgentHost {
   void InstallTrayIcon();
   void WriteTrayState();
   void ExecuteTrayCommand(UINT command);
+  // 首帧：恢复会话、套用上次位置、建渲染目标、显示并画出。后台启动的窗口在第一次需要给人看时才走到这里
+  void ShowWindowFirstFrame(int showCmd, bool activate);
+  // 把窗口交给用户（后台启动后的第一次显示、托盘、用户再次打开、智能体交接）；foreground = 置前
+  void RevealWindow(bool foreground);
+  void BringToForeground();
+  void StashAgentTab(Tab& tab);        // 交接结束且用户不在看：标签退回隐藏的智能体池
+  void FinishPresentation(Tab& tab);   // 租约结束：用户正在看就归他，否则退回池里
+  void DiscardAgentTab(Tab& tab);      // 隐藏池里的智能体标签建不起来 / 内核没了：直接丢掉
+  void PublishState();                 // 标签条与隐藏池里的标签数、窗口是否显示过，写成窗口属性（测试和排查用）
   void ApplyWindowTheme();
   void OnThemeChanged();
   void UpdateEditFont();
@@ -335,7 +346,8 @@ class BrowserWindow : public AgentHost {
     std::vector<ClosedTab> closedTabs;   // 最近关闭的标签（Ctrl+Shift+T）
     std::vector<SessionTab> restoreTabs;  // 上次非正常退出时开着的标签
     bool bookmarksDirty = false;
-    bool sessionWritable = false;  // 日常主实例才写会话
+    bool sessionWanted = false;    // 日常主实例才读写会话（后台启动在窗口显示前不写，免得盖掉上次没恢复的会话）
+    bool sessionWritable = false;
     bool endingSession = false;    // 关机/注销中：之后的关窗不算正常退出，下次照样恢复
     bool recovering = false;       // 内核退出后正在重建（各窗口的标签各报一次，只处理一次）
   };
@@ -362,6 +374,13 @@ class BrowserWindow : public AgentHost {
   uint32_t envGeneration_ = 0;   // 每次重建环境加一：旧环境迟到的回调直接丢弃
   UINT appRecoverDelay_ = 0;     // 应用窗口重建退避（毫秒），成功后清零
   std::vector<std::unique_ptr<Tab>> tabs_;
+  // 智能体标签池：页面在屏幕外宿主里执行，不进标签条（agent-bridge.json 的 showTabs=true 才回到旧的可见方式）
+  std::vector<std::unique_ptr<Tab>> agentTabs_;
+  bool backgroundHidden_ = false;  // --background：窗口还没显示过
+  int revealShowCmd_ = SW_SHOWNORMAL;
+  bool revealed_ = false;          // 窗口显示过：关窗时的位置才值得记
+  bool spareWanted_ = false;       // 后台启动时先不预建备用控件，显示后补上
+  bool trayPosted_ = false;
   std::unique_ptr<Tab> spare_;
   size_t active_ = 0;
   inline static uint32_t nextTabId_ = 1;

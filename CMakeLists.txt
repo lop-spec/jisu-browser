@@ -129,6 +129,9 @@ set_tests_properties(native-popup-opener-auto-close PROPERTIES TIMEOUT 60)
 # 无手势弹窗拦截、网页跳不进内部页面、非正常退出后恢复标签、正常关闭不恢复
 add_test(NAME native-session-and-web-guards COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/session-guard-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
 set_tests_properties(native-session-and-web-guards PROPERTIES TIMEOUT 150)
+# 智能体的页面平时只在屏幕外执行：--background 不显示窗口、标签条里没有智能体标签；page.bringToFront() 才交给用户
+add_test(NAME native-agent-handoff COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/agent-handoff-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
+set_tests_properties(native-agent-handoff PROPERTIES TIMEOUT 420)
 add_executable(url-options-test tests/url-options-test.cpp src/options.cpp src/common.cpp)
 target_include_directories(url-options-test PRIVATE src)
 target_compile_definitions(url-options-test PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)

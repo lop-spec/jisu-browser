@@ -248,7 +248,7 @@ DWORD WINAPI BrowserWindow::ProfileThreadMain(void* param) {
   }
   self->LoadSettings();
   // 上次没有正常退出（崩溃、被结束、关机重启）：记下当时开着的标签，首帧前恢复
-  if (self->profile_->sessionWritable) {
+  if (self->profile_->sessionWanted) {
     std::string text;
     json::Value root;
     if (ReadFileBytes(self->SessionFile(), text) && json::Parse(text, root) && !root["clean"].AsBool(true)) {
@@ -285,10 +285,17 @@ DWORD WINAPI BrowserWindow::ProfileThreadMain(void* param) {
 bool BrowserWindow::Create(HINSTANCE instance) {
   instance_ = instance;
   profileDir_ = options_.userDataFolder;
+  // 后台启动只给日常主实例：应用窗口、测量、预热、拆出的窗口都照常显示
+  if (options_.appMode || !options_.metricsPath.empty() || options_.preheatSeconds > 0 || root_ != this) {
+    options_.background = false;
+  }
+  spareWanted_ = options_.spare;
+  if (options_.background) options_.spare = false;  // 窗口显示之前不预建备用控件
   // 会话只由日常主实例写：测量、预热、应用窗口、主实例卡住时的备用实例都不碰
   if (root_ == this) {
-    profile_->sessionWritable = !options_.appMode && !options_.secondary && options_.metricsPath.empty() &&
-                                options_.preheatSeconds <= 0 && !profileDir_.empty();
+    profile_->sessionWanted = !options_.appMode && !options_.secondary && options_.metricsPath.empty() &&
+                              options_.preheatSeconds <= 0 && !profileDir_.empty();
+    profile_->sessionWritable = profile_->sessionWanted && !options_.background;
   }
   // 书签与设置在后台读，和建窗、预热并行；首帧前汇合
   if (root_ == this) {
@@ -371,6 +378,25 @@ void BrowserWindow::ShowFirstFrame(int showCmd) {
   }
   profileLoaded_ = true;
   metrics.Mark("profileJoined");
+  if (options_.background) {
+    // 后台启动：窗口先不显示（不画首帧、不恢复会话、不套用上次位置）。进程、托盘和智能体桥照常工作，
+    // 智能体页面在屏幕外宿主里执行；用户打开浏览器、点托盘或智能体请求交接时才显示（RevealWindow）
+    backgroundHidden_ = true;
+    revealShowCmd_ = showCmd;
+    Relayout();  // 智能体页面的视口要用到网页区尺寸
+    if (ownsPrimary_ && !trayPosted_) {
+      trayPosted_ = true;
+      PostMessageW(hwnd_, kMsgInstallTray, 0, 0);
+    }
+    PublishState();
+    return;
+  }
+  ShowWindowFirstFrame(showCmd, !options_.noActivate);
+}
+
+void BrowserWindow::ShowWindowFirstFrame(int showCmd, bool activate) {
+  Metrics& metrics = Metrics::Get();
+  revealed_ = true;
   RestoreSession();  // 上次非正常退出：首帧就带上当时的标签
   // 上次关窗时的位置大小（窗口还没显示，不闪）；拔掉了那块显示器就用默认位置
   if (root_ == this) {
@@ -382,7 +408,7 @@ void BrowserWindow::ShowFirstFrame(int showCmd) {
   metrics.Mark("renderTargetCreated");
   Relayout();  // 书签读完、排版对象就绪后再排一次：首帧就带书签栏
 
-  ShowWindow(hwnd_, options_.noActivate ? SW_SHOWNOACTIVATE : showCmd);
+  ShowWindow(hwnd_, activate ? showCmd : SW_SHOWNOACTIVATE);
   metrics.Mark("windowShown");
   // 同步画出标签条、工具栏和地址栏；后台线程随后 DwmFlush，记下首帧真正上屏的时刻
   RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN);
@@ -390,7 +416,8 @@ void BrowserWindow::ShowFirstFrame(int showCmd) {
   warmup_.NotifyFirstPaint();
   firstFrameShown_ = true;
   // Register after the first frame, never in the latency-sensitive startup path.
-  if (ownsPrimary_ && !options_.appMode && options_.metricsPath.empty() && !options_.secondary) {
+  if (ownsPrimary_ && !options_.appMode && options_.metricsPath.empty() && !options_.secondary && !trayPosted_) {
+    trayPosted_ = true;
     PostMessageW(hwnd_, kMsgInstallTray, 0, 0);
   }
   if (IsZoomed(hwnd_) && !options_.appMode) {
@@ -400,7 +427,7 @@ void BrowserWindow::ShowFirstFrame(int showCmd) {
     });
   }
 
-  if (!options_.noActivate) {
+  if (activate) {
     // 新标签页给地址栏；带着网址启动或恢复了会话，焦点交给网页（控件可能已在首帧前建好，没建好就等建好）
     Tab* tab = ActiveTab();
     if (tab && (!tab->pendingUrl.empty() || !IsNewTabPageUrl(tab->url))) {
@@ -692,6 +719,8 @@ void BrowserWindow::OnControllerFailed(Tab& tab, HRESULT result) {
     const size_t index = IndexOf(tab);
     if (index < tabs_.size()) {
       CloseTab(index);
+    } else {
+      DiscardAgentTab(tab);  // 隐藏池里的；之后不能再用 tab
     }
     return;
   }
@@ -1523,14 +1552,20 @@ void BrowserWindow::LeaseAgentTab(LeaseCallback done) {
     return;
   }
   // 复用空闲的智能体标签：不在租用中、用户没在看、控件已就绪
-  for (auto& tab : tabs_) {
-    if (tab->agent && !tab->leased && !IsActive(*tab) && tab->webview && !tab->leaseDone) {
-      tab->leased = true;
-      UpdateMemoryTarget(*tab);  // 租出去干活：恢复正常内存档
-      InvalidateChrome();
-      done(tab->id, tab->webview.Get(), std::string());
-      return;
+  auto reuse = [&](std::vector<std::unique_ptr<Tab>>& list) {
+    for (auto& tab : list) {
+      if (tab->agent && !tab->leased && !IsActive(*tab) && tab->webview && !tab->leaseDone) {
+        tab->leased = true;
+        UpdateMemoryTarget(*tab);  // 租出去干活：恢复正常内存档
+        InvalidateChrome();
+        done(tab->id, tab->webview.Get(), std::string());
+        return true;
+      }
     }
+    return false;
+  };
+  if (reuse(agentTabs_) || reuse(tabs_)) {
+    return;
   }
   // 没有就新建一个后台标签（不激活），首次导航完成后交给桥
   auto tab = std::make_unique<Tab>();
@@ -1542,9 +1577,14 @@ void BrowserWindow::LeaseAgentTab(LeaseCallback done) {
   tab->title = kAgentTabTitle;
   tab->leaseDone = std::move(done);
   Tab& created = *tab;
-  tabs_.push_back(std::move(tab));
-  Relayout();
-  InvalidateChrome();
+  if (agentConfig_.showTabs) {
+    tabs_.push_back(std::move(tab));  // 旧行为：像普通后台标签一样列在标签条里
+    Relayout();
+    InvalidateChrome();
+  } else {
+    agentTabs_.push_back(std::move(tab));  // 默认：不进标签条，页面在屏幕外宿主里执行
+    PublishState();
+  }
   CreateController(created);
 }
 
@@ -1552,6 +1592,11 @@ void BrowserWindow::ReturnAgentTab(uint32_t tabId) {
   if (Tab* tab = FindTab(tabId)) {
     tab->leased = false;
     tab->agentAwake = false;
+    if (tab->presented) {
+      FinishPresentation(*tab);  // 交接过的页面：用户还在看就归他，否则退回隐藏的池
+      InvalidateChrome();
+      return;
+    }
     PlaceTab(*tab);
     UpdateMemoryTarget(*tab);  // 回池里闲着：降到低内存档
     InvalidateChrome();
@@ -1560,7 +1605,148 @@ void BrowserWindow::ReturnAgentTab(uint32_t tabId) {
 
 bool BrowserWindow::IsAgentTabViewed(uint32_t tabId) {
   const Tab* tab = FindTab(tabId);
-  return tab && IsActive(*tab) && !IsIconic(hwnd_);
+  return tab && IsActive(*tab) && !IsIconic(hwnd_) && IsWindowVisible(hwnd_);
+}
+
+// ---------------------------------------------------------------------------
+// 智能体池与交接：平时的 CDP 操作只在屏幕外宿主里执行，不进标签条、不弹窗口；
+// 只有智能体明确请求（需要用户登录、过验证码、确认）时，页面才进标签条、显示窗口并置前
+
+void BrowserWindow::PublishState() {
+  if (!hwnd_) return;
+  size_t stripAgents = 0;
+  for (const auto& tab : tabs_) {
+    if (tab->agent) ++stripAgents;
+  }
+  SetPropW(hwnd_, L"JisuBrowser.StripTabs", reinterpret_cast<HANDLE>(static_cast<uintptr_t>(tabs_.size())));
+  SetPropW(hwnd_, L"JisuBrowser.StripAgentTabs", reinterpret_cast<HANDLE>(static_cast<uintptr_t>(stripAgents)));
+  SetPropW(hwnd_, L"JisuBrowser.HiddenAgentTabs", reinterpret_cast<HANDLE>(static_cast<uintptr_t>(agentTabs_.size())));
+  SetPropW(hwnd_, L"JisuBrowser.Revealed", reinterpret_cast<HANDLE>(static_cast<uintptr_t>(backgroundHidden_ ? 0 : 1)));
+}
+
+void BrowserWindow::BringToForeground() {
+  if (!hwnd_) return;
+  if (IsIconic(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
+  // 明确的人工交接：后台进程默认没有前台权限，借当前前台线程的输入队列把窗口真正置前
+  const HWND foreground = GetForegroundWindow();
+  const DWORD self = GetCurrentThreadId();
+  const DWORD other = foreground ? GetWindowThreadProcessId(foreground, nullptr) : 0;
+  const bool attached = other && other != self && AttachThreadInput(self, other, TRUE);
+  SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+  SetWindowPos(hwnd_, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+  BringWindowToTop(hwnd_);
+  SetForegroundWindow(hwnd_);
+  if (attached) AttachThreadInput(self, other, FALSE);
+  if (GetForegroundWindow() != hwnd_) {
+    FLASHWINFO flash{sizeof(flash), hwnd_, FLASHW_ALL | FLASHW_TIMERNOFG, 3, 0};  // 置前被系统拒绝：至少让任务栏闪起来
+    FlashWindowEx(&flash);
+  }
+}
+
+// 把窗口交给用户。后台启动的窗口第一次显示时才做首帧（恢复会话、套用上次位置、建渲染目标）
+void BrowserWindow::RevealWindow(bool foreground) {
+  if (destroyed_ || !hwnd_ || options_.appMode || options_.preheatSeconds > 0) return;
+  if (backgroundHidden_) {
+    backgroundHidden_ = false;
+    profile_->sessionWritable = profile_->sessionWanted;  // 从现在起才记会话
+    if (spareWanted_) {
+      options_.spare = true;
+      SetTimer(hwnd_, kTimerSpare, 500, nullptr);
+    }
+    int showCmd = revealShowCmd_;
+    if (showCmd == SW_HIDE || showCmd == SW_MINIMIZE || showCmd == SW_SHOWMINIMIZED || showCmd == SW_SHOWMINNOACTIVE ||
+        showCmd == SW_FORCEMINIMIZE) {
+      showCmd = SW_SHOWNORMAL;
+    }
+    ShowWindowFirstFrame(showCmd, foreground);
+    if (Tab* tab = ActiveTab(); tab && tab->lazy) {
+      Activate(active_);  // 后台期间占位的新标签页现在才建网页
+    }
+    PublishState();
+  } else if (!IsWindowVisible(hwnd_)) {
+    ShowWindow(hwnd_, foreground ? SW_SHOW : SW_SHOWNOACTIVATE);
+  }
+  if (IsIconic(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
+  if (foreground) BringToForeground();
+}
+
+void BrowserWindow::PresentAgentTab(uint32_t tabId) {
+  if (destroyed_ || options_.appMode) return;
+  Tab* tab = FindTab(tabId);
+  if (!tab || !tab->agent) return;
+  size_t index = IndexOf(*tab);
+  if (index >= tabs_.size()) {
+    // 隐藏池里的页面搬进标签条（同一个控件，不重载）
+    const auto it = std::find_if(agentTabs_.begin(), agentTabs_.end(), [tab](const auto& item) { return item.get() == tab; });
+    if (it == agentTabs_.end()) return;
+    std::unique_ptr<Tab> holder = std::move(*it);
+    agentTabs_.erase(it);
+    holder->presented = true;
+    index = InsertTab(std::move(holder), tabs_.size());
+    Relayout();
+  }
+  RevealWindow(true);
+  Activate(index);  // 页面从屏幕外宿主移进主窗口；冻结的先解冻
+  PublishState();
+}
+
+// 交接结束且用户不在看：标签退回隐藏的智能体池
+void BrowserWindow::StashAgentTab(Tab& tab) {
+  const size_t index = IndexOf(tab);
+  if (index >= tabs_.size()) return;
+  const bool wasActive = index == active_;
+  std::unique_ptr<Tab> holder = std::move(tabs_[index]);
+  tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(index));
+  holder->presented = false;
+  Tab& stashed = *holder;
+  agentTabs_.push_back(std::move(holder));
+  if (tabs_.empty()) {
+    NewTab(L"", false);  // 标签条里至少留一个标签
+  }
+  if (wasActive) {
+    active_ = std::min(index, tabs_.size() - 1);
+  } else if (index < active_) {
+    --active_;
+  }
+  Relayout();
+  PlaceTab(stashed);  // 控件回到屏幕外宿主
+  UpdateMemoryTarget(stashed);
+  if (wasActive) {
+    Activate(active_);
+  } else {
+    InvalidateChrome();
+  }
+  PublishState();
+}
+
+// 租约结束（leased 已清）：用户正看着这个页面就归他（变成普通标签，不在他眼前消失），否则退回池里
+void BrowserWindow::FinishPresentation(Tab& tab) {
+  const bool viewing = IsActive(tab) && IsWindowVisible(hwnd_) && !IsIconic(hwnd_);
+  if (viewing && AdoptAgentTab(tab)) {
+    tab.presented = false;
+    PublishState();
+    return;
+  }
+  StashAgentTab(tab);
+}
+
+// 隐藏池里的智能体标签建不起来或内核没了：丢掉它，并告诉桥
+void BrowserWindow::DiscardAgentTab(Tab& tab) {
+  const auto it = std::find_if(agentTabs_.begin(), agentTabs_.end(), [&tab](const auto& item) { return item.get() == &tab; });
+  if (it == agentTabs_.end()) return;
+  std::unique_ptr<Tab> doomed = std::move(*it);
+  agentTabs_.erase(it);
+  const uint32_t id = doomed->id;
+  if (doomed->leaseDone) {
+    LeaseCallback done = std::move(doomed->leaseDone);
+    doomed->leaseDone = nullptr;
+    done(0, nullptr, "Background tab was discarded before it was ready");
+  }
+  if (bridge_) bridge_->OnAgentTabGone(id);
+  *doomed->owner = nullptr;
+  AbandonNewWindow(*doomed);
+  if (doomed->controller) doomed->controller->Close();
+  PublishState();
 }
 
 void BrowserWindow::ResumeAgentTab(uint32_t tabId) {
@@ -1609,7 +1795,10 @@ void BrowserWindow::ResumeTab(Tab& tab) {
 void BrowserWindow::SuspendIdleAgentTabs() {
   bool waiting = false;
   const ULONGLONG now = GetTickCount64();
-  for (auto& item : tabs_) {
+  std::vector<Tab*> candidates;
+  for (auto& item : agentTabs_) candidates.push_back(item.get());
+  for (auto& item : tabs_) candidates.push_back(item.get());
+  for (Tab* item : candidates) {
     Tab& tab = *item;
     if (!tab.agent || tab.agentAwake || IsActive(tab) || tab.visible || tab.suspended || tab.suspending ||
         !tab.webview) {
@@ -1969,6 +2158,11 @@ void BrowserWindow::SetTabVisible(Tab& tab, bool visible) {
 
 BrowserWindow::Tab* BrowserWindow::FindTab(uint32_t id) {
   for (auto& tab : tabs_) {
+    if (tab->id == id) {
+      return tab.get();
+    }
+  }
+  for (auto& tab : agentTabs_) {
     if (tab->id == id) {
       return tab.get();
     }
@@ -2734,7 +2928,7 @@ std::wstring BrowserWindow::AppPlacementFile() const {
 
 // 关窗时记下位置大小（工作区坐标）与是否最大化：日常窗口存进设置，应用窗口按 app-id 单独存
 void BrowserWindow::SaveWindowPlacement() {
-  if (!ownsPrimary_ || !hwnd_ || options_.hasBounds || options_.secondary || !options_.metricsPath.empty() ||
+  if (!ownsPrimary_ || !hwnd_ || !revealed_ || options_.hasBounds || options_.secondary || !options_.metricsPath.empty() ||
       options_.preheatSeconds > 0 || fullscreen_.Active() || profileDir_.empty()) {
     return;
   }
@@ -2849,7 +3043,17 @@ LRESULT BrowserWindow::OnCopyData(const COPYDATASTRUCT& data) {
     if (!url.empty()) NewTab(ToNavigableUrl(url), false);
     return kCopyDataPassiveAck;
   }
-  NewTab(url.empty() ? std::wstring() : ToNavigableUrl(url), true);
+  // 后台启动的浏览器：用户自己打开它才第一次显示窗口；占位的新标签页没人动过就直接用，不再多开一个
+  const bool wasHidden = backgroundHidden_;
+  if (wasHidden) RevealWindow(false);
+  if (wasHidden && url.empty() && !tabs_.empty()) {
+    Activate(active_);
+  } else {
+    const bool placeholder = wasHidden && tabs_.size() == 1 && !tabs_[0]->agent && tabs_[0]->pendingUrl.empty() &&
+                             IsNewTabPageUrl(tabs_[0]->url);
+    NewTab(url.empty() ? std::wstring() : ToNavigableUrl(url), true);
+    if (placeholder && tabs_.size() == 2) CloseTab(0);
+  }
   // 用户自己点了链接或图标：把窗口带到前面（发送方已调 AllowSetForegroundWindow）
   if (IsIconic(hwnd_)) {
     ShowWindow(hwnd_, SW_RESTORE);
@@ -3053,9 +3257,11 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
         // 智能体标签的 CSS 视口跟主窗口网页区一样大
         const SIZE size = AgentHostSize();
         SetWindowPos(agentHost_, nullptr, 0, 0, size.cx, size.cy, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-        for (auto& tab : tabs_) {
-          if (tab->agent && tab->controller && tab->parent == agentHost_) {
-            tab->controller->put_Bounds(AgentHostRect());
+        for (auto* list : {&tabs_, &agentTabs_}) {
+          for (auto& tab : *list) {
+            if (tab->agent && tab->controller && tab->parent == agentHost_) {
+              tab->controller->put_Bounds(AgentHostRect());
+            }
           }
         }
       }
@@ -3316,6 +3522,8 @@ void BrowserWindow::OnCreate() {
   first->id = nextTabId_++;
   first->pendingUrl = options_.startUrl.empty() ? std::wstring() : ToNavigableUrl(options_.startUrl);
   first->url = first->pendingUrl;
+  // 后台启动且没有网址：占位的新标签页等窗口显示时再建网页，后台期间不占内核资源
+  first->lazy = options_.background && first->pendingUrl.empty();
   firstTabId_ = first->id;
   tabs_.push_back(std::move(first));
   active_ = 0;
@@ -3358,7 +3566,9 @@ void BrowserWindow::ExecuteTrayCommand(UINT command) {
       PostMessageW(window->hwnd_, WM_CLOSE, 0, 0);
     }
   } else if (command == TrayIcon::kOpen || command == TrayIcon::kNewTab) {
-    if (command == TrayIcon::kNewTab) NewTab(L"");
+    const bool wasHidden = backgroundHidden_;
+    RevealWindow(false);  // 后台启动的浏览器：用户点托盘才第一次显示窗口，占位的新标签页就是他要的新标签页
+    if (command == TrayIcon::kNewTab && !wasHidden) NewTab(L"");
     ShowWindow(hwnd_, IsIconic(hwnd_) ? SW_RESTORE : SW_SHOW);
     SetForegroundWindow(hwnd_);
   }
@@ -3392,17 +3602,19 @@ void BrowserWindow::OnDestroy() {
   }
   const bool hadBridge = bridge_ != nullptr;
   bridge_.reset();  // 先断开所有智能体连接，再关控件
-  for (auto& tab : tabs_) {
-    *tab->owner = nullptr;
-    StopMedia(*tab);
-    if (tab->leaseDone) {
-      LeaseCallback done = std::move(tab->leaseDone);
-      tab->leaseDone = nullptr;
-      done(0, nullptr, "Browser is closing");
-    }
-    AbandonNewWindow(*tab);
-    if (tab->controller) {
-      tab->controller->Close();
+  for (auto* list : {&tabs_, &agentTabs_}) {
+    for (auto& tab : *list) {
+      *tab->owner = nullptr;
+      StopMedia(*tab);
+      if (tab->leaseDone) {
+        LeaseCallback done = std::move(tab->leaseDone);
+        tab->leaseDone = nullptr;
+        done(0, nullptr, "Browser is closing");
+      }
+      AbandonNewWindow(*tab);
+      if (tab->controller) {
+        tab->controller->Close();
+      }
     }
   }
   if (spare_ && spare_->controller) {
@@ -3410,6 +3622,7 @@ void BrowserWindow::OnDestroy() {
     spare_->controller->Close();
   }
   tabs_.clear();
+  agentTabs_.clear();
   spare_.reset();
   environment_.Reset();
   if (agentHost_) {
@@ -3423,6 +3636,10 @@ void BrowserWindow::OnDestroy() {
   }
   tray_.Remove();
   RemovePropW(hwnd_, L"JisuBrowser.TrayRegistered");
+  for (const wchar_t* name : {L"JisuBrowser.StripTabs", L"JisuBrowser.StripAgentTabs", L"JisuBrowser.HiddenAgentTabs",
+                              L"JisuBrowser.Revealed"}) {
+    RemovePropW(hwnd_, name);
+  }
   WriteTrayState();
   RemovePropW(hwnd_, kProfileProp);
   liveWindows_.erase(std::remove(liveWindows_.begin(), liveWindows_.end(), this), liveWindows_.end());
@@ -3605,6 +3822,7 @@ void BrowserWindow::Relayout() {
       MoveWindow(edit_, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, TRUE);
     }
   }
+  PublishState();
 }
 
 void BrowserWindow::LayoutBookmarkBar() {

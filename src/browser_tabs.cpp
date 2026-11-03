@@ -365,6 +365,12 @@ void BrowserWindow::OnProcessFailed(uint32_t id, COREWEBVIEW2_PROCESS_FAILED_KIN
             }
           }
         }
+        // 隐藏池里的智能体标签：控件随内核失效，连同桥上的连接一起丢掉，内核回来后 Pi 重新租
+        std::vector<uint32_t> pooled;
+        for (auto& tab : window->agentTabs_) pooled.push_back(tab->id);
+        for (const uint32_t pooledId : pooled) {
+          if (Tab* agent = window->FindTab(pooledId)) window->DiscardAgentTab(*agent);
+        }
         window->message_ = L"网页内核已退出，正在重新连接…";
         window->InvalidateChrome();
       }

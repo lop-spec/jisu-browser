@@ -52,6 +52,8 @@ struct AgentBridgeConfig {
   // 下一条命令前先解冻并等页面把积下的任务跑完；0 = 不冻结。比 TrySuspend 便宜（不回收内存）
   DWORD pageFreezeMs = 1000;
   std::vector<std::string> blockedUrls;  // 智能体会话上的 Network.setBlockedURLs 模式（广告、统计）
+  // 智能体标签默认不进标签条，页面在屏幕外宿主里执行；true = 回到旧行为：像普通后台标签一样列在标签条里
+  bool showTabs = false;
 };
 
 // 读取 agent-bridge.json：{"broker": "...", "tokenFile": "...", "pollMs": 1000, "graceMs": 1500,
@@ -73,6 +75,9 @@ class AgentHost {
   virtual void ResumeAgentTab(uint32_t tabId) = 0;
   // 用户正在主窗口里看这个标签（这时不冻结页面）
   virtual bool IsAgentTabViewed(uint32_t tabId) = 0;
+  // 智能体明确要求把页面交给用户（Page.bringToFront）：标签进标签条、显示浏览器窗口并置前。
+  // 只在需要用户认证或操作时才会被调用，平时的 CDP 操作不弹窗口
+  virtual void PresentAgentTab(uint32_t tabId) = 0;
   virtual std::string AgentTabInfo(uint32_t tabId) = 0;  // chrome.tabs.Tab 风格的 JSON
 };
 

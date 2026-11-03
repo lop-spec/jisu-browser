@@ -68,7 +68,7 @@ try {
   } else {
     [uint32]$exit = 0
     [JisuHiddenDesktop]::GetExitCodeProcess($pi.hProcess, [ref]$exit) | Out-Null
-    $code = [int]$exit
+    $code = [BitConverter]::ToInt32([BitConverter]::GetBytes($exit), 0)  # NTSTATUS-style codes (0xC0000005) do not fit [int] casts
   }
   [JisuHiddenDesktop]::CloseHandle($pi.hThread) | Out-Null
   [JisuHiddenDesktop]::CloseHandle($pi.hProcess) | Out-Null

@@ -127,6 +127,7 @@ void BrowserWindow::FinishTabDrag(POINT point) {
   options.preheatSeconds = 0;
   // 用户亲手拖出来的窗口要到前台：主窗口当初是后台（--no-activate）启动的也一样
   options.noActivate = false;
+  options.background = false;
   auto window = std::make_unique<BrowserWindow>(options, warmup_, root_);
   window->environment_ = environment_;
   window->profileConfigured_ = true;  // Reuse the already-configured shared WebView profile.
