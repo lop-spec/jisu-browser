@@ -39,15 +39,16 @@ public static class JisuTestWin {
     return found;
   }
   // visible top-level windows of the process that sit on a monitor (the off-screen agent host does not count)
-  public static string OnScreenWindows(uint pid) {
+  public static string OnScreenWindows(uint[] pids) {
     var rows = new List<string>();
+    var wanted = new HashSet<uint>(pids);
     EnumWindows((h, l) => {
       uint owner; GetWindowThreadProcessId(h, out owner);
-      if (owner != pid || !IsWindowVisible(h)) return true;
+      if (!wanted.Contains(owner) || !IsWindowVisible(h)) return true;
       RECT r; GetWindowRect(h, out r);
       if (MonitorFromRect(ref r, 0) == IntPtr.Zero) return true;
       var cls = new StringBuilder(64); GetClassNameW(h, cls, 64);
-      rows.Add(cls.ToString());
+      rows.Add(owner + ":" + cls.ToString());
       return true;
     }, IntPtr.Zero);
     return string.Join(",", rows);
@@ -164,7 +165,8 @@ function Command([int]$id,[int]$tab,[string]$method,[string]$params=''){
 }
 function Start-Browser([string]$config,[string[]]$extra){
  $script:profileCount++
- $profileDir=Join-Path $root ('profile'+$script:profileCount)
+ $script:profileDir=Join-Path $root ('profile'+$script:profileCount)
+ $profileDir=$script:profileDir
  New-Item -ItemType Directory -Path $profileDir|Out-Null
  [IO.File]::WriteAllText((Join-Path $profileDir 'jisu-settings.json'),'{"bookmarkBar":false,"importedDefaultBrowser":true}')
  $configFile=Join-Path $root 'agent-bridge.json'
@@ -179,13 +181,22 @@ function Stop-Browser{
  if($script:process -and -not $script:process.HasExited){Stop-Process -Id $script:process.Id -Force;$script:process.WaitForExit(10000)|Out-Null}
  $script:process=$null;$script:socket=$null;$script:receive=$null
 }
+# The browser itself plus every WebView2 process that belongs to its profile folder: none may own a window on a monitor
+function ProcessTree{
+ $ids=New-Object System.Collections.Generic.List[uint32]
+ $ids.Add([uint32]$script:process.Id)
+ foreach($p in @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" -ErrorAction SilentlyContinue)){
+  if($p.CommandLine -and $p.CommandLine.Contains($script:profileDir)){$ids.Add([uint32]$p.ProcessId)}
+ }
+ $ids.ToArray()
+}
 function State{
  [pscustomobject]@{
   Strip=[JisuTestWin]::Prop($script:hwnd,'JisuBrowser.StripTabs')
   StripAgents=[JisuTestWin]::Prop($script:hwnd,'JisuBrowser.StripAgentTabs')
   Hidden=[JisuTestWin]::Prop($script:hwnd,'JisuBrowser.HiddenAgentTabs')
   Visible=[JisuTestWin]::Visible($script:hwnd)
-  OnScreen=[JisuTestWin]::OnScreenWindows([uint32]$script:process.Id)
+  OnScreen=[JisuTestWin]::OnScreenWindows([uint32[]]@(ProcessTree))
  }
 }
 # Invitation -> lease -> handshake, then attach + navigate. Returns the leased tab id.
