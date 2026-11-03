@@ -16,9 +16,10 @@ function New-Package([string]$name,[string]$exe,[string]$page){
  [IO.File]::WriteAllText("$dir/jisu-browser/ntp/stable.html",'same in both packages')
  [IO.File]::WriteAllText("$dir/jisu-browser/media/engine.bin",'same engine')
  [IO.File]::WriteAllText("$dir/ci-smoke.json",'{"version":"9.9.9","commit":"0123456789abcdef0123456789abcdef01234567"}')
- $lines=Get-ChildItem -Recurse -File "$dir/jisu-browser"|Sort-Object FullName|ForEach-Object{
-  $rel=$_.FullName.Substring($dir.Length+1).Replace('\','/')
-  '{0}  {1,9}  {2}' -f (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant(),$_.Length,$rel}
+ # Explicit relative names: the CI runner's TEMP is an 8.3 short path, so prefix-length arithmetic on FullName is wrong there.
+ $lines='jisu-browser/jisu-browser.exe','jisu-browser/media/engine.bin','jisu-browser/ntp/index.html','jisu-browser/ntp/stable.html'|ForEach-Object{
+  $file=Join-Path $dir $_
+  '{0}  {1,9}  {2}' -f (Get-FileHash -Algorithm SHA256 $file).Hash.ToLowerInvariant(),(Get-Item $file).Length,$_}
  $lines|Set-Content -Path "$dir/SHA256SUMS.txt" -Encoding utf8
  $dir
 }
