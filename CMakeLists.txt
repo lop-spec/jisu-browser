@@ -156,6 +156,8 @@ target_compile_definitions(fullscreen-window-test PRIVATE UNICODE _UNICODE NOMIN
 target_link_libraries(fullscreen-window-test PRIVATE user32)
 add_test(NAME native-fullscreen-window COMMAND fullscreen-window-test)
 add_test(NAME native-atomic-exe-swap-ps51 COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/atomic-exe-swap-test.ps1")
+add_test(NAME native-update-from-ci-package COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/update-from-ci-package-test.ps1")
+set_tests_properties(native-update-from-ci-package PROPERTIES TIMEOUT 120)
 add_executable(tray-icon-test tests/tray-icon-test.cpp src/tray_icon.cpp)
 target_include_directories(tray-icon-test PRIVATE src)
 target_compile_definitions(tray-icon-test PRIVATE UNICODE _UNICODE NOMINMAX)

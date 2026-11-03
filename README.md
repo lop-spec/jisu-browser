@@ -142,6 +142,14 @@ Pi 的 `browser` 工具走 Playwright MCP 的扩展模式：MCP 起一个本机 
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\install.ps1 -Package <运行包里的 jisu-browser 目录> -ShortcutDir <快捷方式目录> -StartMenu -AgentTokenFile <Pi 的 extension-auth.json> -YieldTo thorium.exe
 ```
 
+浏览器正在运行时更新（每次发版都是这种情况）：下载并解压 CI 产物，再
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\update-from-ci-package.ps1 -Package <解压后的目录> [-SetMediumLabel]
+```
+
+先把整个包按 `SHA256SUMS.txt` 核对完，再只换内容有变化的文件：旧文件备份到 `_历史版本\`（`<原名>.bak-<时间>-<标签>`，读回哈希），再用 File.Replace 换入，不结束任何进程，已开的窗口重启后才是新版本；播放器正在播放时整体放弃，任何一步失败都停下。有变化时在 `%LOCALAPPDATA%\JisuBrowser\update-<版本>-<提交>.json` 留回执；`-SetMediumLabel` 见上文（本机其余进程都是 High 时不要加）。
+
 程序装到 `%LOCALAPPDATA%\Programs\JisuBrowser`，覆盖前旧程序、旧 `ntp\` 与媒体组件留在 `_历史版本\`；新写的智能体配置默认指向 18774；目标程序正在运行时脚本会停下，不会结束它。新写的智能体配置只包含 `broker`、`tokenFile`、`yieldTo`，省电项跟随程序默认值；已有配置默认保留，只有 `-ForceAgentConfig` 才备份并重写。
 
 ## 智能体 CPU 对比
