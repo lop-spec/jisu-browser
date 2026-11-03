@@ -150,6 +150,7 @@ class BrowserWindow : public AgentHost {
   void ShowWindowFirstFrame(int showCmd, bool activate);
   // 把窗口交给用户（后台启动后的第一次显示、托盘、用户再次打开、智能体交接）；foreground = 置前
   void RevealWindow(bool foreground);
+  void EnableVisibleFeatures();        // 后台启动的浏览器第一次有了可见窗口：开始记会话、补上备用控件
   void BringToForeground();
   void StashAgentTab(Tab& tab);        // 交接结束且用户不在看：标签退回隐藏的智能体池
   void FinishPresentation(Tab& tab);   // 租约结束：用户正在看就归他，否则退回池里
@@ -379,6 +380,7 @@ class BrowserWindow : public AgentHost {
   bool backgroundHidden_ = false;  // --background：窗口还没显示过
   int revealShowCmd_ = SW_SHOWNORMAL;
   bool revealed_ = false;          // 窗口显示过：关窗时的位置才值得记
+  bool revealRequested_ = false;   // 首帧之前就有人要求显示窗口（用户点开、链接转发）：首帧直接显示，不再隐藏
   bool spareWanted_ = false;       // 后台启动时先不预建备用控件，显示后补上
   bool trayPosted_ = false;
   std::unique_ptr<Tab> spare_;

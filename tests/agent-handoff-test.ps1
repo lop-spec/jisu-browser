@@ -141,7 +141,8 @@ function Wait-For([scriptblock]$condition,[string]$what,[int]$seconds=25){
   Pump 100
   if($script:process -and $script:process.HasExited){throw ('Browser exited 0x{0:X8} while waiting for: {1}' -f $script:process.ExitCode,$what)}
  }
- throw "Timed out waiting for: $what"
+ $detail=if($script:hwnd -ne [IntPtr]::Zero -and $script:process){$s=State;"strip=$($s.Strip) stripAgents=$($s.StripAgents) hidden=$($s.Hidden) visible=$($s.Visible) pages=[$($script:pages -join ',')]"}else{'no browser'}
+ throw "Timed out waiting for: $what ($detail)"
 }
 function Send-Relay([string]$json){
  $bytes=[Text.Encoding]::UTF8.GetBytes($json)

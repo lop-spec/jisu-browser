@@ -378,7 +378,7 @@ void BrowserWindow::ShowFirstFrame(int showCmd) {
   }
   profileLoaded_ = true;
   metrics.Mark("profileJoined");
-  if (options_.background) {
+  if (options_.background && !revealRequested_) {
     // 后台启动：窗口先不显示（不画首帧、不恢复会话、不套用上次位置）。进程、托盘和智能体桥照常工作，
     // 智能体页面在屏幕外宿主里执行；用户打开浏览器、点托盘或智能体请求交接时才显示（RevealWindow）
     backgroundHidden_ = true;
@@ -391,7 +391,14 @@ void BrowserWindow::ShowFirstFrame(int showCmd) {
     PublishState();
     return;
   }
-  ShowWindowFirstFrame(showCmd, !options_.noActivate);
+  if (options_.background) {
+    EnableVisibleFeatures();  // 首帧之前就被要求显示（用户抢在前面点开了）：直接显示出来
+  }
+  ShowWindowFirstFrame(showCmd, revealRequested_ || !options_.noActivate);
+  if (options_.background) {
+    if (Tab* tab = ActiveTab(); tab && tab->lazy) Activate(active_);
+    PublishState();
+  }
 }
 
 void BrowserWindow::ShowWindowFirstFrame(int showCmd, bool activate) {
@@ -1646,13 +1653,13 @@ void BrowserWindow::BringToForeground() {
 // 把窗口交给用户。后台启动的窗口第一次显示时才做首帧（恢复会话、套用上次位置、建渲染目标）
 void BrowserWindow::RevealWindow(bool foreground) {
   if (destroyed_ || !hwnd_ || options_.appMode || options_.preheatSeconds > 0) return;
+  if (options_.background && !backgroundHidden_ && !revealed_) {
+    revealRequested_ = true;  // ShowFirstFrame 还没跑到：记下来，首帧直接显示
+    return;
+  }
   if (backgroundHidden_) {
     backgroundHidden_ = false;
-    profile_->sessionWritable = profile_->sessionWanted;  // 从现在起才记会话
-    if (spareWanted_) {
-      options_.spare = true;
-      SetTimer(hwnd_, kTimerSpare, 500, nullptr);
-    }
+    EnableVisibleFeatures();
     int showCmd = revealShowCmd_;
     if (showCmd == SW_HIDE || showCmd == SW_MINIMIZE || showCmd == SW_SHOWMINIMIZED || showCmd == SW_SHOWMINNOACTIVE ||
         showCmd == SW_FORCEMINIMIZE) {
@@ -1668,6 +1675,14 @@ void BrowserWindow::RevealWindow(bool foreground) {
   }
   if (IsIconic(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
   if (foreground) BringToForeground();
+}
+
+void BrowserWindow::EnableVisibleFeatures() {
+  profile_->sessionWritable = profile_->sessionWanted;  // 从现在起才记会话
+  if (spareWanted_) {
+    options_.spare = true;
+    SetTimer(hwnd_, kTimerSpare, 500, nullptr);
+  }
 }
 
 void BrowserWindow::PresentAgentTab(uint32_t tabId) {
@@ -3044,7 +3059,7 @@ LRESULT BrowserWindow::OnCopyData(const COPYDATASTRUCT& data) {
     return kCopyDataPassiveAck;
   }
   // 后台启动的浏览器：用户自己打开它才第一次显示窗口；占位的新标签页没人动过就直接用，不再多开一个
-  const bool wasHidden = backgroundHidden_;
+  const bool wasHidden = backgroundHidden_ || (options_.background && !revealed_);
   if (wasHidden) RevealWindow(false);
   if (wasHidden && url.empty() && !tabs_.empty()) {
     Activate(active_);
@@ -3566,7 +3581,7 @@ void BrowserWindow::ExecuteTrayCommand(UINT command) {
       PostMessageW(window->hwnd_, WM_CLOSE, 0, 0);
     }
   } else if (command == TrayIcon::kOpen || command == TrayIcon::kNewTab) {
-    const bool wasHidden = backgroundHidden_;
+    const bool wasHidden = backgroundHidden_ || (options_.background && !revealed_);
     RevealWindow(false);  // 后台启动的浏览器：用户点托盘才第一次显示窗口，占位的新标签页就是他要的新标签页
     if (command == TrayIcon::kNewTab && !wasHidden) NewTab(L"");
     ShowWindow(hwnd_, IsIconic(hwnd_) ? SW_RESTORE : SW_SHOW);
