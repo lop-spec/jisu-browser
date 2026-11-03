@@ -10,6 +10,14 @@ C++20 + Win32 + 官方 WebView2 SDK。标签条、工具栏、书签栏用 Direc
 
 图标由 `res/make-icon.mjs` 生成（`node res/make-icon.mjs` 重写 `res/app.ico`）。
 
+门禁是 `ctest`（标签布局、真实绘制、书签与标签保护，以及会话恢复、弹窗拦截、标签拖拽、应用窗口这几个带窗口的测试）。在正在使用的机器上本地复现带窗口的测试，用 `tools/run-on-hidden-desktop.ps1` 把整条进程链（测试程序、浏览器、WebView2 子进程）放进一个从不显示的私有桌面：屏幕和任务栏上什么都不出现，也抢不到键盘焦点。
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\run-on-hidden-desktop.ps1 -OutputFile out.txt -CommandLine "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\session-guard-test.ps1 -Exe <jisu-browser.exe>"
+```
+
+退出码就是被测命令的退出码，超时（`-TimeoutSeconds`，默认 300）会结束被测进程并返回 124；`-OutputFile` 收集命令的标准输出和错误输出（隐藏进程没有控制台）。
+
 ## 运行
 
 `jisu-browser.exe [网址] [选项]`
