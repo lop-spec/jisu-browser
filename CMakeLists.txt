@@ -133,6 +133,9 @@ set_tests_properties(native-session-and-web-guards PROPERTIES TIMEOUT 150)
 # 智能体的页面平时只在屏幕外执行：--background 不显示窗口、标签条里没有智能体标签；page.bringToFront() 才交给用户
 add_test(NAME native-agent-handoff COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/agent-handoff-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
 set_tests_properties(native-agent-handoff PROPERTIES TIMEOUT 420)
+# Cookie 守卫：真实 WebView2 的 cookie 库里，dryRun 只算不删、关掉 dryRun 后最早的 23 个对话单元被回收、固定名字的 cookie 与最新 7 个单元保留、enabled=false 生效
+add_test(NAME native-cookie-guard COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/cookie-guard-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
+set_tests_properties(native-cookie-guard PROPERTIES TIMEOUT 240)
 add_executable(url-options-test tests/url-options-test.cpp src/options.cpp src/common.cpp)
 target_include_directories(url-options-test PRIVATE src)
 target_compile_definitions(url-options-test PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)

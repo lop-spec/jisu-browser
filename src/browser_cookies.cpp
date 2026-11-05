@@ -22,7 +22,9 @@ constexpr size_t kStatusSites = 12;
 
 void BrowserWindow::StartCookieGuard() {
   if (destroyed_ || options_.appMode || !hwnd_) return;
-  SetTimer(hwnd_, kTimerCookieGuard, kFirstCheckMs, nullptr);
+  std::string problem;
+  const CookieGuardConfig config = LoadCookieGuardConfig(problem);
+  SetTimer(hwnd_, kTimerCookieGuard, std::min<UINT>(kFirstCheckMs, static_cast<UINT>(config.intervalSeconds) * 1000u), nullptr);
 }
 
 ComPtr<ICoreWebView2> BrowserWindow::AnyLiveWebView() const {
