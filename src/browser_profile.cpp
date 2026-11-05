@@ -18,6 +18,7 @@ void BrowserWindow::ConfigureProfile(Tab& tab) {
     autofill->put_IsGeneralAutofillEnabled(TRUE);
   }
   if (!options_.metricsPath.empty() || options_.preheatSeconds > 0) return;
+  StartCookieGuard();  // 内核重建后 ConfigureProfile 会再来一次，定时器重新排即可
   // extensions.json 只读一次：内核退出重建后在新内核里重装同一批扩展，不重复加条目
   if (!extensionsConfigLoaded_) {
     std::string text;

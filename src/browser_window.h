@@ -5,6 +5,7 @@
 #include "agent_bridge.h"
 #include "bookmarks.h"
 #include "common.h"
+#include "cookie_policy.h"
 #include "graphics.h"
 #include "favicons.h"
 #include "file_writer.h"
@@ -330,6 +331,14 @@ class BrowserWindow : public AgentHost {
   void StartExtensions();
   void FlushForEndSession();
 
+  // Cookie 守卫（browser_cookies.cpp）：站点 cookie 超限时回收最早的带 ID 一次性 cookie，策略见 cookie_policy.h
+  static constexpr UINT_PTR kTimerCookieGuard = 13;
+  void StartCookieGuard();
+  void RunCookieGuard();
+  CookieGuardConfig LoadCookieGuardConfig(std::string& problem) const;
+  ComPtr<ICoreWebView2> AnyLiveWebView() const;
+  void WriteCookieGuardStatus(const CookieGuardConfig& config, const CookiePlan& plan, size_t total, size_t deleted, const std::string& note);
+
   void MaybeWriteMetrics();
   void WriteMetrics(bool forced);
 
@@ -401,6 +410,9 @@ class BrowserWindow : public AgentHost {
   bool extensionsConfigLoaded_ = false;  // extensions.json 只读一次：内核重建后重装扩展不重复加条目
   bool extensionsStarted_ = false;       // 首个页面加载完才开始装扩展，不和首屏抢
   bool extensionStatusQueued_ = false;   // 扩展状态合并成一次写
+  bool cookieGuardRunning_ = false;      // 一轮 cookie 检查进行中（回调没回来超过一分钟就当丢了，重来）
+  ULONGLONG cookieGuardStartedAt_ = 0;
+  uint64_t cookieEvictedTotal_ = 0;      // 本进程累计回收数，写进 cookie-guard-status.json
   std::string lastToolbarState_;         // 工具栏状态没变就不再写文件
   HWND chromeTooltip_ = nullptr;         // 标签与图标按钮的悬停提示
   ChromeHit tooltipHit_;

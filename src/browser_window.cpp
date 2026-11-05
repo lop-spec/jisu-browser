@@ -3490,6 +3490,10 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
         StartExtensions();
         return 0;
       }
+      if (wParam == kTimerCookieGuard) {
+        RunCookieGuard();
+        return 0;
+      }
       break;
     case WM_SETTINGCHANGE:
       if (lParam && wcscmp(reinterpret_cast<const wchar_t*>(lParam), L"ImmersiveColorSet") == 0) {
@@ -3600,7 +3604,7 @@ void BrowserWindow::OnDestroy() {
     SaveSession(!profile_->endingSession, true);
   }
   FlushBookmarkSave();
-  for (const UINT_PTR timer : {kTimerTrayRetry, kTimerSession, kTimerBookmarks, kTimerRecover, kTimerExtensions}) {
+  for (const UINT_PTR timer : {kTimerTrayRetry, kTimerSession, kTimerBookmarks, kTimerRecover, kTimerExtensions, kTimerCookieGuard}) {
     KillTimer(hwnd_, timer);
   }
   tray_.SetExiting();

@@ -94,6 +94,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\run-on-hidden-desktop.
 - 安装清单写在用户资料目录的 `extensions.json`；指定 `removeUnlisted: true` 后，启动时会通过正式 API 移除未列出的扩展，结果在 `extensions-status.json` 与 `extensions-cleanup.json`。
 - 开启 WebView2 原生密码保存和自动填充。但 SDK 没有跨浏览器密码导入接口；不会解密或直接搬运 `Login Data`、Cookie、登录会话或身份验证器种子。已有账号要在极速里登录；Authenticator 的保险库迁移需由用户通过其正式导入流程完成。
 
+## Cookie 守卫
+
+Chromium 内核对每个站点（eTLD+1）最多留 180 个 cookie，满了一次按最久没用的清掉 30 个，不分登录与否。网页模型桥每开一个临时对话会留下 `conv_key_<uuid>`、`history_off_<uuid>` 两个持久 cookie，累积到 180 就会把登录 cookie 一起挤掉。外壳因此自己守着：
+
+- 日常实例内核就绪 20 秒后查第一次，之后每 5 分钟用 WebView2 的 CookieManager 取全部 cookie，按站点（eTLD+1，内置常见两段式后缀）计数；单站超过 `maxPerSite`（默认 20）就回收**最早的带 ID 的一次性 cookie**，直到不超或没有可回收的。
+- 「带 ID」= 名字里有 UUID、16 位以上十六进制或 8 位以上纯数字，同类至少 3 个不同 ID 才算累积；同一个 ID 的全部 cookie 作为一个单元一起回收。**固定名字的 cookie（登录、偏好、风控）一个不动**，名字含 session/token/auth/login/passport/jwt/csrf/sso/credential/secret 的不动，会话 cookie 不动，有成员不符合条件的单元整体不动；最新的 `keepUnits`（默认 10）个单元一定保留，正在进行的对话要用。
+- WebView2 不提供 cookie 的创建时间，「最早」用过期时间近似：同一类 cookie 寿命相同，先过期的就是最早建的。
+- 因为基础 cookie 不动，上限是触发线、不是硬顶：chatgpt.com 自带约 31 个基础 cookie，稳态是 31 + 最新 10 个对话 × 2 ≈ 51。其余站点没有累积型 cookie，实际不受影响（2026-11-05 本机 609 个 cookie 实测只有 chatgpt.com 会被回收）。
+- 每轮最多删 500 个，余下留给下一轮；应用窗口（`--app`）、测量和预热运行不启用。
+
+配置 `<用户数据目录>cookie-guard.json`（没有就用默认值，每轮重读，改了不用重启）：`{"enabled":true,"dryRun":false,"maxPerSite":20,"keepUnits":10,"intervalSeconds":300}`；`dryRun` 只算不删，`maxPerSite` 为 0 或 `enabled` 为 false 即关闭。每轮结果写 `<用户数据目录>cookie-guard-status.json`（站点计数、计划数、实际回收数、累计回收数，不含 cookie 名称或值）。策略是纯逻辑的 `src/cookie_policy.h`，用例在 `tests/cookie-policy-test.cpp`。
+
 ## 智能体桥（CDP）
 
 Pi 的 `browser` 工具走 Playwright MCP 的扩展模式：MCP 起一个本机 relay，经本机 broker（`127.0.0.1:18773`）发连接邀请，由浏览器里的扩展连上 relay 并用 `chrome.debugger` 转发 CDP。极速浏览器在外壳里原生实现扩展这一侧（`src/agent_bridge.cpp`），协议与 Pi 改版扩展一致，Pi 侧不用改：

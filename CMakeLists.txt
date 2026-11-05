@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(jisu_browser VERSION 0.4.1 LANGUAGES CXX RC)
+project(jisu_browser VERSION 0.4.2 LANGUAGES CXX RC)
 
 if(NOT MSVC)
   message(FATAL_ERROR "只支持 MSVC 构建（GitHub Actions windows-latest）")
@@ -53,6 +53,7 @@ add_executable(jisu-browser WIN32
   src/browser_tabs.cpp
   src/browser_chrome.cpp
   src/browser_profile.cpp
+  src/browser_cookies.cpp
   src/browser_history.cpp
   src/browser_media.cpp
   src/history.cpp
@@ -171,6 +172,10 @@ add_test(NAME native-tray-menu-lifecycle COMMAND tray-icon-test)
 add_executable(tab-policy-test tests/tab-policy-test.cpp)
 target_include_directories(tab-policy-test PRIVATE src)
 add_test(NAME native-tab-policy COMMAND tab-policy-test)
+add_executable(cookie-policy-test tests/cookie-policy-test.cpp)
+target_include_directories(cookie-policy-test PRIVATE src)
+target_compile_options(cookie-policy-test PRIVATE /utf-8 /EHsc)
+add_test(NAME native-cookie-policy COMMAND cookie-policy-test)
 add_executable(menu-icons-test tests/menu-icons-test.cpp src/menu_icons.cpp)
 target_include_directories(menu-icons-test PRIVATE src)
 target_compile_definitions(menu-icons-test PRIVATE UNICODE _UNICODE NOMINMAX)
