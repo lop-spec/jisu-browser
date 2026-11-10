@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$Exe)
+param([Parameter(Mandatory)][string]$Exe,[switch]$DownloadBaseline)
 $ErrorActionPreference='Stop'
 # CTest is launched by pwsh on CI; PS 5.1 must not inherit PS 7-only modules.
 $env:PSModulePath=(Join-Path $PSHOME 'Modules')+';'+(Join-Path $env:ProgramFiles 'WindowsPowerShell/Modules')
@@ -9,7 +9,12 @@ Import-Module Microsoft.PowerShell.Utility,Microsoft.PowerShell.Management
 #   phase 2 (visible window, default): agent tabs stay out of the tab strip, the pool is reused, a hand-off page
 #           the user is not looking at goes back to the pool
 #   phase 3 (showTabs=true): the old behaviour, agent tabs listed in the strip
-Add-Type -TypeDefinition @'
+$compiler=New-Object CodeDom.Compiler.CompilerParameters
+$compiler.GenerateInMemory=$true
+[void]$compiler.ReferencedAssemblies.Add('System.dll')
+[void]$compiler.ReferencedAssemblies.Add('System.Core.dll')
+$compiler.TempFiles=New-Object CodeDom.Compiler.TempFileCollection([IO.Path]::GetTempPath(),$false)
+Add-Type -CompilerParameters $compiler -TypeDefinition @'
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -76,6 +81,7 @@ $relayPort=$brokerPort+1
 $pagePort=$brokerPort+2
 [IO.File]::WriteAllText((Join-Path $root 'auth.json'),('{"token":"'+$token+'"}'))
 $profileCount=0
+$downloadName='jisu-agent-'+[guid]::NewGuid().ToString('N')+'.txt'
 
 $broker=New-Object Net.HttpListener;$broker.Prefixes.Add("http://127.0.0.1:$brokerPort/");$broker.Start()
 $relay=New-Object Net.HttpListener;$relay.Prefixes.Add("http://127.0.0.1:$relayPort/");$relay.Start()
@@ -115,7 +121,10 @@ function Pump([int]$milliseconds){
   if($script:pageTask.Wait(10)){
    $context=$script:pageTask.Result;$script:pageTask=$page.GetContextAsync()
    $script:pages.Add($context.Request.Url.AbsolutePath)
-   Reply-Text $context '<!doctype html><title>agent-page</title><p>agent</p>' 'text/html'
+   if($context.Request.Url.AbsolutePath -eq '/agent-download'){
+    $context.Response.Headers.Add('Content-Disposition','attachment; filename="'+$downloadName+'"')
+    Reply-Text $context 'agent-download-fixture' 'application/octet-stream'
+   }else{Reply-Text $context '<!doctype html><title>agent-page</title><p>agent</p>' 'text/html'}
   }
   if($script:relayTask.Wait(10)){
    $context=$script:relayTask.Result;$script:relayTask=$relay.GetContextAsync()
@@ -232,6 +241,16 @@ try{
  if($s.Strip -ne 1 -or $s.StripAgents -ne 0 -or $s.Hidden -ne 1){throw "Agent tab leaked into the strip: strip=$($s.Strip) stripAgents=$($s.StripAgents) hidden=$($s.Hidden)"}
  'PASS --background: the agent leased a tab and navigated it with no visible window and nothing in the tab strip'
 
+ Command 50 $tab 'Page.navigate' ('{"url":"http://localhost:'+$pagePort+'/agent-download"}')|Out-Null
+ Wait-For {$script:pages -contains '/agent-download'} 'agent download response'
+ Pump 1500
+ $probe=Join-Path (Join-Path $env:USERPROFILE 'Downloads') $downloadName
+ $created=(Test-Path -LiteralPath $probe) -or @(Get-ChildItem -LiteralPath $script:profileDir -Filter $downloadName -File -Recurse -ErrorAction SilentlyContinue).Count -gt 0
+ if($DownloadBaseline){'AGENT-DOWNLOAD-BASELINE fileCreated='+$created}
+ elseif($created){throw 'An invisible agent page silently wrote a downloaded file'}
+ else{'PASS invisible agent attachment download is refused before a file is created'}
+ Command 51 $tab 'Page.navigate' ('{"url":"http://localhost:'+$pagePort+'/agent"}')|Out-Null
+
  Command 3 $tab 'Page.bringToFront'|Out-Null
  Wait-For {[JisuTestWin]::Visible($script:hwnd)} 'window revealed by the hand-off'
  Wait-For {[JisuTestWin]::Prop($script:hwnd,'JisuBrowser.StripAgentTabs') -eq 1} 'agent tab in the strip'
@@ -308,5 +327,7 @@ try{
  Stop-Browser
  foreach($listener in $broker,$relay,$page){try{$listener.Stop()}catch{}}
  Start-Sleep -Milliseconds 500
+ $probe=Join-Path (Join-Path $env:USERPROFILE 'Downloads') $downloadName
+ if(Test-Path -LiteralPath $probe){Remove-Item -LiteralPath $probe -Force}
  Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }

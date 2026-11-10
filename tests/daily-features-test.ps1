@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$Exe,[switch]$Baseline)
+param([Parameter(Mandatory)][string]$Exe,[switch]$Baseline,[switch]$CloseDownloadProbe)
 $ErrorActionPreference='Stop'
 $env:PSModulePath=(Join-Path $PSHOME 'Modules')+';'+(Join-Path $env:ProgramFiles 'WindowsPowerShell/Modules')
 Import-Module Microsoft.PowerShell.Utility,Microsoft.PowerShell.Management
@@ -26,6 +26,8 @@ $settings=@{bookmarkBar=$false;importedDefaultBrowser=$true;downloadDirectory=$d
 $port=Get-Random -Minimum 20000 -Maximum 45000
 $server=New-Object Net.HttpListener;$server.Prefixes.Add("http://localhost:$port/");$server.Start();$script:pending=$server.GetContextAsync();$script:payloads=0
 $filename='jisu-audit-'+[guid]::NewGuid().ToString('N')+'.txt'
+$script:slowResponse=$null;$script:slowOffset=0;$script:slowNext=Get-Date;$script:slowError=''
+$script:slowBytes=New-Object byte[] 1048576
 function Pump([int]$ms){
  $until=(Get-Date).AddMilliseconds($ms)
  do{
@@ -33,8 +35,19 @@ function Pump([int]$ms){
    $c=$script:pending.Result;$script:pending=$server.GetContextAsync();$path=$c.Request.Url.AbsolutePath
    if($path -eq '/payload'){$script:payloads++;$c.Response.ContentType='application/octet-stream';$c.Response.Headers.Add('Content-Disposition','attachment; filename="'+$filename+'"');$text='jisu-download-fixture'}
    else{$c.Response.ContentType='text/html';$text='<!doctype html><title>audit-'+$path.TrimStart('/')+'</title><body style="margin:0"><a target="_blank" href="/payload" style="display:block;padding:30px">download</a>'}
-   $bytes=[Text.Encoding]::UTF8.GetBytes($text);$c.Response.ContentLength64=$bytes.Length
-   try{$c.Response.OutputStream.Write($bytes,0,$bytes.Length);$c.Response.Close()}catch{}
+   if($CloseDownloadProbe -and $path -eq '/payload'){
+    $c.Response.ContentLength64=$script:slowBytes.Length;$script:slowResponse=$c.Response;$script:slowOffset=0;$script:slowNext=Get-Date
+   }else{
+    $bytes=[Text.Encoding]::UTF8.GetBytes($text);$c.Response.ContentLength64=$bytes.Length
+    try{$c.Response.OutputStream.Write($bytes,0,$bytes.Length);$c.Response.Close()}catch{}
+   }
+  }
+  if($script:slowResponse -and (Get-Date)-ge $script:slowNext){
+   try{
+    $n=[Math]::Min(16384,$script:slowBytes.Length-$script:slowOffset)
+    $script:slowResponse.OutputStream.Write($script:slowBytes,$script:slowOffset,$n);$script:slowResponse.OutputStream.Flush();$script:slowOffset+=$n;$script:slowNext=(Get-Date).AddMilliseconds(50)
+    if($script:slowOffset -ge $script:slowBytes.Length){$script:slowResponse.Close();$script:slowResponse=$null}
+   }catch{$script:slowError=$_.Exception.Message;$script:slowResponse=$null}
   }
  }while((Get-Date)-lt $until)
 }
@@ -53,11 +66,24 @@ try{
  if(-not $Baseline -and $order -ne '/a,/c,/b'){throw "new-tab order: $order"}
  "ORDER $order"
  if(-not [DailyTest]::ClickPage($h)){throw 'render widget unavailable for download gesture'}
+ $expectedTabs=3
+ if($CloseDownloadProbe){
+  $deadline=(Get-Date).AddSeconds(5)
+  while(-not $script:slowResponse -and (Get-Date)-lt $deadline){Pump 100}
+  if(-not $script:slowResponse){throw 'slow download did not start'}
+  $expectedTabs=[DailyTest]::GetPropW($h,'JisuBrowser.StripTabs').ToInt64()-1
+  [DailyTest]::PostMessageW($h,0x8001,[IntPtr]2,[IntPtr]::Zero)|Out-Null
+ }
  Pump 6500
+ if($CloseDownloadProbe){
+  $defaultFile=Join-Path $downloads $filename
+  if(-not (Test-Path -LiteralPath $defaultFile)){$defaultFile=Join-Path (Join-Path $env:USERPROFILE 'Downloads') $filename}
+  "CLOSE-PROBE served=$script:slowOffset error=$script:slowError fileExists=$(Test-Path -LiteralPath $defaultFile) fileBytes=$(if(Test-Path -LiteralPath $defaultFile){(Get-Item -LiteralPath $defaultFile).Length}else{0})"
+ }
  $record=Join-Path $root 'Downloads.json'
  "DOWNLOAD requests=$script:payloads record=$(Test-Path -LiteralPath $record) strip=$([DailyTest]::GetPropW($h,'JisuBrowser.StripTabs').ToInt64()) session=$((Get-Content -LiteralPath (Join-Path $root 'Session.json') -Raw -Encoding UTF8))"
  if(-not $Baseline){
-  if([DailyTest]::GetPropW($h,'JisuBrowser.StripTabs').ToInt64() -ne 3){throw 'download placeholder tab was not reclaimed'}
+  if([DailyTest]::GetPropW($h,'JisuBrowser.StripTabs').ToInt64() -ne $expectedTabs){throw 'download placeholder/source tab count is wrong'}
   if(-not (Test-Path -LiteralPath $record)){throw 'download record missing'}
   $rows=(Get-Content -LiteralPath $record -Raw -Encoding UTF8|ConvertFrom-Json).rows
   if(-not @($rows|Where-Object {$_.state -eq 2 -and (Test-Path -LiteralPath $_.path)}).Count){throw 'real download did not complete'}

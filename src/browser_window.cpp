@@ -1131,7 +1131,19 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
             // 地址栏右侧提示，用户点开再放行；允许过的站点照常
             BOOL user = TRUE;
             args->get_IsUserInitiated(&user);
-            if (!user && !agentSource && (!source || !self->PopupAllowed(source->url))) {
+            bool allowedFrame = false;
+            if (source && self->PopupAllowed(source->url)) {
+              ComPtr<ICoreWebView2NewWindowRequestedEventArgs3> details;
+              ComPtr<ICoreWebView2FrameInfo> frame;
+              CoTaskString frameUrl;
+              if (SUCCEEDED(args->QueryInterface(IID_PPV_ARGS(details.GetAddressOf()))) &&
+                  SUCCEEDED(details->get_OriginalSourceFrameInfo(frame.GetAddressOf())) && frame &&
+                  SUCCEEDED(frame->get_Source(frameUrl.Put()))) {
+                const auto origin = FaviconOrigin(frameUrl.Str());
+                allowedFrame = !origin.empty() && origin == FaviconOrigin(source->url);
+              }
+            }
+            if (!user && !agentSource && !allowedFrame) {
               args->put_Handled(TRUE);
               if (source) self->OnPopupBlocked(*source, target);
               return S_OK;
@@ -2151,10 +2163,6 @@ void BrowserWindow::CloseTab(size_t index) {
   if (index >= tabs_.size()) {
     return;
   }
-  if (TabDownloading(tabs_[index]->id)) {
-    ShowNotice(L"此标签正在下载文件。请在下载页暂停或取消后再关闭，以免中断下载。");
-    return;
-  }
   const uint32_t returnTo = tabs_[index]->openedBy;
   CancelTabDrag(false);
   if (fullscreenTab_ == tabs_[index]->id) ExitContentFullscreen();
@@ -2439,6 +2447,7 @@ bool BrowserWindow::PreTranslate(const MSG& msg) {
       return true;  // 吞掉回车：单行 EDIT 收到 WM_CHAR '\r' 会响一声
     }
     if (key == VK_ESCAPE) {
+      if (Tab* tab = ActiveTab()) { tab->hasDraft = false; tab->addressDraft.clear(); }
       editing_ = false;
       UpdateAddressBar();
       SendMessageW(edit_, EM_SETSEL, 0, -1);
@@ -2886,7 +2895,7 @@ void BrowserWindow::ShowBookmarkMenu(const std::vector<BookmarkNode*>& nodes, Bo
       for (const auto& child : folder->children) {
         if (!child->folder) urls.push_back(child->url);
       }
-      for (const auto& url : urls) NewTab(url, false);
+      OpenBookmarkGroup(urls);
     }
   } else if (command >= kMenuItemBase && command - kMenuItemBase < state.urls.size()) {
     if (const BookmarkNode* node = bookmarks_.FindById(state.urls[command - kMenuItemBase]); node && !node->folder) {
@@ -2957,7 +2966,7 @@ void BrowserWindow::ShowBookmarkContextMenu(BookmarkNode& node, POINT screen) {
       for (const auto& child : current->children) {
         if (!child->folder) urls.push_back(child->url);
       }
-      for (const auto& url : urls) NewTab(url, false);
+      OpenBookmarkGroup(urls);
       break;
     }
     case kMenuEdit:
@@ -3061,6 +3070,22 @@ void BrowserWindow::ShowMainMenu(POINT screen) {
     default:
       break;
   }
+}
+
+void BrowserWindow::OpenBookmarkGroup(const std::vector<std::wstring>& urls) {
+  size_t protectedActive = 0;
+  for (const auto* window : liveWindows_) if (window->profile_ == profile_) {
+    const auto* tab = window->ActiveTab();
+    if (tab && !tab->agent && !tab->leased && !tab->pinned && !tab->fromAgent && !tab->media && !tab->mediaTarget &&
+        !tab->url.starts_with(L"chrome-extension://") && !TabDownloading(tab->id)) ++protectedActive;
+  }
+  const size_t limit = static_cast<size_t>(settings_.maxRegularTabs);
+  const size_t available = protectedActive < limit ? limit - protectedActive : 0;
+  if (urls.size() > available) {
+    ShowNotice(L"此批网址加上受保护的当前标签会超过上限，请分批打开或在设置中提高上限。"); return;
+  }
+  const auto* active = ActiveTab(); const uint32_t opener = active ? active->id : 0;
+  for (const auto& url : urls) NewTab(url, false, InsertIndexFor(opener));
 }
 
 void BrowserWindow::OpenBookmarkManager(const std::wstring& fragment) {
@@ -3801,7 +3826,10 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       break;
     case WM_CLOSE:
       HideSuggestions();
-      if (std::any_of(tabs_.begin(), tabs_.end(), [this](const auto& tab) { return TabDownloading(tab->id); })) {
+      if (!profile_->downloadExitConfirmed && std::count_if(liveWindows_.begin(), liveWindows_.end(), [this](const auto* window) { return window->profile_ == profile_; }) <= 1 &&
+          std::any_of(profile_->downloads.begin(), profile_->downloads.end(), [](const auto& d) {
+            return d->operation && (d->state == COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS || d->paused);
+          })) {
         if (MessageBoxW(hwnd_, L"有下载仍在进行，关闭窗口会中断下载。仍要退出吗？", kAppName,
                         MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return 0;
       }
@@ -3885,6 +3913,12 @@ void BrowserWindow::WriteTrayState() {
 
 void BrowserWindow::ExecuteTrayCommand(UINT command) {
   if (command == TrayIcon::kExit) {
+    const bool downloading = std::any_of(profile_->downloads.begin(), profile_->downloads.end(), [](const auto& d) {
+      return d->operation && (d->state == COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS || d->paused);
+    });
+    if (downloading && MessageBoxW(hwnd_, L"有下载仍在进行，彻底退出会中断下载。仍要退出吗？", kAppName,
+                                  MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+    profile_->downloadExitConfirmed = true;
     // Same normal teardown as the window X: bridge, popups, all tabs and spare
     // WebViews are closed; no invisible shell is left behind.
     for (auto* window : liveWindows_) {

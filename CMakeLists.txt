@@ -115,6 +115,8 @@ add_custom_command(TARGET jisu-media POST_BUILD
 enable_testing()
 add_test(NAME native-daily-features COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/daily-features-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
 set_tests_properties(native-daily-features PROPERTIES TIMEOUT 120)
+add_test(NAME native-download-source-close COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/daily-features-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>" -CloseDownloadProbe)
+set_tests_properties(native-download-source-close PROPERTIES TIMEOUT 120)
 add_executable(extension-popup-focus-test tests/extension-popup-focus-test.cpp)
 target_include_directories(extension-popup-focus-test PRIVATE src)
 target_compile_definitions(extension-popup-focus-test PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)

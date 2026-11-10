@@ -175,9 +175,15 @@ void BrowserWindow::ConfigureDownloads(Tab& tab) {
       const auto* source = self->FindTab(id);
       if (!source) { retained->put_Cancel(TRUE); deferral->Complete(); return; }
       const bool placeholder = source->scriptOpened && source->title.empty();
-      auto update = [owner = source->owner, weak, placeholder](ICoreWebView2DownloadOperation* operation, IUnknown*) -> HRESULT {
-        auto* current = *owner; const auto item = weak.lock();
-        if (!current || current->destroyed_ || !item) return S_OK;
+      auto update = [owner = source->owner, sharedProfile = std::weak_ptr<ProfileState>(self->profile_), weak, placeholder](ICoreWebView2DownloadOperation* operation, IUnknown*) -> HRESULT {
+        const auto shared = sharedProfile.lock(); const auto item = weak.lock();
+        if (!shared || !item) return S_OK;
+        auto* current = *owner;
+        if (!current || current->destroyed_ || current->profile_ != shared) {
+          current = nullptr;
+          for (auto* window : liveWindows_) if (!window->destroyed_ && window->profile_ == shared) { current = window; break; }
+        }
+        if (!current) return S_OK;
         COREWEBVIEW2_DOWNLOAD_STATE state; operation->get_State(&state); item->state = static_cast<int>(state);
         operation->get_BytesReceived(&item->received); operation->get_TotalBytesToReceive(&item->total);
         COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON reason;

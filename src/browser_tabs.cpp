@@ -20,6 +20,9 @@ constexpr UINT kMenuTabClose = 7006;
 constexpr UINT kMenuTabCloseOthers = 7007;
 constexpr UINT kMenuTabCloseRight = 7008;
 constexpr UINT kMenuTabReopen = 7009;
+constexpr UINT kMenuTabCloseLeft = 7010;
+constexpr UINT kMenuTabMoveWindow = 7011;
+constexpr UINT kMenuTabBookmark = 7012;
 constexpr size_t kClosedTabLimit = 25;
 
 std::wstring HtmlEscape(const std::wstring& text) {
@@ -49,10 +52,13 @@ void BrowserWindow::ShowTabContextMenu(size_t index, POINT screen) {
   AppendMenuW(menu, MF_STRING | (IsWebUrl(tab.url) && !agentBusy ? 0 : MF_GRAYED), kMenuTabDuplicate, L"复制标签页");
   AppendMenuW(menu, MF_STRING | (tab.agent ? MF_GRAYED : 0), kMenuTabPin, tab.pinned ? L"取消固定" : L"固定（不被自动关闭）");
   AppendMenuW(menu, MF_STRING | (tab.webview ? 0 : MF_GRAYED), kMenuTabMute, tab.muted ? L"取消静音" : L"静音此标签页");
+  AppendMenuW(menu, MF_STRING | (!tab.agent && tab.controller ? 0 : MF_GRAYED), kMenuTabMoveWindow, L"移到新窗口");
+  AppendMenuW(menu, MF_STRING | (IsStarrable(tab.url) && !agentBusy ? 0 : MF_GRAYED), kMenuTabBookmark, L"加入书签");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, kMenuTabClose, L"关闭\tCtrl+W");
   AppendMenuW(menu, MF_STRING | (tabs_.size() > 1 ? 0 : MF_GRAYED), kMenuTabCloseOthers, L"关闭其他标签页");
   AppendMenuW(menu, MF_STRING | (index + 1 < tabs_.size() ? 0 : MF_GRAYED), kMenuTabCloseRight, L"关闭右侧标签页");
+  AppendMenuW(menu, MF_STRING | (index ? 0 : MF_GRAYED), kMenuTabCloseLeft, L"关闭左侧标签页");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING | (profile_->closedTabs.empty() ? MF_GRAYED : 0), kMenuTabReopen,
               L"重新打开关闭的标签页\tCtrl+Shift+T");
@@ -92,14 +98,23 @@ void BrowserWindow::ShowTabContextMenu(size_t index, POINT screen) {
     case kMenuTabMute:
       ToggleMuted(at);
       break;
+    case kMenuTabMoveWindow:
+      if (auto* window = CreatePeerWindow()) {
+        if (MoveTabTo(id, *window)) window->ShowFirstFrame(SW_SHOWNORMAL);
+        else DestroyWindow(window->hwnd_);
+      }
+      break;
+    case kMenuTabBookmark:
+      Activate(at); ToggleBookmark(); break;
     case kMenuTabClose:
       CloseTab(at);
       break;
     case kMenuTabCloseOthers:
-    case kMenuTabCloseRight: {
+    case kMenuTabCloseRight:
+    case kMenuTabCloseLeft: {
       // 智能体标签（Pi 正在用或留着复用）与固定的标签不在批量关闭之列
       std::vector<uint32_t> ids;
-      for (size_t i = command == kMenuTabCloseRight ? at + 1 : 0; i < tabs_.size(); ++i) {
+      for (size_t i = command == kMenuTabCloseRight ? at + 1 : 0; i < (command == kMenuTabCloseLeft ? at : tabs_.size()); ++i) {
         const Tab& other = *tabs_[i];
         if (other.id != id && !other.agent && !other.pinned) ids.push_back(other.id);
       }
@@ -241,6 +256,8 @@ bool BrowserWindow::AdoptAgentTab(Tab& tab) {
 
 // 外壳发起的打开：可以是内部页面（书签、历史……）；没建控件的标签现在建
 void BrowserWindow::NavigateTab(Tab& tab, const std::wstring& url) {
+  tab.hasDraft = false; tab.addressDraft.clear();
+  if (IsActive(tab)) editing_ = false;
   tab.url = url;
   tab.allowInternal = IsInternalPage(url);
   tab.lazy = false;

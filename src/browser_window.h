@@ -321,6 +321,7 @@ class BrowserWindow : public AgentHost {
                         bool alignRight);
   void ShowMainMenu(POINT screen);
   void OpenBookmarkManager(const std::wstring& fragment);
+  void OpenBookmarkGroup(const std::vector<std::wstring>& urls);
   void OnBookmarksChanged();
   void BroadcastBookmarks();
   void LoadSettings();
@@ -408,6 +409,7 @@ class BrowserWindow : public AgentHost {
     std::vector<std::shared_ptr<Download>> downloads;
     uint64_t nextDownload = 1;
     bool downloadsLoaded = false;
+    bool downloadExitConfirmed = false;
     ULONGLONG downloadsSaved = 0;
     std::string lastSession;
     std::string bookmarkSnapshot;
