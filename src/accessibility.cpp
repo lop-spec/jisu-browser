@@ -26,7 +26,14 @@ class ChromeAccessible final:public IAccessible{
   std::vector<EnumEntry> entries;LONG count=0;standard_->get_accChildCount(&count);count=std::clamp(count,0L,65535L);if(!count)return entries;
   std::vector<VARIANT> values(static_cast<size_t>(count));LONG fetched=0;
   if(SUCCEEDED(AccessibleChildren(standard_.Get(),0,count,values.data(),&fetched)))for(LONG i=0;i<fetched;++i){
-    EnumEntry entry{i+1,{}};if(values[i].vt==VT_DISPATCH)entry.object=values[i].pdispVal;else if(values[i].vt==VT_I4)entry.nativeId=values[i].lVal;entries.push_back(std::move(entry));
+    EnumEntry entry{i+1,{}};if(values[i].vt==VT_DISPATCH)entry.object=values[i].pdispVal;else if(values[i].vt==VT_I4)entry.nativeId=values[i].lVal;
+    if(entry.object){ComPtr<IAccessible> windowObject,client;HWND childWindow=nullptr;
+      if(SUCCEEDED(entry.object.As(&windowObject))&&SUCCEEDED(WindowFromAccessibleObject(windowObject.Get(),&childWindow))&&childWindow&&childWindow!=state_->window&&
+          SUCCEEDED(AccessibleObjectFromWindow(childWindow,OBJID_CLIENT,IID_PPV_ARGS(client.GetAddressOf())))){
+        VARIANT role{};if(SUCCEEDED(client->get_accRole(Child(CHILDID_SELF),&role))&&role.vt==VT_I4&&role.lVal!=ROLE_SYSTEM_CLIENT&&role.lVal!=ROLE_SYSTEM_WINDOW)entry.object=client;VariantClear(&role);
+      }
+    }
+    entries.push_back(std::move(entry));
   }
   for(auto& value:values)VariantClear(&value);return entries;
  }
