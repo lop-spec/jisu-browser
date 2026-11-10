@@ -62,6 +62,9 @@ jobs:
           name: tab-chrome-evidence-${{ github.sha }}
           path: |
             build/tab-chrome-evidence/
+            build/Release/jisu-browser.exe
+            build/Release/ntp/
+            build/Release/favicon-test.exe
             build/Release/tab-chrome-render-test.exe
             build/Release/fullscreen-window-test.exe
             build/Release/history-test.exe

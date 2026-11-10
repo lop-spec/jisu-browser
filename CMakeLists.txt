@@ -97,7 +97,7 @@ target_compile_options(jisu-browser PRIVATE /W4 /permissive- /utf-8 /Zc:__cplusp
 
 target_link_libraries(jisu-browser PRIVATE
   "${WEBVIEW2_NATIVE}/${WEBVIEW2_ARCH}/WebView2LoaderStatic.lib"
-  version d2d1 dwrite d3d11 dwmapi winhttp shell32 ole32 advapi32 delayimp windowscodecs comctl32 comdlg32 oleacc oleaut32 crypt32 cryptui)
+  version d2d1 dwrite d3d11 dwmapi winhttp shell32 ole32 advapi32 delayimp windowscodecs comctl32 comdlg32 oleacc oleaut32 crypt32 cryptui uiautomationcore)
 
 # 首帧路径之外的 DLL 延迟到第一次调用才加载：D2D/DWrite/D3D 由后台预热线程触发，与建窗并行；
 # WinHTTP（智能体桥）在内核就绪后才用，shell32 只在菜单「设为默认浏览器」时用。
@@ -105,7 +105,7 @@ target_link_libraries(jisu-browser PRIVATE
 target_link_options(jisu-browser PRIVATE
   /DELAYLOAD:d2d1.dll /DELAYLOAD:dwrite.dll /DELAYLOAD:d3d11.dll /DELAYLOAD:dwmapi.dll
   /DELAYLOAD:winhttp.dll /DELAYLOAD:shell32.dll
-  /DELAYLOAD:oleacc.dll /DELAYLOAD:oleaut32.dll /DELAYLOAD:crypt32.dll /DELAYLOAD:cryptui.dll
+  /DELAYLOAD:oleacc.dll /DELAYLOAD:oleaut32.dll /DELAYLOAD:crypt32.dll /DELAYLOAD:cryptui.dll /DELAYLOAD:uiautomationcore.dll
   /DEBUG /OPT:REF /OPT:ICF)
 
 # Media engine is packaged by CI, never downloaded/loaded during ordinary browsing.
@@ -145,6 +145,8 @@ add_test(NAME native-app-download COMMAND powershell.exe -NoProfile -NonInteract
 set_tests_properties(native-app-download PROPERTIES TIMEOUT 120)
 add_test(NAME native-omnibox-input COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/omnibox-input-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
 set_tests_properties(native-omnibox-input PROPERTIES TIMEOUT 120)
+add_test(NAME native-protocol-isolation COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol-isolation-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
+set_tests_properties(native-protocol-isolation PROPERTIES TIMEOUT 180)
 add_test(NAME native-version-resource COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/version-resource-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>" -Expected "${PROJECT_VERSION}")
 add_test(NAME native-daily-features COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/daily-features-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
 set_tests_properties(native-daily-features PROPERTIES TIMEOUT 120)

@@ -1,7 +1,7 @@
 param([Parameter(Mandatory)][string]$Exe)
 $ErrorActionPreference='Stop'
-Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
-$c=New-Object CodeDom.Compiler.CompilerParameters;$c.GenerateInMemory=$true;$c.TempFiles=New-Object CodeDom.Compiler.TempFileCollection([IO.Path]::GetTempPath(),$false)
+Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,Accessibility
+$c=New-Object CodeDom.Compiler.CompilerParameters;$c.GenerateInMemory=$true;$c.TempFiles=New-Object CodeDom.Compiler.TempFileCollection([IO.Path]::GetTempPath(),$false);$c.ReferencedAssemblies.Add([Accessibility.IAccessible].Assembly.Location)|Out-Null
 Add-Type -CompilerParameters $c -TypeDefinition @'
 using System;using System.Runtime.InteropServices;
 public static class AccessibilityTest {
@@ -11,6 +11,9 @@ public static class AccessibilityTest {
  [StructLayout(LayoutKind.Sequential)]struct RECT{public int l,t,r,b;}
  [StructLayout(LayoutKind.Sequential)]struct GUI{public int size,flags;public IntPtr active,focus,capture,menu,move,caret;public RECT rect;}
  [DllImport("user32.dll")]static extern bool GetGUIThreadInfo(uint thread,ref GUI info);
+ [DllImport("oleacc.dll")]static extern int AccessibleObjectFromWindow(IntPtr h,uint id,ref Guid iid,[MarshalAs(UnmanagedType.Interface)]out Accessibility.IAccessible value);
+ [DllImport("oleacc.dll")]static extern int AccessibleChildren(Accessibility.IAccessible root,int start,int count,[Out,MarshalAs(UnmanagedType.LPArray,ArraySubType=UnmanagedType.Struct)]object[] children,out int got);
+ public static string Tree(IntPtr h){try{var id=new Guid("618736E0-3C3D-11CF-810C-00AA00389B71");Accessibility.IAccessible root;int hr=AccessibleObjectFromWindow(h,unchecked((uint)-4),ref id,out root);if(hr<0)return "MSAA HRESULT="+hr;int n=Math.Min(root.accChildCount,256),got;var children=new object[n];AccessibleChildren(root,0,n,children,out got);var text="MSAA children="+got;for(int i=0;i<got;i++){var a=children[i] as Accessibility.IAccessible;var obj=a??root;object child=a!=null?(object)0:children[i];try{text+=" | "+obj.get_accRole(child)+":"+obj.get_accName(child);}catch(Exception e){text+=" | ERROR "+e.Message;}}return text;}catch(Exception e){return "MSAA ERROR "+e.Message;}}
  public static bool OwnFocus(IntPtr h){uint p;var t=GetWindowThreadProcessId(h,out p);var g=new GUI{size=Marshal.SizeOf(typeof(GUI))};return GetGUIThreadInfo(t,ref g)&&g.focus==h;}
 }
 '@
@@ -26,7 +29,11 @@ try{
  $h=$p.MainWindowHandle;$element=[System.Windows.Automation.AutomationElement]::FromHandle($h)
  $scope=[System.Windows.Automation.TreeScope]::Descendants
  $tabs=$element.FindAll($scope,(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::TabItem)))
- if($tabs.Count -lt 1){throw 'native tab not exposed to Windows UIA'}
+ if($tabs.Count -lt 1){
+  [AccessibilityTest]::Tree($h)|Write-Output
+  $actual=$element.FindAll($scope,[System.Windows.Automation.Condition]::TrueCondition);for($i=0;$i -lt [Math]::Min(80,$actual.Count);$i++){Write-Output ('UIA '+$actual[$i].Current.ControlType.ProgrammaticName+': '+$actual[$i].Current.Name)}
+  throw 'native tab not exposed to Windows UIA'
+ }
  $newName=-join [char[]]@(26032,24314,26631,31614,39029)
  $button=$element.FindFirst($scope,(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty,$newName)))
  if(-not $button){throw 'native new-tab button name missing in Windows UIA'}

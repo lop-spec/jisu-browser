@@ -6,13 +6,14 @@ namespace jisu {
 uintptr_t NextAccessibilityCookie(){static std::atomic<uintptr_t> next{1};return next.fetch_add(1);}
 namespace {
 VARIANT Child(LONG id){VARIANT v{};v.vt=VT_I4;v.lVal=id;return v;}
+struct EnumEntry{LONG id;ComPtr<IDispatch> object;};
 class AccessibleEnum final:public IEnumVARIANT{
- std::atomic<ULONG> refs_{1};std::vector<LONG> ids_;size_t position_=0;
+ std::atomic<ULONG> refs_{1};std::vector<EnumEntry> ids_;size_t position_=0;
  public:
- explicit AccessibleEnum(std::vector<LONG> ids,size_t position=0):ids_(std::move(ids)),position_(position){}
+ explicit AccessibleEnum(std::vector<EnumEntry> ids,size_t position=0):ids_(std::move(ids)),position_(position){}
  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void** out)override{if(!out)return E_POINTER;*out=nullptr;if(id==IID_IUnknown||id==IID_IEnumVARIANT){*out=static_cast<IEnumVARIANT*>(this);AddRef();return S_OK;}return E_NOINTERFACE;}
  ULONG STDMETHODCALLTYPE AddRef()override{return ++refs_;}ULONG STDMETHODCALLTYPE Release()override{const auto n=--refs_;if(!n)delete this;return n;}
- HRESULT STDMETHODCALLTYPE Next(ULONG count,VARIANT* values,ULONG* fetched)override{if(!values||(!fetched&&count!=1))return E_POINTER;ULONG n=0;while(n<count&&position_<ids_.size())values[n++]=Child(ids_[position_++]);if(fetched)*fetched=n;return n==count?S_OK:S_FALSE;}
+ HRESULT STDMETHODCALLTYPE Next(ULONG count,VARIANT* values,ULONG* fetched)override{if(!values||(!fetched&&count!=1))return E_POINTER;ULONG n=0;while(n<count&&position_<ids_.size()){const auto& entry=ids_[position_++];auto& value=values[n++];value=Child(entry.id);if(entry.object){value.vt=VT_DISPATCH;value.pdispVal=entry.object.Get();value.pdispVal->AddRef();}}if(fetched)*fetched=n;return n==count?S_OK:S_FALSE;}
  HRESULT STDMETHODCALLTYPE Skip(ULONG count)override{const auto n=std::min(static_cast<size_t>(count),ids_.size()-position_);position_+=n;return n==count?S_OK:S_FALSE;}
  HRESULT STDMETHODCALLTYPE Reset()override{position_=0;return S_OK;}
  HRESULT STDMETHODCALLTYPE Clone(IEnumVARIANT** out)override{if(!out)return E_POINTER;*out=new AccessibleEnum(ids_,position_);return S_OK;}
@@ -22,13 +23,14 @@ class ChromeAccessible final:public IAccessible{
  bool Alive(){std::lock_guard lock(state_->mutex);return state_->alive;}
  bool Node(VARIANT child,AccessibleNode& out){if(child.vt!=VT_I4)return false;std::lock_guard lock(state_->mutex);if(!state_->alive)return false;for(const auto& n:state_->nodes)if(n.id==child.lVal){out=n;return true;}return false;}
  std::vector<LONG> Ids(){std::vector<LONG> ids;if(!Alive())return ids;LONG native=0;standard_->get_accChildCount(&native);for(LONG i=1;i<=std::min(native,65535L);++i)ids.push_back(i);std::lock_guard lock(state_->mutex);for(const auto& n:state_->nodes)ids.push_back(n.id);return ids;}
+ std::vector<EnumEntry> EnumEntries(){std::vector<EnumEntry> entries;for(const auto id:Ids()){EnumEntry item{id,{}};if(id<65536)standard_->get_accChild(Child(id),item.object.GetAddressOf());entries.push_back(std::move(item));}return entries;}
  HRESULT Action(VARIANT child,bool focus){AccessibleNode node;if(!Node(child,node))return E_INVALIDARG;if(node.state&(STATE_SYSTEM_UNAVAILABLE|STATE_SYSTEM_INVISIBLE))return S_FALSE;HWND window;uintptr_t cookie;{std::lock_guard lock(state_->mutex);window=state_->window;cookie=state_->cookie;}return PostMessageW(window,kAccessibilityAction,cookie,focus?-node.id:node.id)?S_OK:CO_E_OBJNOTCONNECTED;}
  public:
  explicit ChromeAccessible(std::shared_ptr<AccessibilityState> state):state_(std::move(state)){CreateStdAccessibleObject(state_->window,OBJID_CLIENT,IID_PPV_ARGS(standard_.GetAddressOf()));}
  bool Ready()const{return standard_!=nullptr;}
  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void** out)override{
   if(!out)return E_POINTER;*out=nullptr;
-  if(id==IID_IEnumVARIANT){*out=static_cast<IEnumVARIANT*>(new AccessibleEnum(Ids()));return S_OK;}
+  if(id==IID_IEnumVARIANT){*out=static_cast<IEnumVARIANT*>(new AccessibleEnum(EnumEntries()));return S_OK;}
   if(id==IID_IUnknown||id==IID_IDispatch||id==IID_IAccessible){*out=static_cast<IAccessible*>(this);AddRef();return S_OK;}return E_NOINTERFACE;
  }
  ULONG STDMETHODCALLTYPE AddRef()override{return ++refs_;}ULONG STDMETHODCALLTYPE Release()override{const auto n=--refs_;if(!n)delete this;return n;}
@@ -36,7 +38,7 @@ class ChromeAccessible final:public IAccessible{
  HRESULT STDMETHODCALLTYPE GetTypeInfo(UINT index,LCID locale,ITypeInfo** info)override{return standard_->GetTypeInfo(index,locale,info);}
  HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID,LPOLESTR* names,UINT count,LCID locale,DISPID* ids)override{ComPtr<ITypeInfo> info;const auto hr=standard_->GetTypeInfo(0,locale,info.GetAddressOf());return SUCCEEDED(hr)?DispGetIDsOfNames(info.Get(),names,count,ids):hr;}
  HRESULT STDMETHODCALLTYPE Invoke(DISPID id,REFIID,LCID locale,WORD flags,DISPPARAMS* args,VARIANT* result,EXCEPINFO* exception,UINT* error)override{
-  if(id==DISPID_NEWENUM&&result){VariantInit(result);result->vt=VT_UNKNOWN;result->punkVal=new AccessibleEnum(Ids());return S_OK;}
+  if(id==DISPID_NEWENUM&&result){VariantInit(result);result->vt=VT_UNKNOWN;result->punkVal=new AccessibleEnum(EnumEntries());return S_OK;}
   ComPtr<ITypeInfo> info;const auto hr=standard_->GetTypeInfo(0,locale,info.GetAddressOf());return SUCCEEDED(hr)?DispInvoke(static_cast<IAccessible*>(this),info.Get(),id,flags,args,result,exception,error):hr;
  }
  HRESULT STDMETHODCALLTYPE get_accParent(IDispatch** out)override{if(!Alive())return CO_E_OBJNOTCONNECTED;return standard_->get_accParent(out);}
@@ -76,4 +78,9 @@ ComPtr<IAccessible> MakeAccessibilityObject(const std::shared_ptr<AccessibilityS
   ComPtr<IAccessible> result;result.Attach(provider);return result;
 }
 LRESULT AccessibilityObject(IAccessible* object,WPARAM parameter){return object?LresultFromObject(IID_IAccessible,parameter,object):0;}
+LRESULT AccessibilityUiaObject(HWND window,IAccessible* object,WPARAM wParam,LPARAM lParam){
+  ComPtr<IRawElementProviderSimple> provider;
+  return object&&SUCCEEDED(UiaProviderFromIAccessible(object,CHILDID_SELF,UIA_PFIA_DEFAULT,provider.GetAddressOf()))?UiaReturnRawElementProvider(window,wParam,lParam,provider.Get()):0;
+}
+void ReleaseAccessibilityUia(HWND window){UiaReturnRawElementProvider(window,0,0,nullptr);}
 }  // namespace jisu

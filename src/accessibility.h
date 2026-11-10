@@ -1,6 +1,7 @@
 #pragma once
 #include "common.h"
 #include <oleacc.h>
+#include <uiautomationcoreapi.h>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -18,4 +19,6 @@ struct AccessibilityState {
 uintptr_t NextAccessibilityCookie();
 ComPtr<IAccessible> MakeAccessibilityObject(const std::shared_ptr<AccessibilityState>& state);
 LRESULT AccessibilityObject(IAccessible* object,WPARAM wParam);
+LRESULT AccessibilityUiaObject(HWND window,IAccessible* object,WPARAM wParam,LPARAM lParam);
+void ReleaseAccessibilityUia(HWND window);
 }

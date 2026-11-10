@@ -22,7 +22,7 @@ public static class OmniboxInputTest {
  static IntPtr CharPoint(IntPtr h,int index){RECT r;GetClientRect(h,out r);long p=SendMessageW(h,0xD6,(IntPtr)index,IntPtr.Zero).ToInt64();return Pack((short)(p&65535)+1,(r.b-r.t)/2);}
  public static void Reset(IntPtr edit){SendMessageW(edit,0xB1,IntPtr.Zero,IntPtr.Zero);SendMessageW(edit,0xB7,IntPtr.Zero,IntPtr.Zero);}
  public static void MouseSelection(IntPtr edit,bool drag){var a=CharPoint(edit,3);var b=CharPoint(edit,14);SendMessageW(edit,0x201,(IntPtr)1,a);if(drag)SendMessageW(edit,0x200,(IntPtr)1,b);SendMessageW(edit,0x202,IntPtr.Zero,drag?b:a);}
- public static int[] Selection(IntPtr edit){uint a,b;Sel(edit,0xB0,out a,out b);return new[]{(int)a,(int)b,GetWindowTextLengthW(edit)};}
+ public static int[] Selection(IntPtr edit){uint a,b;Sel(edit,0xB0,out a,out b);return new[]{(int)a,(int)b,(int)SendMessageW(edit,0xE,IntPtr.Zero,IntPtr.Zero).ToInt64()};}
  public static void BookmarkDrag(IntPtr root,IntPtr edit,bool cancel){SendMessageW(edit,0xB1,IntPtr.Zero,(IntPtr)(-1));var a=CharPoint(edit,3);var scale=GetDpiForWindow(root)/96.0;var p=new POINT{x=(int)(300*scale),y=(int)(105*scale)};MapWindowPoints(root,edit,ref p,1);SendMessageW(edit,0x201,(IntPtr)1,a);SendMessageW(edit,0x200,(IntPtr)1,Pack(p.x,p.y));if(cancel){PostMessageW(edit,0x100,(IntPtr)27,(IntPtr)1);Thread.Sleep(150);}SendMessageW(edit,0x202,IntPtr.Zero,Pack(p.x,p.y));}
 }
 '@

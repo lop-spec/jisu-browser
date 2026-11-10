@@ -4,6 +4,7 @@ $c=New-Object CodeDom.Compiler.CompilerParameters;$c.GenerateInMemory=$true;$c.T
 Add-Type -CompilerParameters $c -TypeDefinition @'
 using System;using System.Runtime.InteropServices;
 public static class PrivateTest {
+ public static string Hash(string path){using(var stream=System.IO.File.OpenRead(path))using(var sha=System.Security.Cryptography.SHA256.Create())return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-","");}
  [DllImport("user32.dll")]public static extern bool PostMessageW(IntPtr h,uint m,IntPtr w,IntPtr l);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern IntPtr GetPropW(IntPtr h,string name);
 }
@@ -55,12 +56,12 @@ try{
  $normal=Start-Browser;Close-Browser $normal;Pump 1200
  if(-not (Cookie-Contains $normalName)){throw 'positive control: normal persistent cookie not found on disk'}
  $files=@('History.json','Session.json','jisu-settings.json','Bookmarks','Downloads.json','extensions-status.json','cookie-guard-status.json','Crash.log')
- $before=@{};foreach($name in $files){$path=Join-Path $root $name;if(Test-Path -LiteralPath $path){$before[$name]=(Get-FileHash -LiteralPath $path).Hash}}
+ $before=@{};foreach($name in $files){$path=Join-Path $root $name;if(Test-Path -LiteralPath $path){$before[$name]=[PrivateTest]::Hash($path)}}
  $private=Start-Browser -Private
  if([PrivateTest]::GetPropW($private.MainWindowHandle,'JisuBrowser.PrivateVerified').ToInt64() -ne 1){throw 'actual SDK Profile was not InPrivate'}
  if($script:leaked -or -not $script:privateWorks){throw 'private network cookie isolation failed'}
  Close-Browser $private;Pump 1500
- foreach($name in $files){$path=Join-Path $root $name;$after=if(Test-Path -LiteralPath $path){(Get-FileHash -LiteralPath $path).Hash}else{$null};if($after -ne $before[$name]){throw ('private mode changed native metadata: '+$name)}}
+ foreach($name in $files){$path=Join-Path $root $name;$after=if(Test-Path -LiteralPath $path){[PrivateTest]::Hash($path)}else{$null};if($after -ne $before[$name]){throw ('private mode changed native metadata: '+$name)}}
  if(Cookie-Contains $privateName){throw 'private persistent cookie reached a disk cookie database'}
  if(-not (Cookie-Contains $normalName)){throw 'private mode altered normal cookie store'}
  'PASS actual InPrivate Profile; normal persistent-cookie positive control; private HTTP cookie isolation; private cookie not persisted; native JSON unchanged; normal login store intact'

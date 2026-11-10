@@ -608,6 +608,7 @@ class BrowserWindow : public AgentHost {
   bool focusInWebView_ = false;
   std::shared_ptr<AccessibilityState> accessibility_;
   ComPtr<IAccessible> accessibleObject_;
+  bool uiaRegistered_ = false;
   bool accessibilityQueued_ = false, chromeKeyboardFocus_ = false;
   LONG chromeFocusId_ = 0;
   HWND suggestions_ = nullptr;

@@ -3516,9 +3516,10 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
   }
   switch (msg) {
     case WM_GETOBJECT:
-      if(!options_.appMode&&static_cast<LONG>(lParam)==OBJID_CLIENT){
+      if(!options_.appMode&&(static_cast<LONG>(lParam)==OBJID_CLIENT||static_cast<LONG>(lParam)==UiaRootObjectId)){
         if(!accessibility_){accessibility_=std::make_shared<AccessibilityState>();accessibility_->window=hwnd_;accessibility_->cookie=NextAccessibilityCookie();accessibility_->name=options_.inPrivate?L"极速浏览器（无痕）":L"极速浏览器";}
         UpdateAccessibility();if(!accessibleObject_)accessibleObject_=MakeAccessibilityObject(accessibility_);
+        if(static_cast<LONG>(lParam)==UiaRootObjectId){const auto result=AccessibilityUiaObject(hwnd_,accessibleObject_.Get(),wParam,lParam);uiaRegistered_=uiaRegistered_||result!=0;return result;}
         return AccessibilityObject(accessibleObject_.Get(),wParam);
       }
       break;
@@ -4025,6 +4026,7 @@ void BrowserWindow::ExecuteTrayCommand(UINT command) {
 
 void BrowserWindow::OnDestroy() {
   if(accessibility_){std::lock_guard lock(accessibility_->mutex);accessibility_->alive=false;}
+  if(uiaRegistered_){ReleaseAccessibilityUia(hwnd_);uiaRegistered_=false;}
   accessibleObject_.Reset();
   if(bookmarkDropTarget_){bookmarkDropTarget_.Reset();RevokeDragDrop(hwnd_);}
   HideSuggestions();
