@@ -80,6 +80,9 @@ target_compile_definitions(jisu-browser PRIVATE
   _WIN32_WINNT=0x0A00 WINVER=0x0A00
   JISU_COMMIT="${JISU_COMMIT}"
   JISU_VERSION="${PROJECT_VERSION}"
+  JISU_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+  JISU_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+  JISU_VERSION_PATCH=${PROJECT_VERSION_PATCH}
   JISU_WEBVIEW2_SDK="${WEBVIEW2_VERSION}")
 
 # /Zi + /DEBUG：生成 PDB，采 ETW 时用来解析外壳自己的调用栈（PDB 不随包分发）
@@ -113,6 +116,7 @@ add_custom_command(TARGET jisu-media POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_directory "${MPV_DIR}/shaders" "$<TARGET_FILE_DIR:jisu-media>/media/shaders")
 
 enable_testing()
+add_test(NAME native-version-resource COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/version-resource-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>" -Expected "${PROJECT_VERSION}")
 add_test(NAME native-daily-features COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/daily-features-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
 set_tests_properties(native-daily-features PROPERTIES TIMEOUT 120)
 add_test(NAME native-download-source-close COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/daily-features-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>" -CloseDownloadProbe)
