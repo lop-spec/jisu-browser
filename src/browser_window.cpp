@@ -3952,8 +3952,8 @@ void BrowserWindow::OnDestroy() {
   const bool lastWindow = std::count_if(liveWindows_.begin(), liveWindows_.end(), [this](const BrowserWindow* window) {
                             return window->profile_ == profile_;
                           }) <= 1;
-  if (lastWindow) {
-    SaveSession(!profile_->endingSession, true);
+  if (lastWindow && !profile_->endingSession) {
+    SaveSession(true, true);
   }
   BrowserWindow* survivor = nullptr;
   for (auto* window : liveWindows_) if (window != this && window->profile_ == profile_) { survivor = window; break; }
@@ -4531,7 +4531,7 @@ void BrowserWindow::PostTask(std::function<void()> task) {
 
 // 标签有变化：1.5 秒后写一次会话（期间的变化合并），崩溃、被结束后下次启动照此恢复
 void BrowserWindow::ScheduleSessionSave() {
-  if (!profile_->sessionWritable || destroyed_ || !hwnd_ || sessionTimerPending_) return;
+  if (!profile_->sessionWritable || profile_->endingSession || destroyed_ || !hwnd_ || sessionTimerPending_) return;
   sessionTimerPending_ = SetTimer(hwnd_, kTimerSession, 1500, nullptr) != 0;
 }
 

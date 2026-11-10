@@ -275,7 +275,7 @@ std::wstring BrowserWindow::SessionFile() const { return profileDir_ + L"\\Sessi
 // 记下所有窗口里用户开着的标签。clean = 用户正常关掉了最后一个窗口：下次启动不恢复；
 // 崩溃、被结束、关机时文件停在 clean=false，下次启动恢复
 void BrowserWindow::SaveSession(bool clean, bool durable) {
-  if (!profileLoaded_ || !profile_->sessionWritable || profileDir_.empty()) return;
+  if (!profileLoaded_ || !profile_->sessionWritable || profileDir_.empty() || (profile_->endingSession && !durable)) return;
   std::string out = std::string("{\"clean\":") + (clean ? "true" : "false") + ",\"tabs\":[";
   bool first = true;
   uint32_t ordinal = 0;
