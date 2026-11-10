@@ -368,6 +368,7 @@ BrowserWindow* BrowserWindow::CreatePeerWindow() {
   Options options;
   options.userDataFolder = profileDir_; options.defaultUserData = options_.defaultUserData;
   options.agentConfigPath = options_.agentConfigPath;
+  options.noAgent = options_.noAgent; options.spare = options_.spare;
   options.browserArgs = options_.browserArgs; options.trackingPrevention = options_.trackingPrevention;
   options.renderTarget = options_.renderTarget;
   auto window = std::make_unique<BrowserWindow>(options, warmup_, root_);
