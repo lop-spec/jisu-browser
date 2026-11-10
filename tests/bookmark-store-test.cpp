@@ -23,6 +23,10 @@ int main() {
   const auto revision=store.Revision(); std::string error;
   check(store.Import(file,L"same",&error)==0 && store.Revision()==revision);
   check(store.Remove(4) && !store.FindById(4) && !store.FindByUrl(L"https://example.com/"));
+  const auto snapshot = store.Serialized();
+  const auto undoneId = store.AddUrl(store.Bar(),0,L"undone",L"https://undone.example/")->id;
+  check(store.RestoreSerialized(snapshot) && !store.FindByUrl(L"https://undone.example/"));
+  check(store.AddUrl(store.Bar(),0,L"after undo",L"https://after.example/")->id > undoneId);
   check(store.Save()); BookmarkStore reloaded;check(reloaded.Load(file) && reloaded.FindByUrl(L"https://new.example/"));
   DeleteFileW(file.c_str()); CoUninitialize();
   std::cout<<"PASS bookmark metadata, unknown children/roots, reserved ids, indexes, duplicate import and save round trip\n";

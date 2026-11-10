@@ -48,8 +48,11 @@ void BrowserWindow::WatchControllers() {
     ++t->createAttempt; t->creating = false;
     OnControllerFailed(*t, HRESULT_FROM_WIN32(ERROR_TIMEOUT));
   }
-  if (profile_->writer.Failed() && message_.empty()) {
-    message_ = L"资料保存失败，请检查磁盘空间与资料目录权限。"; InvalidateChrome();
+  const bool failed = profile_->writer.Failed();
+  if (failed != writerError_) {
+    writerError_ = failed; UpdateWindowTitle();
+    const std::string status = failed ? "{\"type\":\"utility.status\",\"error\":\"资料保存失败，正在重试；请检查磁盘空间与目录权限\"}" : "{\"type\":\"utility.status\",\"error\":\"\"}";
+    for (auto& tab : tabs_) if (IsInternalPage(tab->url)) PostToPage(*tab, status);
   }
 }
 bool BrowserWindow::TabDownloading(uint32_t id) const {
@@ -57,11 +60,23 @@ bool BrowserWindow::TabDownloading(uint32_t id) const {
     return d->tabId == id && d->operation && (d->state == COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS || d->paused);
   });
 }
+std::wstring BrowserWindow::DownloadsFile() const {
+  if (!options_.appMode) return profileDir_ + L"\\Downloads.json";
+  std::wstring id;
+  for (const auto c : options_.appId) id.push_back(c >= L'a' && c <= L'z' || c >= L'A' && c <= L'Z' || c >= L'0' && c <= L'9' || c == L'-' ? c : L'_');
+  return profileDir_ + L"\\Downloads-app-" + id + L".json";
+}
 void BrowserWindow::LoadDownloads() {
   if (profile_->downloadsLoaded) return;
   profile_->downloadsLoaded = true;
+  if (options_.appMode) {
+    std::string settings; json::Value value;
+    if (ReadFileBytes(profileDir_ + L"\\jisu-settings.json", settings) && json::Parse(settings, value)) {
+      settings_.downloadDirectory = FromUtf8(value["downloadDirectory"].AsString()); settings_.askDownload = value["askDownload"].AsBool();
+    }
+  }
   std::string bytes; json::Value root;
-  if (!ReadFileBytes(profileDir_ + L"\\Downloads.json", bytes) || !json::Parse(bytes, root)) return;
+  if (!ReadFileBytes(DownloadsFile(), bytes) || !json::Parse(bytes, root)) return;
   for (const auto& row : root["rows"].Items()) {
     if (profile_->downloads.size() >= 500) break;
     auto d = std::make_shared<Download>(); d->id = profile_->nextDownload++;
@@ -87,6 +102,8 @@ std::string BrowserWindow::DownloadsJson() const {
     row.Set("state", json::Value::Number(d->state));
     row.Set("paused", json::Value::Bool(d->paused));
     row.Set("live", json::Value::Bool(d->operation != nullptr));
+    BOOL canResume = FALSE; if (d->operation) d->operation->get_CanResume(&canResume);
+    row.Set("canResume", json::Value::Bool(canResume != FALSE));
     const auto elapsed = d->started ? GetTickCount64() - d->started : 0;
     row.Set("speed", json::Value::Number(elapsed && d->state == 0 && !d->paused ? d->received * 1000.0 / elapsed : 0));
     rows.Push(std::move(row));
@@ -95,7 +112,7 @@ std::string BrowserWindow::DownloadsJson() const {
 }
 void BrowserWindow::SaveDownloads() {
   profile_->downloadsSaved = GetTickCount64();
-  profile_->writer.Write(profileDir_ + L"\\Downloads.json", DownloadsJson(), false);
+  profile_->writer.Write(DownloadsFile(), DownloadsJson(), false);
 }
 void BrowserWindow::ConfigureDownloads(Tab& tab) {
   ComPtr<ICoreWebView2_4> view;
@@ -141,7 +158,7 @@ void BrowserWindow::ConfigureDownloads(Tab& tab) {
         }
         if (suffix >= 10000) { retained->put_Cancel(TRUE); deferral->Complete(); return; }
       }
-      retained->put_Handled(TRUE);
+      retained->put_Handled(self->options_.appMode ? FALSE : TRUE);
       if (FAILED(retained->put_ResultFilePath(d->path.c_str()))) { retained->put_Cancel(TRUE); deferral->Complete(); return; }
       d->id = self->profile_->nextDownload++; d->tabId = id; d->started = GetTickCount64();
       d->url = HistoryStore::SafeUrl(uri.Str());
@@ -173,6 +190,9 @@ void BrowserWindow::ConfigureDownloads(Tab& tab) {
           tab->webview->get_Source(sourceUrl.Put());
           if (sourceUrl.Str() == L"about:blank" && current->IndexOf(*tab) < current->tabs_.size()) current->CloseTab(current->IndexOf(*tab));
         });
+        if (item->state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED) {
+          ComPtr<ICoreWebView2DownloadOperation> keepAlive = operation; item->operation.Reset();
+        }
         return S_OK;
       };
       EventRegistrationToken event{};
@@ -218,6 +238,44 @@ bool BrowserWindow::HandleUtilityMessage(Tab& tab, const std::string& text) {
     PostToPage(tab, DownloadsJson()); return true;
   }
   if (tab.url != kSettings) return true;
+  if (type == "settings.permissions.get" || type == "settings.permissions.reset") {
+    ComPtr<ICoreWebView2_13> view; ComPtr<ICoreWebView2Profile> profile; ComPtr<ICoreWebView2Profile4> permissions;
+    if (!tab.webview || FAILED(tab.webview.As(&view)) || FAILED(view->get_Profile(profile.GetAddressOf())) || FAILED(profile.As(&permissions))) {
+      PostToPage(tab, "{\"type\":\"settings.permissions\",\"error\":\"当前内核不支持权限管理\",\"rows\":[]}"); return true;
+    }
+    const auto alive = std::weak_ptr<int>(alive_); const auto id = tab.id;
+    if (type == "settings.permissions.reset") {
+      const auto origin = FromUtf8(message["origin"].AsString());
+      const auto kind = static_cast<int>(message["kind"].AsNumber(-1));
+      if (origin.empty() || FaviconOrigin(origin) != origin || kind < 0 || kind > 30) return true;
+      permissions->SetPermissionState(static_cast<COREWEBVIEW2_PERMISSION_KIND>(kind), origin.c_str(), COREWEBVIEW2_PERMISSION_STATE_DEFAULT,
+          Callback<ICoreWebView2SetPermissionStateCompletedHandler>([this, alive, id](HRESULT hr) -> HRESULT {
+        if (alive.expired()) return S_OK;
+        if (Tab* current = FindTab(id); current && current->url == kSettings) {
+          if (FAILED(hr)) ShowNotice(L"站点权限撤销失败，请稍后重试。");
+          HandleUtilityMessage(*current, "{\"type\":\"settings.permissions.get\"}");
+        }
+        return S_OK;
+      }).Get());
+    } else permissions->GetNonDefaultPermissionSettings(Callback<ICoreWebView2GetNonDefaultPermissionSettingsCompletedHandler>(
+        [this, alive, id](HRESULT hr, ICoreWebView2PermissionSettingCollectionView* list) -> HRESULT {
+      if (alive.expired()) return S_OK;
+      auto out = json::Value::MakeObject(), rows = json::Value::MakeArray(); UINT32 count = 0;
+      if (SUCCEEDED(hr) && list) list->get_Count(&count);
+      for (UINT32 i = 0; i < count && i < 1000; ++i) {
+        ComPtr<ICoreWebView2PermissionSetting> setting; if (FAILED(list->GetValueAtIndex(i, setting.GetAddressOf()))) continue;
+        CoTaskString origin; COREWEBVIEW2_PERMISSION_KIND kind; COREWEBVIEW2_PERMISSION_STATE state;
+        setting->get_PermissionOrigin(origin.Put()); setting->get_PermissionKind(&kind); setting->get_PermissionState(&state);
+        auto row = json::Value::MakeObject(); row.Set("origin", json::Value::String(ToUtf8(origin.Str())));
+        row.Set("kind", json::Value::Number(kind)); row.Set("state", json::Value::Number(state)); rows.Push(std::move(row));
+      }
+      out.Set("type", json::Value::String("settings.permissions")); out.Set("rows", std::move(rows));
+      out.Set("error", json::Value::String(FAILED(hr) ? "权限读取失败" : count > 1000 ? "仅显示前1000条" : ""));
+      if (Tab* current = FindTab(id); current && current->url == kSettings) PostToPage(*current, json::Serialize(out));
+      return S_OK;
+    }).Get());
+    return true;
+  }
   if (type == "settings.save") {
     settings_.continueSession = message["continueSession"].AsBool();
     settings_.askDownload = message["askDownload"].AsBool();
@@ -276,7 +334,14 @@ void BrowserWindow::PageAction(UINT action) {
     }
   } else if (action >= 2 && action <= 4 && tab->controller) {
     double zoom = 1; tab->controller->get_ZoomFactor(&zoom);
-    hr = tab->controller->put_ZoomFactor(action == 4 ? 1 : std::clamp(zoom + (action == 2 ? 0.1 : -0.1), 0.25, 5.0));
+    const auto wanted = action == 4 ? 1 : std::clamp(zoom + (action == 2 ? 0.1 : -0.1), 0.25, 5.0);
+    hr = tab->controller->put_ZoomFactor(wanted);
+    if (SUCCEEDED(hr) && IsStarrable(tab->url)) {
+      const auto origin = FaviconOrigin(tab->url);
+      if (wanted == 1) settings_.siteZoom.erase(origin);
+      else if (settings_.siteZoom.size() < 500 || settings_.siteZoom.contains(origin)) settings_.siteZoom[origin] = wanted;
+      SaveSettings();
+    }
   } else if (action == 5) {
     ComPtr<ICoreWebView2_16> view;
     if (SUCCEEDED(tab->webview.As(&view))) hr = view->ShowPrintUI(COREWEBVIEW2_PRINT_DIALOG_KIND_BROWSER);

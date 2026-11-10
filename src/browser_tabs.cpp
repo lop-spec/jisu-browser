@@ -437,12 +437,14 @@ void BrowserWindow::OnProcessFailed(uint32_t id, COREWEBVIEW2_PROCESS_FAILED_KIN
     return;
   }
   if (t && kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE) {
-    t->error = L"页面暂时无响应，可按 Ctrl+F5 重新加载，或关闭此标签。";
+    t->error = L"页面暂时无响应，可按 Ctrl+F5 重新加载，或通过菜单任务管理器结束。";
+    t->unresponsive = true;
+    if (IsActive(*t)) UpdateWindowTitle();
     InvalidateChrome();
     return;
   }
-  if (t && (kind == COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED ||
-            kind == COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED)) {
+  if (kind == COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED) { InvalidateChrome(); return; }
+  if (t && kind == COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED) {
     sender->Reload();
     return;
   }

@@ -46,7 +46,7 @@ section { flex: 1; overflow: auto; padding: 8px 20px 40px; }
 .row:hover .actions { visibility: visible; }
 .row .actions button { height: 26px; padding: 0 8px; font-size: 12px; }
 .empty { color: var(--muted); padding: 24px 8px; }
-dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--fg); padding: 20px; width: 460px; }
+dialog { border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); padding: 20px; width: 460px; max-width: calc(100vw - 32px); }
 dialog::backdrop { background: rgba(0, 0, 0, 0.3); }
 dialog h2 { margin: 0 0 14px; font-size: 16px; }
 dialog label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 12px; }
@@ -56,6 +56,7 @@ dialog input:focus { border-color: var(--accent); }
 dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 #importList .row { justify-content: space-between; }
 #status { color: var(--muted); font-size: 13px; min-height: 18px; }
+@media(max-width:650px){header{flex-wrap:wrap;gap:8px;padding:12px}#search{order:2;flex-basis:100%;max-width:none}nav{width:116px;padding:8px 4px}section{padding:8px}.row .url{display:none}.row .title{min-width:0;max-width:none;flex:1}.row{flex-wrap:wrap}.row .actions{visibility:visible;width:100%}.folder{padding-left:4px!important}}
 </style>
 </head>
 <body>
@@ -66,12 +67,13 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top
   <button id="addFolder">新建文件夹</button>
   <button id="openImport">导入</button>
   <button id="export">导出</button>
+  <button id="undo">撤销</button><button id="batchMove" disabled>移动所选</button><button id="batchDelete" disabled>删除所选</button>
 </header>
 <main>
   <nav id="tree"></nav>
   <section>
     <div class="crumb" id="crumb"></div>
-    <div id="list"></div>
+    <p id="notice" role="status"></p><div id="list"></div>
   </section>
 </main>
 
@@ -109,6 +111,8 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top
   "use strict";
   var wv = window.chrome && window.chrome.webview;
   var tree = null, selected = 1, editing = null, pendingEdit = null;
+  var iconCache = new Map(), iconRequested = new Set(), iconVersion = 0, multi = new Set();
+  function selectionChanged(){ $('batchMove').disabled = $('batchDelete').disabled = multi.size === 0; }
   var $ = function (id) { return document.getElementById(id); };
   function send(message) { if (wv) wv.postMessage(JSON.stringify(message)); }
 
@@ -169,6 +173,8 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top
     r.draggable = true;
     r.addEventListener("dragstart", function (e) { e.dataTransfer.setData("text/x-bookmark-id", String(node.id)); });
     r.dataset.nodeId = String(node.id);
+    var check = document.createElement('input');check.type='checkbox';check.setAttribute('aria-label','选择书签');check.checked=multi.has(node.id);
+    check.onchange=function(){if(check.checked)multi.add(node.id);else multi.delete(node.id);selectionChanged()};r.appendChild(check);
     if (node.children) {
       dropTarget(r, function (id) { if (id !== node.id) send({ type: 'bm.move', id: id, parent: node.id, index: 1e9 }); });
       r.title = '拖到此处移入文件夹';
@@ -181,6 +187,7 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top
       icon.alt = "";
       icon.dataset.bookmarkId = String(node.id);
       icon.src = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="6" fill="none" stroke="#888"/><path d="M2 8h12M8 2c-4 3-4 9 0 12 4-3 4-9 0-12" fill="none" stroke="#888"/></svg>');
+      if (iconCache.has(node.id)) icon.src = iconCache.get(node.id);
       r.appendChild(icon);
     }
     var title = el("span", "title", node.title || node.url || "（无标题）");
@@ -209,6 +216,7 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top
     if (!tree) return;
     queueMicrotask(function () {
       var ids = Array.from(document.querySelectorAll('[data-bookmark-id]'), function (e) { return Number(e.dataset.bookmarkId); });
+      ids = ids.filter(function(id){if(iconRequested.has(id))return false;iconRequested.add(id);return true;});
       if (ids.length) send({ type: 'bm.icons', ids: ids });
     });
     renderTree();
@@ -219,13 +227,14 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top
       var hits = 0;
       roots().forEach(function (root) {
         walk(root, function (n, p) {
-          if (n.children || hits >= 500) return;
+          if (n.children) return;
           if ((n.title || "").toLowerCase().indexOf(q) >= 0 || (n.url || "").toLowerCase().indexOf(q) >= 0) {
-            list.appendChild(row(n, null, 0));
+            if (hits < 500) list.appendChild(row(n, null, 0));
             hits++;
           }
         });
       });
+      if (hits > 500) $("crumb").textContent = "搜索结果：显示前 500 条，共 " + hits + " 条，请缩小搜索范围";
       if (!hits) list.appendChild(el("div", "empty", "没有匹配的书签"));
       return;
     }
@@ -243,6 +252,7 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top
   }
 
   function openEdit(node, folderMode) {
+    $('editForm').dataset.batch='';$('editName').hidden=false;document.querySelector('label[for="editName"]').hidden=false;$('createFolder').hidden=false;$('editSave').textContent='保存';
     editing = node;
     var isFolder = folderMode || (node && node.children);
     $("editTitle").textContent = node ? (isFolder ? "重命名文件夹" : "编辑书签") : (isFolder ? "新建文件夹" : "添加书签");
@@ -271,6 +281,7 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top
   $("createFolder").onclick = function () { $("newFolderBlock").hidden = false; $("newFolderName").focus(); };
   $("editForm").addEventListener("submit", function (event) {
     event.preventDefault();
+    if($('editForm').dataset.batch==='1'){send({type:'bm.batch',action:'move',ids:Array.from(multi),parent:Number($('editParent').value)});$('editDialog').close();return}
     var name = $("editName").value.trim(), url = $("editUrl").value.trim(), folder = $("editForm").dataset.folder === "1";
     var newFolder = $("newFolderBlock").hidden ? '' : $("newFolderName").value.trim();
     if ((!folder && !/^https?:\/\//i.test(url)) || (folder && !name) || (!$("newFolderBlock").hidden && !newFolder)) {
@@ -295,10 +306,15 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top
   $("openImport").onclick = openImport;
   $("importClose").onclick = function () { $("importDialog").close(); };
   $("export").onclick = function () { send({ type: "bm.export" }); };
+  $('undo').onclick=function(){send({type:'bm.undo'})};
+  $('batchDelete').onclick=function(){if(confirm('删除所选 '+multi.size+' 项及其内容？可以撤销。'))send({type:'bm.batch',action:'remove',ids:Array.from(multi)})};
+  $('batchMove').onclick=function(){openEdit(null,true);$('editForm').dataset.batch='1';$('editTitle').textContent='移动所选';$('editName').hidden=true;document.querySelector('label[for="editName"]').hidden=true;$('createFolder').hidden=true;$('editSave').textContent='移动';$('editParent').focus()};
 
   function onMessage(data) {
     if (!data || typeof data !== "object") return;
+    if (data.type === 'bm.result') {$('notice').textContent=data.text;return;}
     if (data.type === "bm.tree") {
+      multi.clear();selectionChanged();iconCache.clear();iconRequested.clear();
       tree = data.tree;
       if (!find(selected)) selected = tree.bar.id;
       if (pendingEdit) {
@@ -312,13 +328,18 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top
       if (data.ok) { editing = null; $("editDialog").close(); }
       else $("editError").textContent = data.error || '保存失败，请重试';
     } else if (data.type === 'bm.icons.refresh') {
+      iconRequested.clear(); iconCache.clear(); iconVersion++;
       // 外壳存了新的网站图标：只重取当前列表的图标，不整页重画（滚动位置、展开的对话框都不动）
       var ids = Array.from(document.querySelectorAll('[data-bookmark-id]'), function (e) { return Number(e.dataset.bookmarkId); });
+      ids.forEach(id=>iconRequested.add(id));
       if (ids.length) send({ type: 'bm.icons', ids: ids });
     } else if (data.type === 'bm.icons') {
       (data.icons || []).forEach(function (item) {
         var img = document.querySelector('[data-bookmark-id="' + Number(item.id) + '"]');
-        if (img && item.src.startsWith('https://favicons.jisu.example/')) img.src = item.src;
+        if (item.src.startsWith('https://favicons.jisu.example/')) {
+          var src = item.src + '?v=' + iconVersion; iconCache.set(Number(item.id),src);
+          if (img) img.src = src;
+        }
       });
     } else if (data.type === "bm.sources") {
       var list = $("importList");

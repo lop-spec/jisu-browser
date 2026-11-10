@@ -160,7 +160,7 @@ void BrowserWindow::EnforceTabLimit() {
       const auto& tab = *window->tabs_[i];
       const bool privileged = tab.url.starts_with(L"chrome-extension://") || tab.pinned || tab.fromAgent;
       candidates.push_back({tab.id, i == window->active_, tab.agent || tab.leased || tab.media != nullptr ||
-          tab.mediaTarget != 0 || openers.contains(tab.id) || TabDownloading(tab.id), privileged, tab.lastUsed});
+          tab.mediaTarget != 0 || tab.newWindowArgs != nullptr || tab.openerId != 0 || openers.contains(tab.id) || TabDownloading(tab.id), privileged, tab.lastUsed});
     }
   }
   for (const uint32_t id : OldTabsToClose(candidates, static_cast<size_t>(settings_.maxRegularTabs))) {

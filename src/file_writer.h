@@ -7,6 +7,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <map>
+#include <set>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -66,11 +67,28 @@ class FileWriter {
       pending_.erase(it);
       busy_ = true;
       lock.unlock();
-      EnsureDirectory(ParentDirectory(path));
-      const bool saved = WriteFileAtomic(path, item.bytes, item.durable);
-      if (!saved) failed_ = true;
+      bool saved = EnsureDirectory(ParentDirectory(path));
+      if (saved && path.ends_with(L"\\Bookmarks") && GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        std::string previous;
+        saved = ReadFileBytes(path, previous);
+        if (saved && previous != item.bytes) {
+          for (int i = 3; i >= 2 && saved; --i) {
+            const auto source = path + L".backup-" + std::to_wstring(i - 1);
+            if (GetFileAttributesW(source.c_str()) != INVALID_FILE_ATTRIBUTES)
+              saved = CopyFileW(source.c_str(), (path + L".backup-" + std::to_wstring(i)).c_str(), FALSE) != FALSE;
+          }
+          if (saved) saved = WriteFileAtomic(path + L".backup-1", previous, item.durable);
+        }
+      }
+      if (saved) saved = WriteFileAtomic(path, item.bytes, item.durable);
       lock.lock();
+      if (!saved) {
+        failedPaths_.insert(path);
+        if (!stop_ && !pending_.contains(path)) pending_[path] = std::move(item);
+      } else failedPaths_.erase(path);
+      failed_ = !failedPaths_.empty();
       busy_ = false;
+      if (!saved && !stop_) cv_.wait_for(lock, std::chrono::milliseconds(1000), [this] { return stop_; });
       cv_.notify_all();
     }
   }
@@ -81,6 +99,7 @@ class FileWriter {
   std::thread worker_;
   bool busy_ = false;
   std::atomic<bool> failed_{false};
+  std::set<std::wstring> failedPaths_;
   bool stop_ = false;
 };
 

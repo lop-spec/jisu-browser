@@ -94,6 +94,7 @@ constexpr UINT kMenuTabListBase = 5000;
 constexpr UINT_PTR kTimerControllers = 14;
 constexpr UINT_PTR kTimerSuggestions = 15;
 constexpr UINT_PTR kTimerProfile = 16;
+constexpr UINT_PTR kTimerPlacement = 17;
 constexpr UINT kMenuOpen = 2001;
 constexpr UINT kMenuOpenNewTab = 2002;
 constexpr UINT kMenuEdit = 2003;
@@ -391,6 +392,7 @@ void BrowserWindow::FinishProfileLoad() {
   if (!loader->loadingBookmarks_) return;
   loader->bookmarks_ = std::move(*loader->loadingBookmarks_);
   loader->loadingBookmarks_.reset();
+  profile_->bookmarkSnapshot = loader->bookmarks_.Serialized();
   profile_->restoreTabs = std::move(loader->loadingRestore_);
   profile_->closedTabs = std::move(loader->loadingClosed_);
   loader->profileLoaded_ = true;
@@ -973,6 +975,13 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
                 t->crashPage = false;
                 t->url = source.Str();
               }
+              if (t->controller && IsStarrable(t->url)) {
+                const auto origin = FaviconOrigin(t->url);
+                const auto saved = self->settings_.siteZoom.find(origin);
+                const double wanted = saved == self->settings_.siteZoom.end() ? 1 : saved->second;
+                double actual = 1; t->controller->get_ZoomFactor(&actual);
+                if (std::abs(actual - wanted) > 0.001) t->controller->put_ZoomFactor(wanted);
+              }
               BOOL newDocument = TRUE; args->get_IsNewDocument(&newDocument);
               if (!newDocument) self->RecordVisit(*t);
               if (self->IsActive(*t)) {
@@ -1074,7 +1083,9 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
             auto* self = *owner;
             if (!self || self->destroyed_) return S_OK;
             if (Tab* t = self->FindTab(id)) {
-              BOOL success=FALSE; args->get_IsSuccess(&success); if(success) self->RecordVisit(*t);
+              BOOL success=FALSE; args->get_IsSuccess(&success);
+              if (success && !t->crashPage) self->RecordVisit(*t);
+              if (t->unresponsive) { t->unresponsive = false; t->error.clear(); if (self->IsActive(*t)) self->UpdateWindowTitle(); }
               t->loading = false;
               if (t->openerId) {
                 t->openerId = 0;  // 弹出页已经落地：打开者不再需要保护，按标签上限再收一次
@@ -1238,6 +1249,19 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
           })
           .Get(),
       &token);
+  tab.controller->add_ZoomFactorChanged(Callback<ICoreWebView2ZoomFactorChangedEventHandler>(
+      [owner, id](ICoreWebView2Controller* controller, IUnknown*) -> HRESULT {
+        auto* self = *owner;
+        if (!self || self->destroyed_ || self->options_.appMode) return S_OK;
+        const Tab* tab = self->FindTab(id); double factor = 1;
+        if (!tab || !IsStarrable(tab->url) || FAILED(controller->get_ZoomFactor(&factor))) return S_OK;
+        const auto origin = FaviconOrigin(tab->url);
+        const auto previous = self->settings_.siteZoom.find(origin);
+        if (previous != self->settings_.siteZoom.end() && std::abs(previous->second - factor) < 0.001) return S_OK;
+        if (std::abs(factor - 1) < 0.001) { if (previous == self->settings_.siteZoom.end()) return S_OK; self->settings_.siteZoom.erase(previous); }
+        else if (self->settings_.siteZoom.size() < 500 || previous != self->settings_.siteZoom.end()) self->settings_.siteZoom[origin] = factor;
+        self->SaveSettings(); return S_OK;
+      }).Get(), &token);
   tab.controller->add_GotFocus(Callback<ICoreWebView2FocusChangedEventHandler>(
                                    [owner](ICoreWebView2Controller*, IUnknown*) -> HRESULT {
                                      auto* self = *owner;
@@ -1398,6 +1422,40 @@ void BrowserWindow::OnPageMessage(Tab& tab, const std::string& text) {
     return;
   }
   bool changed = false;
+  if (type == "bm.undo") {
+    if (profile_->bookmarkUndo.empty()) { PostToPage(tab, "{\"type\":\"bm.result\",\"text\":\"暂无可撤销的操作\"}"); return; }
+    const auto snapshot = profile_->bookmarkUndo.back();
+    if (bookmarks_.RestoreSerialized(snapshot)) {
+      profile_->bookmarkUndoBytes -= snapshot.size(); profile_->bookmarkUndo.pop_back(); profile_->bookmarkSnapshot = snapshot;
+      OnBookmarksChanged();
+      PostToPage(tab, "{\"type\":\"bm.result\",\"text\":\"已撤销上一步操作\"}");
+    }
+    return;
+  }
+  if (type == "bm.batch") {
+    const auto action = message["action"].AsString();
+    std::set<int64_t> chosen;
+    for (const auto& value : message["ids"].Items()) if (chosen.size() < 1000) chosen.insert(static_cast<int64_t>(value.AsNumber()));
+    BookmarkNode* target = bookmarks_.FindById(static_cast<int64_t>(message["parent"].AsNumber()));
+    bool valid = !chosen.empty() && message["ids"].Items().size() <= 1000 && (action == "remove" || (action == "move" && target && target->folder));
+    for (const auto id : chosen) {
+      const auto* node = bookmarks_.FindById(id);
+      if (!node || bookmarks_.IsRoot(*node)) { valid = false; break; }
+      if (action == "move") for (const auto* p = target; p; p = p->parent) if (p == node) valid = false;
+    }
+    if (!valid) { PostToPage(tab, "{\"type\":\"bm.result\",\"text\":\"选择或目标文件夹无效，未修改书签\"}"); return; }
+    std::vector<int64_t> roots;
+    for (const auto id : chosen) {
+      const auto* node = bookmarks_.FindById(id); bool nested = false;
+      for (auto* p = node->parent; p; p = p->parent) if (chosen.contains(p->id)) nested = true;
+      if (!nested) roots.push_back(id);
+    }
+    for (const auto id : roots) {
+      if (action == "remove") bookmarks_.Remove(id);
+      else bookmarks_.Move(id, target->id, target->children.size());
+    }
+    OnBookmarksChanged(); PostToPage(tab, "{\"type\":\"bm.result\",\"text\":\"批量操作已完成，可撤销\"}"); return;
+  }
   if (type == "bm.save") {
     const auto id = static_cast<int64_t>(message["id"].AsNumber(0));
     const auto parentId = static_cast<int64_t>(message["parent"].AsNumber(1));
@@ -2078,6 +2136,7 @@ void BrowserWindow::NewTab(const std::wstring& url, bool activate, size_t at) {
 }
 
 size_t BrowserWindow::InsertTab(std::unique_ptr<Tab> tab, size_t at) {
+  if (!tab->lastUsed) tab->lastUsed = UseStamp();
   size_t pinned = 0;
   while (pinned < tabs_.size() && tabs_[pinned]->pinned) ++pinned;
   at = std::min(at, tabs_.size());
@@ -2538,6 +2597,7 @@ void BrowserWindow::ExecuteCommand(WPARAM command, LPARAM arg) {
   Tab* tab = ActiveTab();
   // 网页控件没建起来的标签：刷新就重新创建（内核整个没了就重建内核）
   auto recreate = [this](Tab& target) {
+    if (target.crashPage && target.webview) { target.crashPage = false; NavigateTab(target, target.url); return true; }
     if (target.controller || target.creating) return false;
     target.retried = false;
     target.error.clear();
@@ -2678,7 +2738,8 @@ void BrowserWindow::UpdateWindowTitle() {
   if (options_.appMode) { SetWindowTextW(hwnd_, options_.appTitle.c_str()); return; }
   const Tab* tab = ActiveTab();
   const std::wstring title =
-      (tab && !tab->title.empty() ? tab->title : std::wstring(kNewTabTitle)) + L" - " + kAppName;
+      (tab && !tab->title.empty() ? tab->title : std::wstring(kNewTabTitle)) + L" - " + kAppName +
+      (writerError_ ? L" [资料保存失败]" : L"");
   SetWindowTextW(hwnd_, title.c_str());
 }
 
@@ -2739,7 +2800,6 @@ void BrowserWindow::ToggleBookmark() {
   if (!tab || !profileLoaded_ || !IsStarrable(tab->url)) {
     return;
   }
-  (void)fromKeyboard;
   EditBookmark(bookmarks_.FindByUrl(tab->url), tab->title.empty() ? tab->url : tab->title, tab->url);
 }
 
@@ -2905,7 +2965,7 @@ void BrowserWindow::ShowBookmarkContextMenu(BookmarkNode& node, POINT screen) {
       else EditBookmark(current, current->title, current->url);
       break;
     case kMenuDelete:
-      if (folder && MessageBoxW(hwnd_, L"删除此文件夹及其全部书签？此操作不能撤销。", kAppName,
+      if (folder && MessageBoxW(hwnd_, L"删除此文件夹及其全部书签？可在书签管理器中撤销。", kAppName,
                                     MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) break;
       if (bookmarks_.Remove(id)) {
         OnBookmarksChanged();
@@ -2932,6 +2992,10 @@ void BrowserWindow::ShowMainMenu(POINT screen) {
   AppendMenuW(menu, MF_STRING, kMenuNewTab, L"新建标签页\tCtrl+T");
   AppendMenuW(menu, MF_STRING, kMenuDownloads, L"下载管理\tCtrl+J");
   AppendMenuW(menu, MF_STRING, kMenuSettings, L"设置 / 清除浏览数据");
+  double zoom = 1;
+  if (const Tab* tab = ActiveTab(); tab && tab->controller) tab->controller->get_ZoomFactor(&zoom);
+  const auto zoomLabel = L"当前缩放：" + std::to_wstring(static_cast<int>(std::lround(zoom * 100))) + L"%";
+  AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, zoomLabel.c_str());
   const wchar_t* actions[] = {L"新建窗口\tCtrl+N", L"页面查找\tCtrl+F", L"放大\tCtrl++", L"缩小\tCtrl+-",
                              L"重置缩放\tCtrl+0", L"打印\tCtrl+P", L"开发者工具\tF12", L"任务管理器"};
   for (UINT i = 0; i < ARRAYSIZE(actions); ++i) AppendMenuW(menu, MF_STRING, kMenuPageBase + i, actions[i]);
@@ -3018,6 +3082,15 @@ void BrowserWindow::OnBookmarksChanged() {
   if (!profileLoaded_) {
     return;
   }
+  const auto snapshot = bookmarks_.Serialized();
+  if (profile_->bookmarkSnapshot != snapshot && !profile_->bookmarkSnapshot.empty() && profile_->bookmarkSnapshot.size() <= 8 * 1024 * 1024) {
+    profile_->bookmarkUndoBytes += profile_->bookmarkSnapshot.size();
+    profile_->bookmarkUndo.push_back(std::move(profile_->bookmarkSnapshot));
+    while (profile_->bookmarkUndo.size() > 20 || profile_->bookmarkUndoBytes > 16 * 1024 * 1024) {
+      profile_->bookmarkUndoBytes -= profile_->bookmarkUndo.front().size(); profile_->bookmarkUndo.erase(profile_->bookmarkUndo.begin());
+    }
+  }
+  profile_->bookmarkSnapshot = snapshot;
   ScheduleBookmarkSave();  // 合并到 400ms 后在后台写盘：拖动、连续改名不再每次在界面线程上 fsync
   for (auto* window : liveWindows_) {
     if (window->profile_ != profile_) continue;
@@ -3052,6 +3125,11 @@ void BrowserWindow::LoadSettings() {
     settings_.askDownload = root["askDownload"].AsBool();
     settings_.downloadDirectory = FromUtf8(root["downloadDirectory"].AsString());
     if (root["searchEngine"].IsString()) settings_.searchEngine = FromUtf8(root["searchEngine"].AsString());
+    for (const auto& [origin, value] : root["siteZoom"].Members()) {
+      const auto site = FromUtf8(origin);
+      if (settings_.siteZoom.size() < 500 && site == FaviconOrigin(site) && !site.empty())
+        settings_.siteZoom[site] = std::clamp(value.AsNumber(1), 0.25, 5.0);
+    }
     settings_.bookmarkFolder = static_cast<int64_t>(root["bookmarkFolder"].AsNumber(1));
     settings_.maxRegularTabs = static_cast<int>(std::clamp(root["maxRegularTabs"].AsNumber(10), 1.0, 99.0));
     settings_.bookmarkBar = root["bookmarkBar"].AsBool(true);
@@ -3104,6 +3182,9 @@ void BrowserWindow::SaveSettings() {
   merged.Set("askDownload", json::Value::Bool(settings_.askDownload));
   merged.Set("downloadDirectory", json::Value::String(ToUtf8(settings_.downloadDirectory)));
   merged.Set("searchEngine", json::Value::String(ToUtf8(settings_.searchEngine)));
+  auto zoom = json::Value::MakeObject();
+  for (const auto& [origin, factor] : settings_.siteZoom) zoom.Set(ToUtf8(origin), json::Value::Number(factor));
+  merged.Set("siteZoom", std::move(zoom));
   profile_->writer.Write(profileDir_ + L"\\jisu-settings.json", json::Serialize(merged), true);
 }
 
@@ -3314,7 +3395,20 @@ LRESULT CALLBACK BrowserWindow::WndProcThunk(HWND hwnd, UINT msg, WPARAM wParam,
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
     self->hwnd_ = hwnd;
   }
-  return self ? self->WndProc(msg, wParam, lParam) : DefWindowProcW(hwnd, msg, wParam, lParam);
+  if (!self) return DefWindowProcW(hwnd, msg, wParam, lParam);
+  ++self->callbackDepth_;
+  const auto result = self->WndProc(msg, wParam, lParam);
+  if (msg == WM_NCDESTROY) self->nativeDestroyed_ = true;
+  --self->callbackDepth_;
+  if (self->destroyed_ && self->nativeDestroyed_ && self->callbackDepth_ == 0 && !liveWindows_.empty()) {
+    BrowserWindow* owner = self->root_;
+    liveWindows_.front()->PostTask([owner] {
+      std::erase_if(owner->detachedWindows_, [](const auto& window) {
+        return window->destroyed_ && window->nativeDestroyed_ && window->callbackDepth_ == 0;
+      });
+    });
+  }
+  return result;
 }
 
 LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -3429,6 +3523,7 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       return 0;
     case WM_SIZE:
+      if (revealed_ && !fullscreen_.Active()) SetTimer(hwnd_, kTimerPlacement, 700, nullptr);
       CloseExtensionPopup();
       if (wParam == SIZE_MINIMIZED) {
         PlaceAllTabs();  // 最小化时让内核降载；醒着的智能体标签移去屏幕外宿主
@@ -3490,6 +3585,7 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     case WM_MOVE:
     case WM_MOVING:
+      if (revealed_ && !fullscreen_.Active()) SetTimer(hwnd_, kTimerPlacement, 700, nullptr);
       if (Tab* tab = ActiveTab(); tab && tab->controller) {
         tab->controller->NotifyParentWindowPositionChanged();
       }
@@ -3642,6 +3738,7 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       return FALSE;
     case WM_TIMER:
+      if (wParam == kTimerPlacement) { KillTimer(hwnd_, kTimerPlacement); SaveWindowPlacement(); return 0; }
       if (wParam == kTimerProfile) { FinishProfileLoad(); return 0; }
       if (wParam == kTimerControllers) { WatchControllers(); return 0; }
       if (wParam == kTimerSuggestions) { KillTimer(hwnd_, kTimerSuggestions); ShowSuggestions(); return 0; }
@@ -3888,10 +3985,6 @@ void BrowserWindow::OnDestroy() {
       if (!primary->environment_ && !primary->options_.appMode) primary->ScheduleEnvironmentRecovery();
     }
     liveWindows_.front()->ScheduleSessionSave();  // 剩下的窗口接着记会话
-    BrowserWindow* owner = root_;
-    liveWindows_.front()->PostTask([owner] {
-      std::erase_if(owner->detachedWindows_, [](const auto& window) { return window->destroyed_; });
-    });
   }
 }
 
@@ -3970,6 +4063,7 @@ void BrowserWindow::UpdateFullscreen() {
     CancelTabDrag();
     CancelBookmarkDrag();
     hover_ = {}; pressed_ = {};
+    if (!fullscreen_.Active()) SaveWindowPlacement();
     if (!fullscreen_.Enter(hwnd_)) {
       browserFullscreen_ = false;
       ExitContentFullscreen();
@@ -4117,6 +4211,7 @@ const ChromeState& BrowserWindow::BuildChromeState() const {
   for (size_t i = 0; i < tabs_.size(); ++i) {
     const Tab& tab = *tabs_[i];
     std::wstring title = tab.title.empty() ? std::wstring(tab.agent ? kAgentTabTitle : kNewTabTitle) : tab.title;
+    if (tab.unresponsive) title = L"未响应 · " + title;
     ChromeTab item{std::move(title), i == active_, tab.loading, tab.agent, tab.agentAwake,
                    tab.agent ? L"" : favicons_.Request(tab.url.empty() ? tab.pendingUrl : tab.url)};
     item.audible = tab.audible;

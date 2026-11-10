@@ -57,6 +57,7 @@ try{
  $record=Join-Path $root 'Downloads.json'
  "DOWNLOAD requests=$script:payloads record=$(Test-Path -LiteralPath $record) strip=$([DailyTest]::GetPropW($h,'JisuBrowser.StripTabs').ToInt64()) session=$((Get-Content -LiteralPath (Join-Path $root 'Session.json') -Raw -Encoding UTF8))"
  if(-not $Baseline){
+  if([DailyTest]::GetPropW($h,'JisuBrowser.StripTabs').ToInt64() -ne 3){throw 'download placeholder tab was not reclaimed'}
   if(-not (Test-Path -LiteralPath $record)){throw 'download record missing'}
   $rows=(Get-Content -LiteralPath $record -Raw -Encoding UTF8|ConvertFrom-Json).rows
   if(-not @($rows|Where-Object {$_.state -eq 2 -and (Test-Path -LiteralPath $_.path)}).Count){throw 'real download did not complete'}

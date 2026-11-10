@@ -1,5 +1,5 @@
 // 浏览器主窗口：原生标签条 + 地址栏 + 书签栏，每个标签一个 WebView2 控件，另预建一个隐藏的备用控件。
-// 智能体标签（Pi 的 browser 工具经 AgentBridge 驱动）也在标签条里，平时放在屏幕外宿主窗口，用户点开时移进主窗口。
+// 智能体标签默认留在隐藏池和屏幕外宿主里，只有明确交接才进入标签条与主窗口。
 #pragma once
 
 #include "agent_bridge.h"
@@ -75,6 +75,7 @@ class BrowserWindow : public AgentHost {
     std::wstring addressDraft;
     bool hasDraft = false;
     bool crashPage = false;
+    bool unresponsive = false;
     bool typedNavigation = false;
     bool retried = false;     // 控件创建失败后已重试过一次
     bool visible = true;      // 控件新建时默认可见
@@ -128,6 +129,7 @@ class BrowserWindow : public AgentHost {
     bool askDownload = false;
     std::wstring downloadDirectory;
     std::wstring searchEngine = L"bing";
+    std::map<std::wstring, double> siteZoom;
     bool importedDefaultBrowser = false;
     int maxRegularTabs = 10;
     int64_t bookmarkFolder = 1;
@@ -137,7 +139,7 @@ class BrowserWindow : public AgentHost {
     bool windowMaximized = false;
   };
 
-  // 会话里的一个标签：非正常退出（崩溃、被结束、关机）后下次启动恢复
+  // 会话里的一个标签：非正常退出或启用「继续上次浏览」后按窗口分组恢复
   struct SessionTab {
     uint32_t window = 0;
     std::wstring url;
@@ -170,6 +172,7 @@ class BrowserWindow : public AgentHost {
   void SaveDownloads();
   void LoadDownloads();
   std::string DownloadsJson() const;
+  std::wstring DownloadsFile() const;
   bool TabDownloading(uint32_t id) const;
   void OpenSettings();
   void PageAction(UINT action);
@@ -407,6 +410,9 @@ class BrowserWindow : public AgentHost {
     bool downloadsLoaded = false;
     ULONGLONG downloadsSaved = 0;
     std::string lastSession;
+    std::string bookmarkSnapshot;
+    std::vector<std::string> bookmarkUndo;
+    size_t bookmarkUndoBytes = 0;
     bool bookmarksDirty = false;
     bool sessionWanted = false;    // 日常主实例才读写会话（后台启动在窗口显示前不写，免得盖掉上次没恢复的会话）
     bool sessionWritable = false;
@@ -455,7 +461,7 @@ class BrowserWindow : public AgentHost {
   AgentBridgeConfig agentConfig_;  // 智能体标签的省电设置（桥启用时从配置读入）
   bool freezeTimerRunning_ = false;
 
-  // 书签与设置：Create 时起后台线程读，首帧前等它读完
+  // 小设置在建窗前读入；书签与会话后台暂存，完成后接手，首帧不等它们
   BookmarkStore& bookmarks_;
   HistoryStore& history_;
   FaviconCache& favicons_;
@@ -558,6 +564,9 @@ class BrowserWindow : public AgentHost {
   bool editing_ = false;          // 用户正在地址栏里输入，网页地址变化时不覆盖
   bool settingAddress_ = false;   // 程序在改地址栏文字（EN_CHANGE 不算用户输入）
   bool destroyed_ = false;
+  bool nativeDestroyed_ = false;
+  unsigned callbackDepth_ = 0;
+  bool writerError_ = false;
   bool metricsWritten_ = false;
   double newTabRequestMs_ = 0;    // 第一次 Ctrl+T/点 + 的时刻，用来量备用控件换上的耗时
   uint32_t newTabMeasureId_ = 0;

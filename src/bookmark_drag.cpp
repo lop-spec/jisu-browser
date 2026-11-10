@@ -12,7 +12,7 @@ void BrowserWindow::CancelBookmarkDrag() {
 void BrowserWindow::UpdateBookmarkDrop(POINT point) {
   dropBookmark_ = -1; dropIntoFolder_ = false; dropParentId_ = 0;
   const float x = point.x / layout_.scale, y = point.y / layout_.scale;
-  const float top = layout_.tabStripHeight + layout_.toolbarHeight;
+  const float top = layout_.bookmarks.empty() ? layout_.tabStripHeight + layout_.toolbarHeight : layout_.bookmarks.front().top;
   if (x < 0 || x >= layout_.width || y < top || y >= top + layout_.bookmarkBarHeight) {
     SetCursor(LoadCursorW(nullptr, IDC_NO)); InvalidateChrome(); return;
   }

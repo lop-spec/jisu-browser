@@ -124,7 +124,11 @@ void BrowserWindow::FinishTabDrag(POINT point) {
                  SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     return;
   }
-  Options options = options_;
+  Options options;
+  options.userDataFolder = profileDir_; options.defaultUserData = options_.defaultUserData;
+  options.agentConfigPath = options_.agentConfigPath; options.noAgent = options_.noAgent;
+  options.renderTarget = options_.renderTarget; options.trackingPrevention = options_.trackingPrevention;
+  options.browserArgs = options_.browserArgs; options.spare = options_.spare;
   options.hasBounds = true;
   options.x = screen.x - static_cast<int>(grab * layout_.scale);
   options.y = screen.y - static_cast<int>(kTabCenterY * layout_.scale);

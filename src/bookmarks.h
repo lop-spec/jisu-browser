@@ -3,6 +3,7 @@
 #pragma once
 
 #include "common.h"
+#include "json.h"
 #include <unordered_map>
 
 #include <cstdint>
@@ -40,6 +41,7 @@ class BookmarkStore {
   // 读入书签文件；文件不存在时得到三个空根目录。可在后台线程调用（之后只在 UI 线程用）
   bool Load(const std::wstring& file);
   bool Save();
+  bool RestoreSerialized(const std::string& bytes);
   // 整份文件内容：界面线程上生成（快），交给后台写盘；写出后调 MarkWritten
   std::string Serialized() const;
   void MarkWritten() { existed_ = true; }
@@ -78,6 +80,7 @@ class BookmarkStore {
   std::unique_ptr<BookmarkNode> MakeRoot(int64_t id, const wchar_t* title, const char* guid);
   void Touch();
   void EnsureIndex();
+  bool LoadDocument(const json::Value& document);
   std::unordered_map<int64_t, BookmarkNode*> byId_;
   std::unordered_map<std::wstring, BookmarkNode*> byUrl_;
   uint64_t indexedRevision_ = 0;

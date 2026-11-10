@@ -9,7 +9,17 @@ constexpr ULONGLONG kQuietMs = 1500;     // 最后一次改动后安静这么久
 constexpr ULONGLONG kMaxDelayMs = 8000;  // 一直有改动时也至少这么久写一次
 int64_t Now() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }
 std::wstring Lower(std::wstring s) { for (auto& c : s) c = static_cast<wchar_t>(std::towlower(c)); return s; }
-std::wstring SearchKey(const std::wstring& title, const std::wstring& url) { return Lower(title + L" " + url); }
+std::wstring DecodeUrl(const std::wstring& input) {
+  const auto bytes = ToUtf8(input); std::string out;
+  auto hex = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; };
+  for (size_t i = 0; i < bytes.size(); ++i) {
+    if (bytes[i] == '%' && i + 2 < bytes.size() && hex(bytes[i+1]) >= 0 && hex(bytes[i+2]) >= 0) {
+      out.push_back(static_cast<char>(hex(bytes[i+1])*16 + hex(bytes[i+2]))); i += 2;
+    } else out.push_back(bytes[i] == '+' ? ' ' : bytes[i]);
+  }
+  return FromUtf8(out);
+}
+std::wstring SearchKey(const std::wstring& title, const std::wstring& url) { return Lower(title + L" " + url + L" " + DecodeUrl(url)); }
 json::Value Row(int64_t id, int64_t at, const std::wstring& url, const std::wstring& title) {
   auto row = json::Value::MakeObject();
   row.Set("id", json::Value::Number(static_cast<double>(id))); row.Set("at", json::Value::Number(static_cast<double>(at)));
@@ -22,7 +32,7 @@ std::wstring HistoryStore::SafeUrl(std::wstring url) {
   const auto authority = url.find(L"://") + 3, end = url.find_first_of(L"/?#", authority);
   if (url.substr(authority, end - authority).find(L'@') != std::wstring::npos) return {};
   // code alone is a normal business parameter. Treat it as OAuth only with callback/state evidence.
-  const auto lower = Lower(url);
+  const auto lower = Lower(DecodeUrl(url));
   const bool oauth = lower.find(L"state=") != std::wstring::npos || lower.find(L"/callback") != std::wstring::npos ||
                      lower.find(L"/oauth") != std::wstring::npos || lower.find(L"/authorize") != std::wstring::npos;
   const auto start = url.find_first_of(L"?#");
@@ -31,11 +41,13 @@ std::wstring HistoryStore::SafeUrl(std::wstring url) {
   size_t pos = start;
   while (pos < url.size()) {
     const wchar_t delimiter = url[pos++];
-    const auto stop = url.find_first_of(L"&#", pos);
+    const auto stop = url.find_first_of(L"?&#", pos);
     const auto part = url.substr(pos, stop == std::wstring::npos ? stop : stop - pos);
-    auto key = Lower(part.substr(0, part.find(L'=')));
+    auto key = Lower(DecodeUrl(part.substr(0, part.find(L'='))));
     const bool secret = key == L"access_token" || key == L"id_token" || key == L"refresh_token" ||
-        key == L"authorization" || key == L"password" || key == L"session_token" || (oauth && (key == L"code" || key == L"state"));
+        key == L"authorization" || key == L"password" || key == L"session_token" || key == L"token" ||
+        key == L"api_key" || key == L"apikey" || key == L"secret" || key == L"signature" || key == L"sig" ||
+        key == L"x-amz-signature" || key == L"x-oss-signature" || key == L"security-token" || (oauth && (key == L"code" || key == L"state"));
     if (!secret && !part.empty()) {
       wchar_t sep = delimiter;
       if (sep == L'&' && out.find(L'?') == std::wstring::npos) sep = L'?';

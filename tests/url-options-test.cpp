@@ -84,6 +84,30 @@ int main() {
   DeleteFileW(file.c_str());
   RemoveDirectoryW(ParentDirectory(file).c_str());
 
+  const auto blocker = file + L"-blocker";
+  EnsureDirectory(ParentDirectory(blocker));
+  Check(WriteFileAtomic(blocker, "not-a-directory"), "create write-failure fixture");
+  {
+    FileWriter writer; writer.Write(blocker + L"\\saved.json", "retained", true);
+    Check(!writer.Flush(250) && writer.Failed(), "write failure reported");
+    DeleteFileW(blocker.c_str()); EnsureDirectory(blocker);
+    Check(writer.Flush(5000) && !writer.Failed(), "write retries after storage recovers");
+    std::string recovered; Check(ReadFileBytes(blocker + L"\\saved.json", recovered) && recovered == "retained", "failed data retained");
+  }
+  DeleteFileW((blocker + L"\\saved.json").c_str()); RemoveDirectoryW(blocker.c_str());
+  const auto bookmarkFile = ParentDirectory(file) + L"\\Bookmarks";
+  {
+    FileWriter writer;
+    writer.Write(bookmarkFile,"one",true); Check(writer.Flush(),"bookmark first write");
+    writer.Write(bookmarkFile,"two",true); Check(writer.Flush(),"bookmark second write");
+    writer.Write(bookmarkFile,"three",true); Check(writer.Flush(),"bookmark third write");
+    std::string previous; Check(ReadFileBytes(bookmarkFile+L".backup-1",previous)&&previous=="two","bookmark latest backup");
+    Check(ReadFileBytes(bookmarkFile+L".backup-2",previous)&&previous=="one","bookmark rolling backup");
+  }
+  DeleteFileW(bookmarkFile.c_str());
+  for(int i=1;i<=3;++i)DeleteFileW((bookmarkFile+L".backup-"+std::to_wstring(i)).c_str());
+  RemoveDirectoryW(ParentDirectory(file).c_str());
+
   if (!failures) std::puts("PASS address-bar normalization; --single-argument; --background; surrogate-safe truncation; background writer");
   return failures ? 1 : 0;
 }

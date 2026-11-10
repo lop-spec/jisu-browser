@@ -256,6 +256,20 @@ bool BookmarkStore::Load(const std::wstring& file) {
     }
     return !existed_;  // 不存在算成功（空书签）；存在却读不了算失败（原文件已另存）
   }
+  return LoadDocument(document);
+}
+
+bool BookmarkStore::RestoreSerialized(const std::string& bytes) {
+  json::Value document;
+  return json::Parse(bytes, document) && LoadDocument(document);
+}
+
+bool BookmarkStore::LoadDocument(const json::Value& document) {
+  const auto& roots = document["roots"];
+  if (!roots.IsObject()) return false;
+  for (auto* root : {bar_.get(), other_.get(), mobile_.get()}) {
+    root->children.clear(); root->unknownChildren.clear();
+  }
   existed_ = true;
   extraRoots_ = Extra(roots, {"bookmark_bar","other","synced"});
   extraTop_ = Extra(document, {"roots","version","checksum"});
@@ -299,7 +313,7 @@ bool BookmarkStore::Load(const std::wstring& file) {
   readChildren(readChildren, roots["bookmark_bar"], *bar_);
   readChildren(readChildren, roots["other"], *other_);
   readChildren(readChildren, roots["synced"], *mobile_);
-  nextId_ = maxId + 1;
+  nextId_ = std::max(nextId_, maxId + 1);
   // 修补 id 冲突与缺失的 GUID
   auto fix = [&](auto&& self, BookmarkNode& parent) -> void {
     for (auto& child : parent.children) {
