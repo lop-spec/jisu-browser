@@ -36,6 +36,8 @@ inline bool IsInternalPage(const std::wstring& url) {
 inline bool IsStarrable(const std::wstring& url) { return IsWebUrl(url) && !url.starts_with(kNtpOrigin); }
 
 inline std::wstring DisplayUrl(const std::wstring& url) {
+  if (url == L"https://newtab.jisu.example/downloads.html") return L"jisu://downloads";
+  if (url == L"https://newtab.jisu.example/settings.html") return L"jisu://settings";
   if (url == L"https://newtab.jisu.example/history.html") return L"jisu://history";
   if (url == L"https://newtab.jisu.example/player.html") return L"jisu://player";
   if (url == kExtensionsUrl) return L"jisu://extensions";
@@ -137,6 +139,8 @@ inline std::wstring ToNavigableUrl(const std::wstring& input) {
   if (lower == kBookmarksDisplay || lower.starts_with(std::wstring(kBookmarksDisplay) + L"#")) {
     return kBookmarksUrl + input.substr(wcslen(kBookmarksDisplay));
   }
+  if (lower == L"jisu://downloads") return L"https://newtab.jisu.example/downloads.html";
+  if (lower == L"jisu://settings") return L"https://newtab.jisu.example/settings.html";
   if (lower == L"jisu://history") return L"https://newtab.jisu.example/history.html";
   if (lower == L"jisu://player") return L"https://newtab.jisu.example/player.html";
   if (lower == L"jisu://extensions") return kExtensionsUrl;
@@ -164,11 +168,24 @@ inline std::wstring ToNavigableUrl(const std::wstring& input) {
       }
     }
     const std::wstring host = lower.substr(0, lower.find_first_of(L":/?#"));
-    if (host == L"localhost" || IsDottedQuad(host)) {
+    const auto colon = lower.find(L':');
+    const auto slash = lower.find(L'/');
+    const bool hostChars = !host.empty() && host.find_first_not_of(L"abcdefghijklmnopqrstuvwxyz0123456789-.") == std::wstring::npos;
+    bool portHost = false;
+    if (hostChars && colon != std::wstring::npos && (slash == std::wstring::npos || colon < slash)) {
+      const auto port = lower.substr(colon + 1, lower.find_first_of(L"/?#", colon + 1) - colon - 1);
+      if (!port.empty() && port.size() <= 5 && port.find_first_not_of(L"0123456789") == std::wstring::npos)
+        portHost = std::stoi(port) > 0 && std::stoi(port) <= 65535;
+    }
+    if (host == L"localhost" || IsDottedQuad(host) || portHost ||
+        (hostChars && host.find(L'.') == std::wstring::npos && slash != std::wstring::npos)) {
       return L"http://" + input;
     }
     // 像域名：至少一个点，首尾不是点，最后一段不全是数字（"1.5" "3.14" 走搜索）
     const size_t lastDot = host.rfind(L'.');
+    const auto suffix = lastDot == std::wstring::npos ? std::wstring() : host.substr(lastDot + 1);
+    if (suffix == L"md" || suffix == L"js" || suffix == L"txt" || suffix == L"json" || suffix == L"cpp" || suffix == L"log")
+      return kSearchPrefix + UrlEncode(input);
     if (lastDot != std::wstring::npos && host.front() != L'.' && host.back() != L'.' &&
         host.substr(lastDot + 1).find_first_not_of(L"0123456789") != std::wstring::npos) {
       return L"https://" + input;

@@ -336,9 +336,8 @@ std::wstring FaviconCache::Request(const std::wstring& url) {
   std::lock_guard<std::mutex> lock(state.mutex);
   auto known = state.known.find(key);
   if (known == state.known.end()) {
-    // 每个源站只查一次盘，之后重绘只查内存
-    const bool exists = GetFileAttributesW(state.File(key).c_str()) != INVALID_FILE_ATTRIBUTES;
-    known = state.known.emplace(key, exists ? 1 : 0).first;
+    // UI/首帧绝不查盘；工作线程检查缓存并发更新通知。
+    known = state.known.emplace(key, 0).first;
   }
   if (known->second == 1) return state.File(key);
   if (known->second == 0 && !state.stop && state.queue.size() < kMaxQueue && state.requested.insert(origin).second) {

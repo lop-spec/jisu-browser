@@ -6,7 +6,7 @@ namespace jisu {
 namespace { constexpr wchar_t kHistoryUrl[]=L"https://newtab.jisu.example/history.html"; }
 void BrowserWindow::RecordVisit(Tab& tab) {
   if(tab.agent || !options_.metricsPath.empty() || options_.preheatSeconds>0 || HistoryStore::SafeUrl(tab.url).empty())return;
-  history_.Start(profileDir_+L"\\History.json");history_.Visit(tab.url,tab.title);
+  history_.Start(profileDir_+L"\\History.json");history_.Visit(tab.url,tab.title,0,tab.typedNavigation);tab.typedNavigation=false;
 }
 void BrowserWindow::OpenHistory() {
   for(size_t i=0;i<tabs_.size();++i)if(tabs_[i]->url==kHistoryUrl&&!tabs_[i]->agent){Activate(i);return;}
@@ -29,6 +29,15 @@ bool BrowserWindow::HandleHistoryMessage(Tab& tab,const std::string& text) {
   }
   auto query=FromUtf8(message["query"].AsString());if(query.size()>200)query.resize(200);
   const auto offset=static_cast<size_t>(std::clamp(message["offset"].AsNumber(),0.0,20000.0));
-  PostToPage(tab,history_.Query(query,offset));return true;
+  const auto shared = profile_; const auto alive = std::weak_ptr<int>(alive_); const auto target = hwnd_; const auto id = tab.id;
+  std::thread([this, shared, alive, target, id, query, offset] {
+    const auto result = shared->history.Query(query, offset);
+    auto* task = new std::function<void()>([this, alive, id, result] {
+      if (alive.expired()) return;
+      if (Tab* current = FindTab(id); current && current->url == kHistoryUrl) PostToPage(*current, result);
+    });
+    if (alive.expired() || !PostMessageW(target, WM_APP + 6, 0, reinterpret_cast<LPARAM>(task))) delete task;
+  }).detach();
+  return true;
 }
 }  // namespace jisu

@@ -59,6 +59,7 @@ void BrowserWindow::ShowTabContextMenu(size_t index, POINT screen) {
   const UINT command = static_cast<UINT>(
       TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN, screen.x, screen.y, hwnd_, nullptr));
   DestroyMenu(menu);
+  if (destroyed_ || !IsWindow(hwnd_)) return;
   // 菜单开着时这个标签可能已被关掉（自动关旧标签、网页 window.close）：按 id 重新找
   Tab* current = FindTab(id);
   const size_t at = current ? IndexOf(*current) : tabs_.size();
@@ -156,6 +157,7 @@ void BrowserWindow::ToggleMuted(size_t index) {
   audio->put_IsMuted(tab.muted ? TRUE : FALSE);
   Relayout();
   InvalidateChrome();
+  ScheduleSessionSave();
 }
 
 void BrowserWindow::RememberClosedTab(const Tab& tab) {
@@ -166,7 +168,9 @@ void BrowserWindow::RememberClosedTab(const Tab& tab) {
     return;
   }
   auto& closed = profile_->closedTabs;
-  closed.push_back(ClosedTab{url, tab.title});
+  const auto safe = IsWebUrl(url) ? HistoryStore::SafeUrl(url) : url;
+  if (safe.empty()) return;
+  closed.push_back(ClosedTab{safe, tab.title, IndexOf(tab), tab.pinned, tab.muted});
   if (closed.size() > kClosedTabLimit) closed.erase(closed.begin());
 }
 
@@ -175,8 +179,12 @@ void BrowserWindow::ReopenClosedTab() {
   if (closed.empty()) return;
   const ClosedTab item = closed.back();
   closed.pop_back();
-  NewTab(item.url, true);
-  if (Tab* tab = ActiveTab(); tab && tab->title.empty()) tab->title = item.title;
+  NewTab(item.url, true, item.index);
+  if (Tab* tab = ActiveTab()) {
+    tab->title = item.title;
+    tab->muted = item.muted;
+    if (item.pinned) TogglePinned(active_);
+  }
   InvalidateChrome();
 }
 
@@ -256,7 +264,8 @@ void BrowserWindow::SaveSession(bool clean, bool durable) {
     if (!main) main = window;
     for (size_t i = 0; i < window->tabs_.size(); ++i) {
       const Tab& tab = *window->tabs_[i];
-      const std::wstring& url = tab.url.empty() ? tab.pendingUrl : tab.url;
+      std::wstring url = tab.url.empty() ? tab.pendingUrl : tab.url;
+      if (IsWebUrl(url) && !IsInternalPage(url)) url = HistoryStore::SafeUrl(url);
       if (tab.agent || url.empty() || IsNewTabPageUrl(url) || url.size() > 16384) continue;
       out += first ? "{\"url\":" : ",{\"url\":";
       first = false;
@@ -264,10 +273,23 @@ void BrowserWindow::SaveSession(bool clean, bool durable) {
       out += ",\"title\":";
       json::AppendQuoted(out, ToUtf8(TruncateUtf16(tab.title, 512)));
       out += std::string(",\"active\":") + (window == main && i == window->active_ ? "true" : "false");
-      out += std::string(",\"pinned\":") + (tab.pinned ? "true" : "false") + "}";
+      out += std::string(",\"pinned\":") + (tab.pinned ? "true" : "false");
+      out += std::string(",\"muted\":") + (tab.muted ? "true" : "false");
+      out += ",\"lastUsed\":" + std::to_string(tab.lastUsed) + "}";
     }
   }
+  out += "],\"closed\":[";
+  bool firstClosed = true;
+  for (const auto& tab : profile_->closedTabs) {
+    if (!firstClosed) out += ','; firstClosed = false;
+    out += "{\"url\":"; json::AppendQuoted(out, ToUtf8(tab.url));
+    out += ",\"title\":"; json::AppendQuoted(out, ToUtf8(TruncateUtf16(tab.title, 512)));
+    out += ",\"index\":" + std::to_string(tab.index) + ",\"pinned\":" + (tab.pinned ? "true" : "false") +
+        ",\"muted\":" + (tab.muted ? "true" : "false") + "}";
+  }
   out += "]}";
+  if (!durable && out == profile_->lastSession) return;
+  profile_->lastSession = out;
   profile_->writer.Write(SessionFile(), std::move(out), durable);
 }
 
@@ -286,6 +308,8 @@ void BrowserWindow::RestoreSession() {
     tab->pendingUrl = item.url;
     tab->title = item.title;
     tab->pinned = item.pinned;
+    tab->muted = item.muted;
+    tab->lastUsed = item.lastUsed;
     tab->lazy = true;
     if (item.active || !chosen) chosen = tab.get();
     restored.push_back(std::move(tab));
@@ -389,6 +413,16 @@ void BrowserWindow::OnProcessFailed(uint32_t id, COREWEBVIEW2_PROCESS_FAILED_KIN
     });
     return;
   }
+  if (t && kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE) {
+    t->error = L"页面暂时无响应，可按 Ctrl+F5 重新加载，或关闭此标签。";
+    InvalidateChrome();
+    return;
+  }
+  if (t && (kind == COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED ||
+            kind == COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED)) {
+    sender->Reload();
+    return;
+  }
   if (!t || kind != COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED) {
     return;
   }
@@ -417,6 +451,7 @@ void BrowserWindow::OnProcessFailed(uint32_t id, COREWEBVIEW2_PROCESS_FAILED_KIN
         L"<h2 style=\"color:#1f1f1f;font-weight:600\">这个页面崩溃了</h2>"
         L"<p>一分钟内连续崩溃两次，已停止自动重新加载。</p>" +
         (IsWebUrl(url) ? L"<p><a href=\"" + HtmlEscape(url) + L"\">重新加载</a></p>" : std::wstring()) + L"</body>";
+    t->crashPage = true;
     sender->NavigateToString(page.c_str());
   } else if (IsActive(*t)) {
     sender->Reload();

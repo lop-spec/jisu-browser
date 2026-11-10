@@ -180,6 +180,12 @@ LRESULT CALLBACK BrowserWindow::AddressBarProc(HWND hwnd, UINT msg, WPARAM wPara
                                                DWORD_PTR data) {
   auto* self = reinterpret_cast<BrowserWindow*>(data);
   switch (msg) {
+    case WM_IME_STARTCOMPOSITION: self->imeComposing_ = true; self->HideSuggestions(); break;
+    case WM_IME_ENDCOMPOSITION: self->imeComposing_ = false; break;
+    case WM_CHAR: self->allowInline_ = wParam >= 32 && !self->imeComposing_; break;
+    case WM_KEYDOWN:
+      if (wParam == VK_BACK || wParam == VK_DELETE) self->allowInline_ = false;
+      break;
     case WM_CONTEXTMENU: {
       POINT screen{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
       if (screen.x == -1 && screen.y == -1) {  // 键盘调出：菜单放在地址栏左下
@@ -222,6 +228,7 @@ void BrowserWindow::ShowAddressBarMenu(POINT screen) {
   const UINT command = static_cast<UINT>(
       TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN, screen.x, screen.y, hwnd_, nullptr));
   DestroyMenu(menu);
+  if (destroyed_ || !IsWindow(hwnd_)) return;
   switch (command) {
     case kMenuEditUndo: SendMessageW(edit_, EM_UNDO, 0, 0); break;
     case kMenuEditCut: SendMessageW(edit_, WM_CUT, 0, 0); break;
@@ -288,6 +295,7 @@ void BrowserWindow::ShowBookmarkBarMenu(POINT screen) {
   const UINT command = static_cast<UINT>(
       TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN, screen.x, screen.y, hwnd_, nullptr));
   DestroyMenu(menu);
+  if (destroyed_ || !IsWindow(hwnd_)) return;
   switch (command) {
     case kMenuBarAddPage: {
       const auto edit = ShowBookmarkEditor(hwnd_, instance_, bookmarks_, title, url, bookmarks_.Bar().id, false);
@@ -351,6 +359,7 @@ void BrowserWindow::ShowPopupBlockedMenu(POINT screen) {
   const UINT command = static_cast<UINT>(
       TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN, screen.x, screen.y, hwnd_, nullptr));
   DestroyMenu(menu);
+  if (destroyed_ || !IsWindow(hwnd_)) return;
   Tab* current = FindTab(id);
   if (!current || IndexOf(*current) >= tabs_.size()) return;
   std::vector<std::wstring> open;
@@ -402,8 +411,10 @@ void BrowserWindow::FlushForEndSession() {
     window->FlushBookmarkSave();
   }
   SaveSession(false, true);
-  history_.Flush();
-  profile_->writer.Flush(4000);
+  ShutdownBlockReasonCreate(hwnd_, L"正在保存浏览资料");
+  history_.Flush(1200);
+  profile_->writer.Flush(1200);
+  ShutdownBlockReasonDestroy(hwnd_);
 }
 
 // ---------------------------------------------------------------------------

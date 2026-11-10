@@ -14,7 +14,10 @@ param(
   [string]$OutputFile
 )
 $ErrorActionPreference = 'Stop'
-Add-Type -TypeDefinition @'
+$compiler = New-Object CodeDom.Compiler.CompilerParameters
+$compiler.GenerateInMemory = $true
+$compiler.TempFiles = New-Object CodeDom.Compiler.TempFileCollection([IO.Path]::GetTempPath(), $false)
+Add-Type -CompilerParameters $compiler -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;

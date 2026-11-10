@@ -13,16 +13,18 @@ class HistoryStore {
  public:
   ~HistoryStore();
   void Start(const std::wstring& file);
-  void Visit(std::wstring url, std::wstring title, int64_t now = 0);
+  void Visit(std::wstring url, std::wstring title, int64_t now = 0, bool typed = false);
+  struct Suggestion { std::wstring url, title; uint64_t visits = 0, typed = 0; };
+  std::vector<Suggestion> Suggest(std::wstring query, size_t limit = 8);
   void Title(const std::wstring& url, const std::wstring& title);
   void Remove(int64_t id);
   void Clear();
   std::string Query(std::wstring query, size_t offset = 0, size_t limit = 100);
   bool WaitIdle(unsigned timeoutMs = 5000);
-  void Flush();  // 关机/注销：把未写的改动马上写盘并等它写完
+  void Flush(unsigned timeoutMs = 3000);  // 关机/注销：把未写的改动马上写盘并等它写完
   static std::wstring SafeUrl(std::wstring url);
  private:
-  struct Entry { int64_t id, at; std::wstring url, title, search; };  // search：小写「标题 网址」，查询不再逐条转换
+  struct Entry { int64_t id, at; std::wstring url, title, search; uint64_t visits = 1, typed = 0; };  // search：小写「标题 网址」，查询不再逐条转换
   struct Operation { int kind; Entry entry; };
   void Queue(Operation op);
   void Run();

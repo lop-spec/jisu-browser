@@ -4,6 +4,7 @@
 #include "common.h"
 
 #include <chrono>
+#include <atomic>
 #include <condition_variable>
 #include <map>
 #include <mutex>
@@ -37,10 +38,12 @@ class FileWriter {
     cv_.notify_all();
   }
 
+  bool Failed() const { return failed_.load(); }
+
   // 等排着的写完（最多 timeoutMs）
   bool Flush(unsigned timeoutMs = 5000) {
     std::unique_lock<std::mutex> lock(mutex_);
-    return cv_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [this] { return pending_.empty() && !busy_; });
+    return cv_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [this] { return pending_.empty() && !busy_; }) && !failed_;
   }
 
  private:
@@ -64,7 +67,8 @@ class FileWriter {
       busy_ = true;
       lock.unlock();
       EnsureDirectory(ParentDirectory(path));
-      WriteFileAtomic(path, item.bytes, item.durable);
+      const bool saved = WriteFileAtomic(path, item.bytes, item.durable);
+      if (!saved) failed_ = true;
       lock.lock();
       busy_ = false;
       cv_.notify_all();
@@ -76,6 +80,7 @@ class FileWriter {
   std::map<std::wstring, Item> pending_;
   std::thread worker_;
   bool busy_ = false;
+  std::atomic<bool> failed_{false};
   bool stop_ = false;
 };
 

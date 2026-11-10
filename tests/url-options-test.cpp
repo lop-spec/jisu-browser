@@ -30,6 +30,9 @@ int main() {
   Check(ToNavigableUrl(L"example.com/a?b") == L"https://example.com/a?b", "domain");
   Check(ToNavigableUrl(L"example.com?q=1") == L"https://example.com?q=1", "domain with query");
   Check(IsSearch(ToNavigableUrl(L"hello world")), "words search");
+  Check(IsSearch(ToNavigableUrl(L"readme.md")) && IsSearch(ToNavigableUrl(L"vue.js")) && IsSearch(ToNavigableUrl(L"a.txt")), "file names search");
+  Check(ToNavigableUrl(L"nas:8080")==L"http://nas:8080" && ToNavigableUrl(L"router/admin")==L"http://router/admin", "intranet hostnames");
+  Check(DisplayUrl(ToNavigableUrl(L"jisu://downloads"))==L"jisu://downloads", "downloads round trip");
   // 本地文件与其他可直接打开的地址
   Check(ToNavigableUrl(L"C:\\Users\\a b\\x#1.html") == L"file:///C:/Users/a%20b/x%231.html", "windows path");
   Check(ToNavigableUrl(L"\\\\server\\share\\x.html") == L"file://server/share/x.html", "unc path");

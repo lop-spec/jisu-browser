@@ -1,6 +1,7 @@
 #include "common.h"
 
 #include <atomic>
+#include <algorithm>
 
 namespace jisu {
 namespace {
@@ -92,13 +93,17 @@ bool WriteFileAtomic(const std::wstring& path, const std::string& bytes, bool du
   if (file == INVALID_HANDLE_VALUE) {
     return false;
   }
-  DWORD written = 0;
-  const BOOL ok = WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr);
-  if (durable) {
-    FlushFileBuffers(file);
+  size_t offset = 0;
+  bool ok = true;
+  while (offset < bytes.size()) {
+    const DWORD chunk = static_cast<DWORD>((std::min)(bytes.size() - offset, size_t(1024 * 1024)));
+    DWORD written = 0;
+    if (!WriteFile(file, bytes.data() + offset, chunk, &written, nullptr) || !written) { ok = false; break; }
+    offset += written;
   }
+  if (durable && !FlushFileBuffers(file)) ok = false;
   CloseHandle(file);
-  if (!ok || written != bytes.size() ||
+  if (!ok || offset != bytes.size() ||
       !MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | (durable ? MOVEFILE_WRITE_THROUGH : 0))) {
     DeleteFileW(temp.c_str());
     return false;

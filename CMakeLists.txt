@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(jisu_browser VERSION 0.4.2 LANGUAGES CXX RC)
+project(jisu_browser VERSION 0.5.0 LANGUAGES CXX RC)
 
 if(NOT MSVC)
   message(FATAL_ERROR "只支持 MSVC 构建（GitHub Actions windows-latest）")
@@ -55,6 +55,8 @@ add_executable(jisu-browser WIN32
   src/browser_profile.cpp
   src/browser_cookies.cpp
   src/browser_history.cpp
+  src/browser_utilities.cpp
+  src/browser_omnibox.cpp
   src/browser_media.cpp
   src/history.cpp
   src/media_session.cpp
@@ -85,7 +87,7 @@ target_compile_options(jisu-browser PRIVATE /W4 /permissive- /utf-8 /Zc:__cplusp
 
 target_link_libraries(jisu-browser PRIVATE
   "${WEBVIEW2_NATIVE}/${WEBVIEW2_ARCH}/WebView2LoaderStatic.lib"
-  version d2d1 dwrite d3d11 dwmapi winhttp shell32 ole32 advapi32 delayimp windowscodecs comctl32)
+  version d2d1 dwrite d3d11 dwmapi winhttp shell32 ole32 advapi32 delayimp windowscodecs comctl32 comdlg32)
 
 # 首帧路径之外的 DLL 延迟到第一次调用才加载：D2D/DWrite/D3D 由后台预热线程触发，与建窗并行；
 # WinHTTP（智能体桥）在内核就绪后才用，shell32 只在菜单「设为默认浏览器」时用。
@@ -111,6 +113,8 @@ add_custom_command(TARGET jisu-media POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_directory "${MPV_DIR}/shaders" "$<TARGET_FILE_DIR:jisu-media>/media/shaders")
 
 enable_testing()
+add_test(NAME native-daily-features COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/daily-features-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
+set_tests_properties(native-daily-features PROPERTIES TIMEOUT 120)
 add_executable(extension-popup-focus-test tests/extension-popup-focus-test.cpp)
 target_include_directories(extension-popup-focus-test PRIVATE src)
 target_compile_definitions(extension-popup-focus-test PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)

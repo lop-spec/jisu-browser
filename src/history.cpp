@@ -21,15 +21,31 @@ std::wstring HistoryStore::SafeUrl(std::wstring url) {
       url.starts_with(L"https://newtab.jisu.example/") || url.starts_with(L"https://favicons.jisu.example/")) return {};
   const auto authority = url.find(L"://") + 3, end = url.find_first_of(L"/?#", authority);
   if (url.substr(authority, end - authority).find(L'@') != std::wstring::npos) return {};
-  // OAuth/SSO material is not a useful history entry; never persist its token-bearing URL.
+  // code alone is a normal business parameter. Treat it as OAuth only with callback/state evidence.
   const auto lower = Lower(url);
-  for (const auto* secret : {L"access_token=", L"id_token=", L"refresh_token=", L"authorization=", L"password=", L"session_token=", L"code="}) {
-    auto p = lower.find(secret);
-    if (p != std::wstring::npos && p > 0 && (lower[p-1] == L'?' || lower[p-1] == L'&' || lower[p-1] == L'#')) {
-      url.resize(url.find_first_of(L"?#")); break;
+  const bool oauth = lower.find(L"state=") != std::wstring::npos || lower.find(L"/callback") != std::wstring::npos ||
+                     lower.find(L"/oauth") != std::wstring::npos || lower.find(L"/authorize") != std::wstring::npos;
+  const auto start = url.find_first_of(L"?#");
+  if (start == std::wstring::npos) return url;
+  std::wstring out = url.substr(0, start);
+  size_t pos = start;
+  while (pos < url.size()) {
+    const wchar_t delimiter = url[pos++];
+    const auto stop = url.find_first_of(L"&#", pos);
+    const auto part = url.substr(pos, stop == std::wstring::npos ? stop : stop - pos);
+    auto key = Lower(part.substr(0, part.find(L'=')));
+    const bool secret = key == L"access_token" || key == L"id_token" || key == L"refresh_token" ||
+        key == L"authorization" || key == L"password" || key == L"session_token" || (oauth && (key == L"code" || key == L"state"));
+    if (!secret && !part.empty()) {
+      wchar_t sep = delimiter;
+      if (sep == L'&' && out.find(L'?') == std::wstring::npos) sep = L'?';
+      if (sep == L'&' && out.find(L'#') != std::wstring::npos) sep = L'&';
+      out.push_back(sep); out += part;
     }
+    if (stop == std::wstring::npos) break;
+    pos = stop;
   }
-  return url;
+  return out;
 }
 HistoryStore::~HistoryStore() {
   { std::lock_guard lock(mutex_); stop_ = true; } cv_.notify_all();
@@ -41,12 +57,14 @@ void HistoryStore::Start(const std::wstring& file) {
   file_ = file; worker_ = std::thread([this] { Run(); });
 }
 void HistoryStore::Queue(Operation op) {
-  { std::lock_guard lock(mutex_); if (!worker_.joinable() || pending_.size() >= 2048) return; pending_.push_back(std::move(op)); }
+  { std::lock_guard lock(mutex_); if (!worker_.joinable()) return;
+    if (pending_.size() >= 2048) { diskError_ = true; return; }
+    pending_.push_back(std::move(op)); }
   cv_.notify_all();
 }
-void HistoryStore::Visit(std::wstring url, std::wstring title, int64_t now) {
+void HistoryStore::Visit(std::wstring url, std::wstring title, int64_t now, bool typed) {
   url = SafeUrl(std::move(url)); if (url.empty()) return;
-  Queue({0, {0, now ? now : Now(), std::move(url), TruncateUtf16(std::move(title), 1024), {}}});
+  Queue({0, {0, now ? now : Now(), std::move(url), TruncateUtf16(std::move(title), 1024), {}, 1, typed ? 1ULL : 0ULL}});
 }
 void HistoryStore::Title(const std::wstring& url, const std::wstring& title) {
   auto safe = SafeUrl(url);
@@ -58,12 +76,12 @@ bool HistoryStore::WaitIdle(unsigned timeoutMs) {
   std::unique_lock lock(mutex_);
   return cv_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [this] { return ready_ && pending_.empty() && !busy_; });
 }
-void HistoryStore::Flush() {
+void HistoryStore::Flush(unsigned timeoutMs) {
   std::unique_lock lock(mutex_);
   if (!worker_.joinable()) return;
   flushRequested_ = true;
   cv_.notify_all();
-  cv_.wait_for(lock, std::chrono::milliseconds(3000), [this] { return stop_ || (ready_ && pending_.empty() && !busy_ && !dirty_); });
+  cv_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [this] { return stop_ || (ready_ && pending_.empty() && !busy_ && !dirty_); });
 }
 std::string HistoryStore::Query(std::wstring query, size_t offset, size_t limit) {
   std::lock_guard lock(mutex_); query = Lower(query); limit = (std::min)(limit, size_t(200));
@@ -76,11 +94,29 @@ std::string HistoryStore::Query(std::wstring query, size_t offset, size_t limit)
   out.Set("query",json::Value::String(ToUtf8(query)));out.Set("error",json::Value::String(diskError_?"历史记录未能写入磁盘，请检查资料目录权限或磁盘空间":""));
   out.Set("total", json::Value::Number(static_cast<double>(total))); out.Set("rows", std::move(rows)); return json::Serialize(out);
 }
+std::vector<HistoryStore::Suggestion> HistoryStore::Suggest(std::wstring query, size_t limit) {
+  query = Lower(std::move(query));
+  std::vector<Suggestion> rows;
+  {
+    std::lock_guard lock(mutex_);
+    for (const auto& e : entries_) if (query.empty() || e.search.find(query) != std::wstring::npos)
+      rows.push_back({e.url, e.title, e.visits, e.typed});
+  }
+  std::stable_sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+    return a.typed * 5 + a.visits > b.typed * 5 + b.visits;
+  });
+  if (rows.size() > limit) rows.resize(limit);
+  return rows;
+}
 void HistoryStore::Apply(Operation& op) {
   auto& n = op.entry;
   if (op.kind == 0) {
-    auto old = std::find_if(entries_.begin(), entries_.end(), [&n](const auto& e) { return e.url == n.url && n.at >= e.at && n.at - e.at < 30000; });
-    if (old != entries_.end()) { n.id = old->id; entries_.erase(old); } else n.id = nextId_++;
+    auto old = std::find_if(entries_.begin(), entries_.end(), [&n](const auto& e) { return e.url == n.url; });
+    if (old != entries_.end()) {
+      n.id = old->id; n.visits += old->visits; n.typed += old->typed;
+      if (n.title.empty()) n.title = old->title;
+      entries_.erase(old);
+    } else n.id = nextId_++;
     n.search = SearchKey(n.title, n.url);
     entries_.insert(entries_.begin(), std::move(n));
   } else if (op.kind == 1) {
@@ -96,7 +132,12 @@ bool HistoryStore::SaveLocked(std::unique_lock<std::mutex>& lock) {
   dirty_ = false; firstDirty_ = 0;
   lock.unlock();
   auto data = json::Value::MakeArray();
-  for (const auto& e : snapshot) data.Push(Row(e.id, e.at, e.url, e.title));
+  for (const auto& e : snapshot) {
+    auto row = Row(e.id, e.at, e.url, e.title);
+    row.Set("visits", json::Value::Number(static_cast<double>(e.visits)));
+    row.Set("typed", json::Value::Number(static_cast<double>(e.typed)));
+    data.Push(std::move(row));
+  }
   const bool saved = WriteFileAtomic(file_, json::Serialize(data));
   lock.lock();
   diskError_ = !saved;
@@ -119,7 +160,9 @@ void HistoryStore::Run() {
       if (url.empty() || at < now - 90LL*86400000 || at > now + 86400000 || loaded.size() >= 20000) continue;
       auto title = TruncateUtf16(FromUtf8(row["title"].AsString()), 4096);
       auto search = SearchKey(title, url);
-      loaded.push_back({nextId_++, at, std::move(url), std::move(title), std::move(search)});
+      loaded.push_back({nextId_++, at, std::move(url), std::move(title), std::move(search),
+          static_cast<uint64_t>(std::clamp(row["visits"].AsNumber(1), 1.0, 1000000000.0)),
+          static_cast<uint64_t>(std::clamp(row["typed"].AsNumber(), 0.0, 1000000000.0))});
     }
   }
   bytes.clear(); bytes.shrink_to_fit();

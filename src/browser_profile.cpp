@@ -107,7 +107,7 @@ void BrowserWindow::WriteExtensionStatus() {
     out += '}';
   }
   out += "]}";
-  WriteFileAtomic(profileDir_ + L"\\extensions-status.json", out, false);  // 状态文件：不等落盘
+  profile_->writer.Write(profileDir_ + L"\\extensions-status.json", out, false);  // 状态文件：不等落盘
   RefreshExtensionToolbar();
   for (auto& tab : tabs_) if (tab->url.starts_with(L"https://newtab.jisu.example/extensions.html")) PostToPage(*tab, "{\"type\":\"ext.list\",\"data\":" + out + "}");
 }
@@ -151,16 +151,25 @@ void BrowserWindow::RemoveNextUnlistedExtension() {
 void BrowserWindow::EnforceTabLimit() {
   if (destroyed_ || !std::any_of(extensions_.begin(), extensions_.end(), [](const auto& e) { return e.nativeTabLimit && e.enabled && SUCCEEDED(e.result); })) return;
   std::vector<TabPolicyEntry> candidates;
-  for (size_t i = 0; i < tabs_.size(); ++i) {
-    const auto& tab = *tabs_[i];
-    // 弹出页落地前不关它的打开者：交接中关会让内核崩，交接后立刻关会丢掉弹出页的首次导航；落地后会再收一次
-    const bool opener = std::any_of(tabs_.begin(), tabs_.end(), [&](const auto& t) { return t->openerId == tab.id; });
-    // 固定的标签、智能体页面弹出的标签不计数也不关：用户的标签不会因为 Pi 点开的链接被挤掉
-    const bool privileged = tab.url.starts_with(L"chrome-extension://") || tab.pinned || tab.fromAgent;
-    candidates.push_back({tab.id, i == active_, tab.agent || tab.leased || tab.media != nullptr || tab.mediaTarget != 0 || opener, privileged});
+  std::set<uint32_t> openers;
+  for (const auto* window : liveWindows_) if (window->profile_ == profile_)
+    for (const auto& t : window->tabs_) if (t->openerId) openers.insert(t->openerId);
+  for (const auto* window : liveWindows_) {
+    if (window->profile_ != profile_) continue;
+    for (size_t i = 0; i < window->tabs_.size(); ++i) {
+      const auto& tab = *window->tabs_[i];
+      const bool privileged = tab.url.starts_with(L"chrome-extension://") || tab.pinned || tab.fromAgent;
+      candidates.push_back({tab.id, i == window->active_, tab.agent || tab.leased || tab.media != nullptr ||
+          tab.mediaTarget != 0 || openers.contains(tab.id) || TabDownloading(tab.id), privileged, tab.lastUsed});
+    }
   }
   for (const uint32_t id : OldTabsToClose(candidates, static_cast<size_t>(settings_.maxRegularTabs))) {
-    if (const Tab* tab = FindTab(id)) CloseTab(IndexOf(*tab));
+    for (auto* window : liveWindows_) {
+      if (window->profile_ != profile_) continue;
+      if (const Tab* tab = window->FindTab(id); tab && window->IndexOf(*tab) < window->tabs_.size()) {
+        window->CloseTab(window->IndexOf(*tab)); break;
+      }
+    }
   }
 }
 bool BrowserWindow::HandleTabLimitMessage(Tab& tab, const std::wstring& source, const std::string& text) {

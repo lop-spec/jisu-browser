@@ -8,12 +8,15 @@ json::Value Query(HistoryStore& s,const std::wstring& q=L"",size_t offset=0){jso
 int main(){
   wchar_t temp[MAX_PATH];GetTempPathW(MAX_PATH,temp);const auto file=std::wstring(temp)+L"jisu-history-test-"+std::to_wstring(GetCurrentProcessId())+L".json";DeleteFileW(file.c_str());
   require(HistoryStore::SafeUrl(L"https://a.example/#route")==L"https://a.example/#route","keep SPA route");
+  require(HistoryStore::SafeUrl(L"https://a.example/?code=utf8&page=2")==L"https://a.example/?code=utf8&page=2","ordinary code retained");
+  require(HistoryStore::SafeUrl(L"https://a.example/?q=normal&access_token=secret&page=2")==L"https://a.example/?q=normal&page=2","only secret parameter removed");
   require(HistoryStore::SafeUrl(L"https://a.example/cb?code=secret&state=x")==L"https://a.example/cb","strip SSO token");
   require(HistoryStore::SafeUrl(L"file:///private").empty()&&HistoryStore::SafeUrl(L"https://user:pass@a.example").empty()&&HistoryStore::SafeUrl(L"https://newtab.jisu.example/history.html").empty(),"reject files credentials internal");
   {
     HistoryStore s;s.Start(file);require(s.WaitIdle(),"load empty");
-    s.Visit(L"https://example.com/a",L"one");s.Visit(L"https://example.com/b",L"two");s.Visit(L"https://example.com/a",L"updated");s.Title(L"https://example.com/a",L"中文动漫");require(s.WaitIdle(),"batched save");
+    s.Visit(L"https://example.com/a",L"one",0,true);s.Visit(L"https://example.com/b",L"two");s.Visit(L"https://example.com/a",L"updated");s.Title(L"https://example.com/a",L"中文动漫");require(s.WaitIdle(),"batched save");
     auto all=Query(s);require(all["total"].AsNumber()==2,"coalesce visits within 30 seconds");require(Query(s,L"中文")["total"].AsNumber()==1,"unicode search");
+    const auto suggested=s.Suggest(L"example");require(!suggested.empty()&&suggested[0].url==L"https://example.com/a"&&suggested[0].typed==1,"frequency and typed ranking");
     require(all["rows"].Items()[0]["title"].AsString()==ToUtf8(L"中文动漫"),"update title");
     s.Remove(static_cast<int64_t>(all["rows"].Items()[0]["id"].AsNumber()));require(s.WaitIdle(),"delete save");require(Query(s)["total"].AsNumber()==1,"delete one");
   }

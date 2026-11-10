@@ -69,6 +69,13 @@ class BrowserWindow : public AgentHost {
     std::wstring url;
     std::wstring pendingUrl;  // 控件建好后要打开的网址；空 = 新标签页
     bool creating = false;
+    ULONGLONG creatingAt = 0;
+    uint64_t createAttempt = 0;
+    uint64_t lastUsed = 0;
+    std::wstring addressDraft;
+    bool hasDraft = false;
+    bool crashPage = false;
+    bool typedNavigation = false;
     bool retried = false;     // 控件创建失败后已重试过一次
     bool visible = true;      // 控件新建时默认可见
     bool loading = false;
@@ -117,6 +124,10 @@ class BrowserWindow : public AgentHost {
 
   struct Settings {
     bool bookmarkBar = true;
+    bool continueSession = false;
+    bool askDownload = false;
+    std::wstring downloadDirectory;
+    std::wstring searchEngine = L"bing";
     bool importedDefaultBrowser = false;
     int maxRegularTabs = 10;
     int64_t bookmarkFolder = 1;
@@ -132,11 +143,40 @@ class BrowserWindow : public AgentHost {
     std::wstring title;
     bool active = false;
     bool pinned = false;
+    bool muted = false;
+    uint64_t lastUsed = 0;
   };
   struct ClosedTab {
     std::wstring url;
     std::wstring title;
+    size_t index = 0;
+    bool pinned = false;
+    bool muted = false;
   };
+  struct Download {
+    uint64_t id = 0;
+    uint32_t tabId = 0;
+    std::wstring url, path;
+    ComPtr<ICoreWebView2DownloadOperation> operation;
+    ULONGLONG started = 0;
+    int64_t received = 0, total = -1;
+    int state = 0;
+    bool paused = false;
+  };
+  void ConfigureDownloads(Tab& tab);
+  void OpenDownloads();
+  bool HandleUtilityMessage(Tab& tab, const std::string& text);
+  void SaveDownloads();
+  void LoadDownloads();
+  std::string DownloadsJson() const;
+  bool TabDownloading(uint32_t id) const;
+  void OpenSettings();
+  void PageAction(UINT action);
+  void ShowSuggestions();
+  void HideSuggestions();
+  void AcceptSuggestion();
+  void WatchControllers();
+  static uint64_t UseStamp();
 
   static LRESULT CALLBACK WndProcThunk(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
   static LRESULT CALLBACK AgentHostProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -167,9 +207,11 @@ class BrowserWindow : public AgentHost {
   void ExitFullscreen();
   void LayoutBookmarkBar();
   RECT ContentRect() const;
-  ChromeState BuildChromeState() const;
+  const ChromeState& BuildChromeState() const;
+  mutable ChromeState chromeState_;
+  mutable bool chromeStateDirty_ = true;
   ChromeHit HitTest(POINT point) const;
-  void InvalidateChrome();
+  void InvalidateChrome(bool dataChanged = true);
   void OnMouseMove(POINT point);
   void OnLButtonDown(POINT point);
   void OnLButtonUp(POINT point);
@@ -355,6 +397,11 @@ class BrowserWindow : public AgentHost {
     FileWriter writer;       // 书签、会话、设置在后台写盘
     std::vector<ClosedTab> closedTabs;   // 最近关闭的标签（Ctrl+Shift+T）
     std::vector<SessionTab> restoreTabs;  // 上次非正常退出时开着的标签
+    std::vector<std::shared_ptr<Download>> downloads;
+    uint64_t nextDownload = 1;
+    bool downloadsLoaded = false;
+    ULONGLONG downloadsSaved = 0;
+    std::string lastSession;
     bool bookmarksDirty = false;
     bool sessionWanted = false;    // 日常主实例才读写会话（后台启动在窗口显示前不写，免得盖掉上次没恢复的会话）
     bool sessionWritable = false;
@@ -381,6 +428,7 @@ class BrowserWindow : public AgentHost {
   uint32_t fullscreenTab_ = 0;
 
   ComPtr<ICoreWebView2Environment> environment_;
+  ULONGLONG environmentStarted_ = 0;
   uint32_t envGeneration_ = 0;   // 每次重建环境加一：旧环境迟到的回调直接丢弃
   UINT appRecoverDelay_ = 0;     // 应用窗口重建退避（毫秒），成功后清零
   std::vector<std::unique_ptr<Tab>> tabs_;
@@ -488,6 +536,12 @@ class BrowserWindow : public AgentHost {
   bool trackingMouse_ = false;
   bool omniboxFocused_ = false;
   bool focusInWebView_ = false;
+  HWND suggestions_ = nullptr;
+  std::vector<std::wstring> suggestionUrls_;
+  uint64_t suggestionGeneration_ = 0;
+  bool imeComposing_ = false;
+  bool allowInline_ = false;
+  uint32_t middleDownTab_ = 0;
   bool editing_ = false;          // 用户正在地址栏里输入，网页地址变化时不覆盖
   bool settingAddress_ = false;   // 程序在改地址栏文字（EN_CHANGE 不算用户输入）
   bool destroyed_ = false;
