@@ -63,7 +63,8 @@ enum class FetchResult { kOk, kMissing, kError };
 struct FaviconCache::State {
   struct Job {
     std::wstring origin;
-    std::string bytes;  // 非空 = 写入页面给的图标；空 = 抓取 /favicon.ico
+    std::string bytes;  // 非空 = 写入页面给的图标；空 = 缓存检查或抓取 /favicon.ico
+    bool cacheChecked = false;
   };
   std::wstring directory;
   HWND window = nullptr;
@@ -213,7 +214,7 @@ struct FaviconCache::State {
             return;
           }
           // 页面给的图标先写；抓取等启动 3 秒后再开始，不和首屏抢网络
-          const auto store = std::find_if(self->queue.begin(), self->queue.end(), [](const Job& j) { return !j.bytes.empty(); });
+          const auto store = std::find_if(self->queue.begin(), self->queue.end(), [](const Job& j) { return !j.bytes.empty() || !j.cacheChecked; });
           if (store != self->queue.end()) {
             job = std::move(*store);
             self->queue.erase(store);
@@ -248,16 +249,6 @@ struct FaviconCache::State {
         }
         continue;
       }
-      bool skip = false;
-      {
-        std::lock_guard<std::mutex> lock(self->mutex);
-        const auto miss = self->misses.find(key);
-        if (miss != self->misses.end() && UnixNow() - miss->second < kMissTtlSeconds) {
-          self->known[key] = -1;
-          skip = true;
-        }
-      }
-      if (skip) continue;
       std::string cached;
       if (ReadFileBytes(file, cached) && ValidImage(images.Get(), cached)) {
         {
@@ -268,6 +259,18 @@ struct FaviconCache::State {
         continue;
       }
       if (!cached.empty()) DeleteFileW(file.c_str());
+      bool skip = false;
+      {
+        std::lock_guard<std::mutex> lock(self->mutex);
+        const auto miss = self->misses.find(key);
+        if (miss != self->misses.end() && UnixNow() - miss->second < kMissTtlSeconds) {
+          self->known[key] = -1; skip = true;
+        }
+        if (!skip && GetTickCount64() - self->startedAt < kFetchDelayMs) {
+          job.cacheChecked = true; self->queue.push_back(std::move(job)); skip = true;
+        }
+      }
+      if (skip) continue;
       std::string bytes;
       const FetchResult result = self->Fetch(session, job.origin, bytes);
       if (result == FetchResult::kOk && ValidImage(images.Get(), bytes)) {
