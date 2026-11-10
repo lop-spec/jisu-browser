@@ -9,16 +9,18 @@ std::wstring Quote(const std::wstring& text) {
 }
 }
 void BrowserWindow::OpenPrivateWindow() {
-  const auto exe=ExeDirectory()+L"\\jisu-browser.exe";
+  const bool foreground=GetForegroundWindow()==hwnd_;
+  wchar_t module[32768]{};const DWORD length=GetModuleFileNameW(nullptr,module,static_cast<DWORD>(std::size(module)));
+  if(!length||length>=std::size(module)){if(foreground)ShowNotice(L"无法取得程序路径，未启动无痕窗口。");return;}
+  const std::wstring exe(module,length);const auto directory=ParentDirectory(exe);
   std::wstring command=Quote(exe)+L" --inprivate --udf "+Quote(profileDir_);
   if(!options_.browserArgs.empty())command+=L" --browser-args "+Quote(options_.browserArgs);
   if(!options_.trackingPrevention)command+=L" --tracking-prevention 0";
-  const bool foreground=GetForegroundWindow()==hwnd_;
   if(!foreground)command+=L" --no-activate";
   STARTUPINFOW startup{};startup.cb=sizeof(startup);startup.dwFlags=STARTF_USESHOWWINDOW;
   startup.wShowWindow=foreground?SW_SHOWNORMAL:SW_SHOWNOACTIVATE;
   PROCESS_INFORMATION process{};
-  if(!CreateProcessW(exe.c_str(),command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,ExeDirectory().c_str(),&startup,&process)){
+  if(!CreateProcessW(exe.c_str(),command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,directory.c_str(),&startup,&process)){
     if(foreground)ShowNotice(L"无法启动无痕窗口，请重试。");return;
   }
   CloseHandle(process.hThread);CloseHandle(process.hProcess);
