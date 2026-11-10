@@ -14,6 +14,9 @@ int main(){
   require(HistoryStore::SafeUrl(L"https://a.example/?q=normal&access_token=secret&page=2")==L"https://a.example/?q=normal&page=2","only secret parameter removed");
   require(HistoryStore::SafeUrl(L"https://a.example/cb?code=secret&state=x")==L"https://a.example/cb","strip SSO token");
   require(HistoryStore::SafeUrl(L"file:///private").empty()&&HistoryStore::SafeUrl(L"https://user:pass@a.example").empty()&&HistoryStore::SafeUrl(L"https://newtab.jisu.example/history.html").empty(),"reject files credentials internal");
+  require(HistoryStore::SafeSessionUrl(L"view-source:https://a.example/cb?code=secret&state=x&page=2")==L"view-source:https://a.example/cb?page=2","source session strips nested OAuth parameters");
+  require(HistoryStore::SafeSessionUrl(L"view-source:https://user:pass@a.example/").empty(),"source session refuses embedded credentials");
+  require(HistoryStore::SafeUrl(L"view-source:https://a.example/").empty(),"source mode is not a normal history visit");
   {
     HistoryStore s;s.Start(file);require(s.WaitIdle(),"load empty");
     s.Visit(L"https://example.com/a",L"one",0,true);s.Visit(L"https://example.com/b",L"two");s.Visit(L"https://example.com/a",L"updated");s.Title(L"https://example.com/a",L"中文动漫");require(s.WaitIdle(),"batched save");

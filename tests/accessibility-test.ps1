@@ -1,5 +1,6 @@
 param([Parameter(Mandatory)][string]$Exe)
 $ErrorActionPreference='Stop'
+[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,Accessibility
 $c=New-Object CodeDom.Compiler.CompilerParameters;$c.GenerateInMemory=$true;$c.TempFiles=New-Object CodeDom.Compiler.TempFileCollection([IO.Path]::GetTempPath(),$false);$c.ReferencedAssemblies.Add([Accessibility.IAccessible].Assembly.Location)|Out-Null
 Add-Type -CompilerParameters $c -TypeDefinition @'
@@ -46,7 +47,11 @@ try{
  if([AccessibilityTest]::GetPropW($h,'JisuBrowser.StripTabs').ToInt64() -ne 2){throw 'Windows UIA action did not create exactly one tab'}
  $edits=$element.FindAll($scope,(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Edit)))
  $docs=$element.FindAll($scope,(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Document)))
- if($edits.Count -lt 1 -or $docs.Count -lt 1){throw 'custom provider hid native EDIT or WebView document accessibility'}
+ if($edits.Count -lt 1 -or $docs.Count -lt 1){
+  Write-Output ('COUNTS Edit='+$edits.Count+' Document='+$docs.Count);[AccessibilityTest]::Tree($h)|Write-Output
+  $actual=$element.FindAll($scope,[System.Windows.Automation.Condition]::TrueCondition);for($i=0;$i -lt [Math]::Min(80,$actual.Count);$i++){Write-Output ('UIA '+$actual[$i].Current.ControlType.ProgrammaticName+': '+$actual[$i].Current.Name)}
+  throw 'custom provider hid native EDIT or WebView document accessibility'
+ }
  'PASS real Windows UIA: native tabs/button names; actual GUI focus and Tab navigation; invoke opens one tab; EDIT and webpage document preserved'
  [AccessibilityTest]::PostMessageW($h,0x10,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null;if(-not $p.WaitForExit(15000)){throw 'fixture did not close'}
 }finally{if($p -and -not $p.HasExited){Stop-Process -Id $p.Id -Force};$server.Stop();Start-Sleep -Milliseconds 500;Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue}

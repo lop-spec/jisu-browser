@@ -265,7 +265,7 @@ DWORD WINAPI BrowserWindow::ProfileThreadMain(void* param) {
     if (ReadFileBytes(self->SessionFile(), text) && json::Parse(text, root)) {
       for (const auto& item : root["closed"].Items()) {
         auto url = FromUtf8(item["url"].AsString());
-        if (IsWebUrl(url) && !IsInternalPage(url)) url = HistoryStore::SafeUrl(url);
+        url = HistoryStore::SafeSessionUrl(std::move(url));
         if (url.empty() || url.size() > 16384 || IsBlockedNavigationUrl(url)) continue;
         self->loadingClosed_.push_back({url, TruncateUtf16(FromUtf8(item["title"].AsString()),512),
             static_cast<size_t>(std::clamp(item["index"].AsNumber(),0.0,1000000.0)), item["pinned"].AsBool(), item["muted"].AsBool(),
@@ -283,7 +283,7 @@ DWORD WINAPI BrowserWindow::ProfileThreadMain(void* param) {
         tab.pinned = item["pinned"].AsBool();
         tab.muted = item["muted"].AsBool();
         tab.lastUsed = static_cast<uint64_t>(std::max(0.0, item["lastUsed"].AsNumber()));
-        if (IsWebUrl(tab.url) && !IsInternalPage(tab.url)) tab.url = HistoryStore::SafeUrl(tab.url);
+        tab.url = HistoryStore::SafeSessionUrl(std::move(tab.url));
         if (tab.url.empty()) continue;
         self->loadingRestore_.push_back(std::move(tab));
       }
@@ -1006,9 +1006,9 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
             if (Tab* t = self->FindTab(id)) {
               CoTaskString source;
               if (SUCCEEDED(sender->get_Source(source.Put()))) {
-                if (t->crashPage && source.Str() == L"about:blank") return S_OK;
+                if ((t->crashPage||(t->creating&&t->url.starts_with(L"view-source:"))) && source.Str() == L"about:blank") return S_OK;
                 t->crashPage = false;
-                t->url = source.Str();
+                t->url = ReportedNavigationUrl(t->url,source.Str());
               }
               if (t->controller && IsStarrable(t->url)) {
                 const auto origin = FaviconOrigin(t->url);

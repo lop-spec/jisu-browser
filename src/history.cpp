@@ -1,4 +1,5 @@
 #include "history.h"
+#include "browser_url.h"
 #include "json.h"
 #include <algorithm>
 #include <chrono>
@@ -58,6 +59,14 @@ std::wstring HistoryStore::SafeUrl(std::wstring url) {
     pos = stop;
   }
   return out;
+}
+std::wstring HistoryStore::SafeSessionUrl(std::wstring url) {
+  if(url.starts_with(L"view-source:")){
+    const auto inner=url.substr(12);
+    if(IsWebUrl(inner)){const auto safe=SafeUrl(inner);return safe.empty()?std::wstring():L"view-source:"+safe;}
+    return url;
+  }
+  return IsWebUrl(url)&&!IsInternalPage(url)?SafeUrl(std::move(url)):url;
 }
 HistoryStore::~HistoryStore() {
   { std::lock_guard lock(mutex_); stop_ = true; } cv_.notify_all();

@@ -152,6 +152,11 @@ inline bool IsBlockedNavigationUrl(std::wstring url) {
   return IsDangerousBrowserUrl(url) || url.starts_with(L"data:") || url.starts_with(L"javascript:") || url.starts_with(L"vbscript:");
 }
 
+inline std::wstring ReportedNavigationUrl(const std::wstring& requested,const std::wstring& reported) {
+  if(requested.starts_with(L"view-source:")&&(IsWebUrl(reported)||reported.starts_with(L"file://")))return L"view-source:"+reported;
+  return reported;
+}
+
 // 地址栏输入 → 网址：带协议的安全地址原样打开；其余按域名或搜索处理。
 inline std::wstring ToNavigableUrl(const std::wstring& input) {
   std::wstring lower = input;

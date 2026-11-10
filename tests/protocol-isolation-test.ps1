@@ -8,8 +8,9 @@ public static class ProtocolIsolationTest {
  [DllImport("user32.dll")]static extern bool EnumChildWindows(IntPtr h,EnumProc f,IntPtr l);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)]static extern int GetClassNameW(IntPtr h,StringBuilder b,int n);
  [DllImport("user32.dll")]public static extern bool PostMessageW(IntPtr h,uint m,IntPtr w,IntPtr l);
- [DllImport("user32.dll",CharSet=CharSet.Unicode)]static extern bool SetWindowTextW(IntPtr h,string value);
- public static void Submit(IntPtr root,string url){IntPtr edit=IntPtr.Zero;EnumChildWindows(root,(h,l)=>{var b=new StringBuilder(128);GetClassNameW(h,b,128);if(b.ToString().Equals("Edit",StringComparison.OrdinalIgnoreCase))edit=h;return true;},IntPtr.Zero);if(edit==IntPtr.Zero)throw new Exception("native EDIT missing");SetWindowTextW(edit,url);PostMessageW(edit,0x100,(IntPtr)13,(IntPtr)1);}
+ [DllImport("user32.dll",CharSet=CharSet.Unicode)]static extern IntPtr SendMessageW(IntPtr h,uint m,IntPtr w,string value);
+ [DllImport("user32.dll",EntryPoint="SendMessageW",CharSet=CharSet.Unicode)]static extern IntPtr ReadText(IntPtr h,uint m,IntPtr w,StringBuilder value);
+ public static void Submit(IntPtr root,string url){IntPtr edit=IntPtr.Zero;EnumChildWindows(root,(h,l)=>{var b=new StringBuilder(128);GetClassNameW(h,b,128);if(b.ToString().Equals("Edit",StringComparison.OrdinalIgnoreCase))edit=h;return true;},IntPtr.Zero);if(edit==IntPtr.Zero)throw new Exception("native EDIT missing");SendMessageW(edit,0xC,IntPtr.Zero,url);var read=new StringBuilder(32768);ReadText(edit,0xD,(IntPtr)read.Capacity,read);if(read.ToString()!=url)throw new Exception("EDIT input positive control failed");PostMessageW(edit,0x100,(IntPtr)13,(IntPtr)1);}
 }
 '@
 $root=Join-Path $env:TEMP ('jisu-protocol-isolation-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $root|Out-Null

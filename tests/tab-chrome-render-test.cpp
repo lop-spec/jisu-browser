@@ -105,6 +105,7 @@ void RenderFeatures(const GraphicsWarmup& graphics, const Palette& palette, cons
   layout.forward = D2D1::RectF(44, 54, 76, 86);
   layout.reload = D2D1::RectF(80, 54, 112, 86);
   layout.omnibox = D2D1::RectF(120, 55, width-50, 85);
+  layout.siteInfo = D2D1::RectF(layout.omnibox.left + 4,layout.omnibox.top + 2,layout.omnibox.left + 32,layout.omnibox.bottom - 2);
   layout.star = D2D1::RectF(layout.omnibox.right - 32, layout.omnibox.top + 2, layout.omnibox.right - 4, layout.omnibox.bottom - 2);
   layout.popupBlocked = D2D1::RectF(layout.star.left - 30, layout.star.top, layout.star.left - 2, layout.star.bottom);
   layout.menu = D2D1::RectF(width-40, 54, width-8, 86);
@@ -122,6 +123,7 @@ void RenderFeatures(const GraphicsWarmup& graphics, const Palette& palette, cons
   state.tabs.push_back(ChromeTab{L"已静音的视频", true});
   state.tabs.back().muted = true;
   state.tabs.push_back(ChromeTab{L"智能体", false, false, true, true});
+  state.securityState = 1;
   state.canStar = true;
   state.bookmarkBarEmpty = true;
   ChromePainter painter;
@@ -151,8 +153,11 @@ void RenderFeatures(const GraphicsWarmup& graphics, const Palette& palette, cons
   Check(Ink(layout.tabAudio[2], palette.frame) > 10, "Audible tab shows no speaker");
   Check(Ink(layout.tabAudio[3], palette.toolbar) > 10, "Muted tab shows no speaker");
   Check(Ink(layout.popupBlocked, palette.omnibox) > 10, "Blocked popup indicator missing");
+  Check(Ink(layout.siteInfo,palette.omnibox)>10,"Verified connection lock missing");
   Check(Ink(D2D1::RectF(14, kTabStripHeight + layout.toolbarHeight, 400, kTabStripHeight + layout.toolbarHeight + 26), palette.toolbar) > 30,
         "Empty bookmark bar hint missing");
+  state.keyboardFocus={ChromeHit::kSiteInfo};painter.Paint(palette,layout,state);
+  SavePng(wic.Get(),bitmap.Get(),out/(L"keyboard-site-focus-"+std::to_wstring(dpi)+L".png"));
 }
 }  // namespace
 

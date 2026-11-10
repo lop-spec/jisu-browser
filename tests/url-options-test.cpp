@@ -50,6 +50,9 @@ int main() {
     Check(ToNavigableUrl(dangerous)==L"about:blank","blocked input is not sent to a search engine");
   }
   Check(!IsBlockedNavigationUrl(L"edge://version")&&!IsBlockedNavigationUrl(L"edge://gpu")&&!IsBlockedNavigationUrl(L"about:blank#safe")&&!IsBlockedNavigationUrl(L"view-source:https://example.com/"),"safe diagnostics and source remain usable");
+  Check(ReportedNavigationUrl(L"view-source:http://example.com/",L"http://example.com/")==L"view-source:http://example.com/","source wrapper survives SDK underlying URL");
+  Check(ReportedNavigationUrl(L"view-source:https://example.com",L"https://example.com/redirect")==L"view-source:https://example.com/redirect","source wrapper follows canonical or redirected URL");
+  Check(ReportedNavigationUrl(L"https://example.com/",L"https://example.org/")==L"https://example.org/","ordinary explicit navigation never acquires source mode");
   const auto privateOptions=ParseOptions(L"jisu.exe --inprivate --agent-config fake --metrics fake --exit-after-metrics");
   Check(privateOptions.inPrivate&&privateOptions.noAgent&&!privateOptions.defaultUserData&&privateOptions.metricsPath.empty()&&!privateOptions.exitAfterMetrics&&privateOptions.agentConfigPath.empty(),"private mode never enables broker or disk metrics");
   Check(privateOptions.InstanceKey()!=privateOptions.userDataFolder&&!privateOptions.privateId.empty(),"private instance cannot receive ordinary link forwards");

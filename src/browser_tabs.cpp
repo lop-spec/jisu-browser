@@ -186,7 +186,7 @@ void BrowserWindow::RememberClosedTab(const Tab& tab) {
     return;
   }
   auto& closed = profile_->closedTabs;
-  const auto safe = IsWebUrl(url) ? HistoryStore::SafeUrl(url) : url;
+  const auto safe = HistoryStore::SafeSessionUrl(url);
   if (safe.empty()) return;
   closed.push_back(ClosedTab{safe, tab.title, IndexOf(tab), tab.pinned, tab.muted});
   TrimClosedTabs();
@@ -211,7 +211,7 @@ void BrowserWindow::RememberClosedWindow() {
   for (size_t i = 0; i < tabs_.size(); ++i) {
     const auto& tab = *tabs_[i]; auto url = tab.url.empty() ? tab.pendingUrl : tab.url;
     if (tab.agent || IsNewTabPageUrl(url) || IsBlockedNavigationUrl(url)) continue;
-    if (IsWebUrl(url) && !IsInternalPage(url)) url = HistoryStore::SafeUrl(url);
+    url = HistoryStore::SafeSessionUrl(std::move(url));
     if (url.empty() || url.size() > 16384) continue;
     profile_->closedTabs.push_back({url, TruncateUtf16(tab.title,512), i, tab.pinned, tab.muted, group, tab.lastUsed, i == active_});
   }
@@ -330,7 +330,7 @@ void BrowserWindow::SaveSession(bool clean, bool durable) {
     for (size_t i = 0; i < window->tabs_.size(); ++i) {
       const Tab& tab = *window->tabs_[i];
       std::wstring url = tab.url.empty() ? tab.pendingUrl : tab.url;
-      if (IsWebUrl(url) && !IsInternalPage(url)) url = HistoryStore::SafeUrl(url);
+      url = HistoryStore::SafeSessionUrl(std::move(url));
       if (tab.agent || url.empty() || IsNewTabPageUrl(url) || url.size() > 16384) continue;
       out += first ? "{\"url\":" : ",{\"url\":";
       first = false;

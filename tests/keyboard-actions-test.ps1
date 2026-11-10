@@ -1,5 +1,6 @@
 param([Parameter(Mandatory)][string]$Exe)
 $ErrorActionPreference='Stop'
+[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
 $c=New-Object CodeDom.Compiler.CompilerParameters;$c.GenerateInMemory=$true;$c.TempFiles=New-Object CodeDom.Compiler.TempFileCollection([IO.Path]::GetTempPath(),$false)
 Add-Type -CompilerParameters $c -TypeDefinition @'
@@ -21,8 +22,10 @@ public static class KeyboardActionsTest {
  [DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern IntPtr GetPropW(IntPtr h,string name);
  public static IntPtr Edit(IntPtr root){IntPtr found=IntPtr.Zero;EnumChildWindows(root,(h,l)=>{var b=new StringBuilder(128);GetClassNameW(h,b,128);if(b.ToString().Equals("Edit",StringComparison.OrdinalIgnoreCase))found=h;return true;},IntPtr.Zero);return found;}
  public static string Address(IntPtr root){var text=new StringBuilder(32768);SendMessageW(Edit(root),0xD,(IntPtr)text.Capacity,text);return text.ToString();}
- public static void Key(IntPtr root,int key,bool ctrl,bool shift,bool alt){uint pid;uint thread=GetWindowThreadProcessId(root,out pid),self=GetCurrentThreadId();bool attached=false;var old=new byte[256];try{if(thread!=self){attached=AttachThreadInput(self,thread,true);if(!attached)throw new Exception("input queue attach failed");}GetKeyboardState(old);var state=new byte[256];if(ctrl)state[0x11]=0x80;if(shift)state[0x10]=0x80;if(alt)state[0x12]=0x80;SetKeyboardState(state);PostMessageW(Edit(root),alt?0x104u:0x100u,(IntPtr)key,(IntPtr)1);Thread.Sleep(200);}finally{SetKeyboardState(old);if(attached)AttachThreadInput(self,thread,false);}}
- public static IntPtr[] Windows(uint[] pids){var result=new List<IntPtr>();EnumWindows((h,l)=>{uint p;GetWindowThreadProcessId(h,out p);if(IsWindowVisible(h)&&Array.IndexOf(pids,p)>=0)result.Add(h);return true;},IntPtr.Zero);return result.ToArray();}
+ static uint targetThread,sourceThread;static bool attached,active;static byte[] saved;
+ public static void End(){if(!active)return;SetKeyboardState(saved);if(attached)AttachThreadInput(sourceThread,targetThread,false);active=attached=false;}
+ public static void Key(IntPtr root,int key,bool ctrl,bool shift,bool alt){End();uint pid;targetThread=GetWindowThreadProcessId(root,out pid);sourceThread=GetCurrentThreadId();saved=new byte[256];try{if(targetThread!=sourceThread){attached=AttachThreadInput(sourceThread,targetThread,true);if(!attached)throw new Exception("input queue attach failed");}GetKeyboardState(saved);active=true;var state=new byte[256];if(ctrl)state[0x11]=0x80;if(shift)state[0x10]=0x80;if(alt)state[0x12]=0x80;SetKeyboardState(state);if(!PostMessageW(Edit(root),alt?0x104u:0x100u,(IntPtr)key,(IntPtr)1))throw new Exception("key post failed");}catch{End();throw;}}
+ public static IntPtr[] Windows(uint[] pids){var result=new List<IntPtr>();EnumWindows((h,l)=>{uint p;GetWindowThreadProcessId(h,out p);if(IsWindowVisible(h)&&(pids.Length==0||Array.IndexOf(pids,p)>=0))result.Add(h);return true;},IntPtr.Zero);return result.ToArray();}
  public static string Title(IntPtr h){var b=new StringBuilder(1024);GetWindowTextW(h,b,b.Capacity);return b.ToString();}
 }
 '@
@@ -43,14 +46,25 @@ try{
  [KeyboardActionsTest]::Key($h,189,$true,$false,$false);Pump 600;if([Math]::Abs($script:dpr-$baseline) -gt 0.02){throw 'Ctrl+minus did not restore actual page DPR'}
  [KeyboardActionsTest]::Key($h,187,$true,$false,$false);Pump 400;[KeyboardActionsTest]::Key($h,48,$true,$false,$false);Pump 600;if([Math]::Abs($script:dpr-$baseline) -gt 0.02){throw 'Ctrl+0 failed'}
  $element=[System.Windows.Automation.AutomationElement]::FromHandle($h);$scope=[System.Windows.Automation.TreeScope]::Descendants;$condition=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Edit)
- $beforeEdits=$element.FindAll($scope,$condition).Count;[KeyboardActionsTest]::Key($h,70,$true,$false,$false);Pump 500;$afterEdits=$element.FindAll($scope,$condition).Count
- if($afterEdits -le $beforeEdits){throw 'Ctrl+F did not show actual Find UI edit'}
- [KeyboardActionsTest]::Key($h,27,$false,$false,$false);Pump 200
- foreach($action in @(@{name='Ctrl+P';key=80},@{name='Ctrl+S';key=83},@{name='F12';key=123})){
-  $before=@([KeyboardActionsTest]::Windows((Family)));[KeyboardActionsTest]::Key($h,$action.key,($action.key -ne 123),$false,$false);$deadline=(Get-Date).AddSeconds(10);do{Pump 100;$opened=New-Windows $before}while($opened.Count -eq 0 -and (Get-Date)-lt $deadline)
-  if($opened.Count -eq 0){throw ($action.name+' did not open its actual native UI')};Write-Output ($action.name+' UI: '+(($opened|ForEach-Object {[KeyboardActionsTest]::Title($_)}) -join ' | '));Close-New $before
+ $beforeFind=@([KeyboardActionsTest]::Windows((Family)));$beforeEdits=0;foreach($window in $beforeFind){$view=[System.Windows.Automation.AutomationElement]::FromHandle($window);$beforeEdits+=$view.FindAll($scope,$condition).Count}
+ [KeyboardActionsTest]::Key($h,70,$true,$false,$false);Pump 500;$afterEdits=0;foreach($window in [KeyboardActionsTest]::Windows((Family))){$view=[System.Windows.Automation.AutomationElement]::FromHandle($window);$afterEdits+=$view.FindAll($scope,$condition).Count}
+ if($afterEdits -le $beforeEdits){
+  Write-Output ('FIND edits before='+$beforeEdits+' after='+$afterEdits)
+  foreach($window in [KeyboardActionsTest]::Windows((Family))){Write-Output ('WINDOW '+$window.ToInt64()+': '+[KeyboardActionsTest]::Title($window));$view=[System.Windows.Automation.AutomationElement]::FromHandle($window);$all=$view.FindAll($scope,[System.Windows.Automation.Condition]::TrueCondition);for($i=0;$i -lt [Math]::Min(80,$all.Count);$i++){Write-Output ('CONTROL '+$all[$i].Current.ControlType.ProgrammaticName+': '+$all[$i].Current.Name)}}
+  throw 'Ctrl+F did not show actual Find UI edit'
  }
- [KeyboardActionsTest]::Key($h,85,$true,$false,$false);Pump 900;if([KeyboardActionsTest]::Address($h) -notlike 'view-source:http://localhost:*'){throw 'Ctrl+U did not open source'}
+ Close-New $beforeFind
+ [KeyboardActionsTest]::Key($h,80,$true,$false,$false);$deadline=(Get-Date).AddSeconds(10);$preview=$null
+ $printName=-join [char[]]@(25171,21360);$cancelName=-join [char[]]@(21462,28040)
+ do{Pump 100;$windows=$element.FindAll($scope,(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Window)));foreach($window in $windows){if($window.Current.Name -like 'Print*' -or $window.Current.Name -like ($printName+'*')){$preview=$window}}}while(-not $preview -and (Get-Date)-lt $deadline)
+ if(-not $preview){throw 'Ctrl+P actual embedded print preview missing'}
+ do{Pump 100;$cancel=$preview.FindFirst($scope,(New-Object System.Windows.Automation.OrCondition((New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty,'Cancel')),(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty,$cancelName)))))}while(-not $cancel -and (Get-Date)-lt $deadline)
+ if(-not $cancel){throw 'print preview has no accessible cancel button'};$cancel.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke();Pump 300;'Ctrl+P: actual embedded print preview verified and cancelled'
+ foreach($action in @(@{name='Ctrl+S';key=83},@{name='F12';key=123})){
+  $before=@([KeyboardActionsTest]::Windows((Family)));[KeyboardActionsTest]::Key($h,$action.key,($action.key -ne 123),$false,$false);$deadline=(Get-Date).AddSeconds(10);do{Pump 100;$opened=New-Windows $before}while($opened.Count -eq 0 -and (Get-Date)-lt $deadline)
+  if($opened.Count -eq 0){foreach($window in [KeyboardActionsTest]::Windows([uint32[]]@())){Write-Output ('DIAGNOSTIC WINDOW '+$window.ToInt64()+': '+[KeyboardActionsTest]::Title($window))};$tree=$element.FindAll($scope,[System.Windows.Automation.Condition]::TrueCondition);for($i=0;$i -lt [Math]::Min(100,$tree.Count);$i++){Write-Output ('DIAGNOSTIC CONTROL '+$tree[$i].Current.ControlType.ProgrammaticName+': '+$tree[$i].Current.Name)};throw ($action.name+' did not open its actual native UI')};Write-Output ($action.name+' UI: '+(($opened|ForEach-Object {[KeyboardActionsTest]::Title($_)}) -join ' | '));Close-New $before
+ }
+ [KeyboardActionsTest]::Key($h,85,$true,$false,$false);Pump 900;if([KeyboardActionsTest]::Address($h) -notlike 'view-source:http://localhost:*'){Write-Output ('SOURCE address='+[KeyboardActionsTest]::Address($h));$sessionPath=Join-Path $root 'Session.json';if(Test-Path -LiteralPath $sessionPath){Get-Content -LiteralPath $sessionPath -Raw -Encoding UTF8|Write-Output};throw 'Ctrl+U did not open source'}
  [KeyboardActionsTest]::Key($h,36,$false,$false,$true);Pump 600;if([KeyboardActionsTest]::Address($h) -ne ''){throw 'Alt+Home did not open NTP'}
  [KeyboardActionsTest]::Key($h,46,$true,$true,$false);Pump 700;if([KeyboardActionsTest]::Address($h) -ne 'jisu://settings'){throw 'Ctrl+Shift+Delete did not open settings'}
  $before=@(Get-CimInstance Win32_Process -Filter "Name='jisu-browser.exe'"|ForEach-Object {$_.ProcessId});[KeyboardActionsTest]::Key($h,78,$true,$true,$false)
@@ -58,4 +72,4 @@ try{
  if(-not $private -or [KeyboardActionsTest]::GetPropW($private.MainWindowHandle,'JisuBrowser.PrivateVerified').ToInt64() -ne 1){throw 'Ctrl+Shift+N did not create a verified private window'}
  'PASS actual shortcut route: Find/Print/SaveAs/DevTools UI; page DPR zoom/reset; source; Home; clear settings; verified InPrivate; no system SendInput or completed print/save'
  foreach($process in @($private,$p)){$process.Refresh();[KeyboardActionsTest]::PostMessageW($process.MainWindowHandle,0x10,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null;if(-not $process.WaitForExit(15000)){throw 'fixture did not close'}}
-}finally{foreach($process in @($private,$p)){if($process -and -not $process.HasExited){Stop-Process -Id $process.Id -Force}};$server.Stop();Start-Sleep -Milliseconds 500;Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue}
+}finally{[KeyboardActionsTest]::End();foreach($process in @($private,$p)){if($process -and -not $process.HasExited){Stop-Process -Id $process.Id -Force}};$server.Stop();Start-Sleep -Milliseconds 500;Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue}
