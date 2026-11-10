@@ -128,10 +128,11 @@ void BrowserWindow::DrawExtensionButton(const DRAWITEMSTRUCT& d) {
 void BrowserWindow::SetExtensionPinned(size_t index,bool pinned) {
   if(index>=extensions_.size())return;
   auto& e=extensions_[index];e.pinned=pinned;
-  std::string text;json::Value config;
-  if(ReadFileBytes(profileDir_+L"\\extensions.json",text)&&json::Parse(text,config)) {
+  std::string text=profile_->extensionConfig;json::Value config;
+  if(text.empty())ReadFileBytes(profileDir_+L"\\extensions.json",text);
+  if(json::Parse(text,config)) {
     auto entries=config["extensions"];for(auto& item:entries.MutableItems())if(FromUtf8(item["path"].AsString())==e.path)item.Set("pinned",json::Value::Bool(pinned));
-    config.Set("extensions",entries);WriteFileAtomic(profileDir_+L"\\extensions.json",json::Serialize(config));
+    config.Set("extensions",entries);profile_->extensionConfig=json::Serialize(config);profile_->writer.Write(profileDir_+L"\\extensions.json",profile_->extensionConfig,true);
   }
   SaveExtensionStatus();
 }
@@ -149,7 +150,7 @@ void BrowserWindow::ShowExtensionsMenu() {
   AppendMenuW(menu,MF_SEPARATOR,0,nullptr);AppendMenuW(menu,MF_STRING,kExtensionManage,L"管理扩展");
   RECT r{};GetWindowRect(extensionsButton_,&r);
   const UINT result=TrackPopupMenuEx(menu,TPM_RETURNCMD|TPM_NONOTIFY|TPM_RIGHTALIGN|TPM_TOPALIGN,r.right,r.bottom,hwnd_,nullptr);
-  DestroyMenu(menu);HandleExtensionCommand(result);
+  DestroyMenu(menu);if(!destroyed_&&IsWindow(hwnd_))HandleExtensionCommand(result);
 }
 bool BrowserWindow::HandleExtensionCommand(UINT command) {
   if(command==kExtensionsButton){ShowExtensionsMenu();return true;}
@@ -177,6 +178,6 @@ void BrowserWindow::WriteExtensionToolbarState() {
   out+=",\"popupWindow\":"+std::to_string(reinterpret_cast<uintptr_t>(extensionPopupWindow_))+"}";
   if(out==lastToolbarState_)return;  // 没变就不写：关弹层、改窗口大小时不再反复写盘
   lastToolbarState_=out;
-  WriteFileAtomic(profileDir_+L"\\extension-toolbar-state.json",out,false);  // 状态文件：不等落盘
+  profile_->writer.Write(profileDir_+L"\\extension-toolbar-state.json",out,false);  // 状态文件：不等落盘
 }
 }  // namespace jisu

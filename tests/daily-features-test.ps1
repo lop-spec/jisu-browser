@@ -85,6 +85,7 @@ try{
  if(-not $Baseline){
   if([DailyTest]::GetPropW($h,'JisuBrowser.StripTabs').ToInt64() -ne $expectedTabs){throw 'download placeholder/source tab count is wrong'}
   if(-not (Test-Path -LiteralPath $record)){throw 'download record missing'}
+  Write-Host ('DOWNLOAD-STATE '+(Get-Content -LiteralPath $record -Raw -Encoding UTF8))
   $rows=(Get-Content -LiteralPath $record -Raw -Encoding UTF8|ConvertFrom-Json).rows
   if(-not @($rows|Where-Object {$_.state -eq 2 -and (Test-Path -LiteralPath $_.path)}).Count){throw 'real download did not complete'}
   [DailyTest]::Open($h,'jisu://downloads');Pump 2000;$process.Refresh()

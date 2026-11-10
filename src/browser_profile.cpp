@@ -21,9 +21,11 @@ void BrowserWindow::ConfigureProfile(Tab& tab) {
   StartCookieGuard();  // 内核重建后 ConfigureProfile 会再来一次，定时器重新排即可
   // extensions.json 只读一次：内核退出重建后在新内核里重装同一批扩展，不重复加条目
   if (!extensionsConfigLoaded_) {
-    std::string text;
+    std::string text = profile_->extensionConfig;
     json::Value config;
-    if (!ReadFileBytes(profileDir_ + L"\\extensions.json", text) || !json::Parse(text, config)) return;
+    if (text.empty() && !ReadFileBytes(profileDir_ + L"\\extensions.json", text)) return;
+    if (!json::Parse(text, config)) return;
+    profile_->extensionConfig = text;
     extensionsConfigLoaded_ = true;
     removeUnlistedExtensions_ = config["removeUnlisted"].AsBool(false);
     for (const auto& item : config["extensions"].Items()) {

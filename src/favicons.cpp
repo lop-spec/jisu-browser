@@ -136,7 +136,7 @@ struct FaviconCache::State {
     CloseHandle(file);
   }
 
-  FetchResult Fetch(const std::wstring& origin, std::string& bytes) {
+  FetchResult Fetch(HINTERNET session, const std::wstring& origin, std::string& bytes) {
     const std::wstring url = origin + L"/favicon.ico";
     URL_COMPONENTS parts{};
     parts.dwStructSize = sizeof(parts);
@@ -144,9 +144,7 @@ struct FaviconCache::State {
     if (!WinHttpCrackUrl(url.c_str(), 0, 0, &parts)) return FetchResult::kError;
     const std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
     if (PrivateHost(host)) return FetchResult::kError;
-    HINTERNET session = WinHttpOpen(L"JisuBrowser Favicon", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0);
     if (!session) return FetchResult::kError;
-    WinHttpSetTimeouts(session, 2000, 2000, 2000, 2000);
     HINTERNET connection = WinHttpConnect(session, host.c_str(), parts.nPort, 0);
     HINTERNET request = connection ? WinHttpOpenRequest(connection, L"GET", L"/favicon.ico", nullptr, WINHTTP_NO_REFERER,
                                                         WINHTTP_DEFAULT_ACCEPT_TYPES,
@@ -189,7 +187,6 @@ struct FaviconCache::State {
       WinHttpCloseHandle(request);
     }
     if (connection) WinHttpCloseHandle(connection);
-    WinHttpCloseHandle(session);
     return result;
   }
 
@@ -201,6 +198,9 @@ struct FaviconCache::State {
     CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(images.GetAddressOf()));
     EnsureDirectory(self->directory);
     self->LoadMisses();
+    HINTERNET session = WinHttpOpen(L"JisuBrowser Favicon", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0);
+    struct HttpScope { HINTERNET value; ~HttpScope() { if (value) WinHttpCloseHandle(value); } } http{session};
+    if (session) WinHttpSetTimeouts(session, 2000, 2000, 2000, 2000);
     for (;;) {
       Job job;
       {
@@ -269,7 +269,7 @@ struct FaviconCache::State {
       }
       if (!cached.empty()) DeleteFileW(file.c_str());
       std::string bytes;
-      const FetchResult result = self->Fetch(job.origin, bytes);
+      const FetchResult result = self->Fetch(session, job.origin, bytes);
       if (result == FetchResult::kOk && ValidImage(images.Get(), bytes)) {
         // Content decoding is done with WIC on the UI thread; a failed image retains the globe fallback.
         if (GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES && WriteFileAtomic(file, bytes, false)) {

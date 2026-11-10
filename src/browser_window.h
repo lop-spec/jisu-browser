@@ -119,6 +119,7 @@ class BrowserWindow : public AgentHost {
     bool crashed = false;       // 后台时崩溃：切过来时重载
     std::wstring error;         // 控件建不起来的原因，只在这个标签显示
     std::wstring agentScript;   // 智能体「禁自动播放」脚本：用户接管这个标签时移除
+    bool popupsTruncated = false;
     std::vector<std::wstring> blockedPopups;  // 当前页面没经用户操作就要弹出的窗口（已拦截）
     bool focusOnCreate = false;  // 切到它时控件还没建好：建好后把键盘焦点给网页
   };
@@ -161,6 +162,10 @@ class BrowserWindow : public AgentHost {
     uint32_t tabId = 0;
     std::wstring url, path;
     ComPtr<ICoreWebView2DownloadOperation> operation;
+    ComPtr<ICoreWebView2Controller> sourceController;
+    ComPtr<ICoreWebView2> sourceView;
+    bool detached = false;
+    uint32_t stateError = 0;
     ULONGLONG started = 0;
     int64_t received = 0, total = -1;
     int state = 0;
@@ -174,6 +179,8 @@ class BrowserWindow : public AgentHost {
   std::string DownloadsJson() const;
   std::wstring DownloadsFile() const;
   bool TabDownloading(uint32_t id) const;
+  bool KeepDownloadSource(Tab& tab);
+  void ReleaseDownloadSources();
   void OpenSettings();
   void PageAction(UINT action);
   BrowserWindow* CreatePeerWindow();
@@ -412,6 +419,7 @@ class BrowserWindow : public AgentHost {
     bool downloadExitConfirmed = false;
     ULONGLONG downloadsSaved = 0;
     std::string lastSession;
+    std::string extensionConfig;
     std::string bookmarkSnapshot;
     std::vector<std::string> bookmarkUndo;
     size_t bookmarkUndoBytes = 0;
@@ -478,6 +486,8 @@ class BrowserWindow : public AgentHost {
   HWND chromeTooltip_ = nullptr;         // 标签与图标按钮的悬停提示
   ChromeHit tooltipHit_;
   std::wstring tooltipText_;
+  uint64_t chromeRevision_ = 1;
+  uint64_t tooltipRevision_ = 0;
   HWND hoverExtensionButton_ = nullptr;
   float frozenTabWidth_ = 0;             // 用鼠标连续关标签时保持的宽度，鼠标离开标签条后展开
   UINT recoverDelay_ = 0;                // 日常窗口内核重建的退避（毫秒）

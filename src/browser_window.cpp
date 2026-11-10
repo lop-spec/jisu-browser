@@ -1026,7 +1026,7 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
       Callback<ICoreWebView2NavigationStartingEventHandler>(
           [owner, id](ICoreWebView2* sender, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
             auto* self = *owner;
-            if (!self || self->destroyed_) return S_OK;
+            if (!self || self->destroyed_) { args->put_Cancel(TRUE); return S_OK; }
             if (Tab* t = self->FindTab(id)) {
               CoTaskString uri; args->get_Uri(uri.Put());
               const std::wstring target = uri.Str();
@@ -1058,7 +1058,7 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
                 }
               }
               if (!t->blockedPopups.empty()) {
-                t->blockedPopups.clear();  // 换了页面：上一页被拦的弹窗不再提示
+                t->blockedPopups.clear(); t->popupsTruncated = false;  // 换了页面：上一页被拦的弹窗不再提示
                 if (self->IsActive(*t)) self->Relayout();
               }
               if (t->media && target != L"https://newtab.jisu.example/player.html") self->StopMedia(*t);
@@ -1112,7 +1112,7 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
       Callback<ICoreWebView2NewWindowRequestedEventHandler>(
           [owner, id](ICoreWebView2*, ICoreWebView2NewWindowRequestedEventArgs* args) -> HRESULT {
             auto* self = *owner;
-            if (!self || self->destroyed_) return S_OK;
+            if (!self || self->destroyed_) { args->put_Handled(TRUE); return S_OK; }
             Tab* source = self->FindTab(id);
             if (self->options_.appMode) {
               self->OpenNewWindowAsTab(args, true, id);
@@ -1217,7 +1217,7 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
       Callback<ICoreWebView2PermissionRequestedEventHandler>(
           [owner, id](ICoreWebView2*, ICoreWebView2PermissionRequestedEventArgs* args) -> HRESULT {
             auto* self = *owner;
-            if (!self || self->destroyed_) return S_OK;
+            if (!self || self->destroyed_) { args->put_State(COREWEBVIEW2_PERMISSION_STATE_DENY); return S_OK; }
             const Tab* t = self->FindTab(id);
             if (t && t->agent && !self->IsActive(*t)) {
               args->put_State(COREWEBVIEW2_PERMISSION_STATE_DENY);  // 屏幕外的权限气泡没人能点
@@ -1402,14 +1402,16 @@ void BrowserWindow::OnPageMessage(Tab& tab, const std::string& text) {
               if (entry == extensions_.end()) return S_OK;
               if (SUCCEEDED(hr)) {
                 entry->enabled = enabled;
-                std::string text; json::Value c;
-                if (ReadFileBytes(profileDir_ + L"\\extensions.json", text) && json::Parse(text,c)) {
+                std::string text = profile_->extensionConfig; json::Value c;
+                if (text.empty()) ReadFileBytes(profileDir_ + L"\\extensions.json", text);
+                if (json::Parse(text,c)) {
                   auto entries = c["extensions"];
                   for (auto& item : entries.MutableItems()) {
                     if (FromUtf8(item["path"].AsString()) == entry->path) item.Set("enabled", json::Value::Bool(enabled));
                   }
                   c.Set("extensions", entries);
-                  WriteFileAtomic(profileDir_ + L"\\extensions.json", json::Serialize(c));
+                  profile_->extensionConfig = json::Serialize(c);
+                  profile_->writer.Write(profileDir_ + L"\\extensions.json", profile_->extensionConfig, true);
                 }
               }
               entry->result = hr; SaveExtensionStatus(); return S_OK;
@@ -1431,6 +1433,8 @@ void BrowserWindow::OnPageMessage(Tab& tab, const std::string& text) {
     return;  // 书签读写只给书签管理页
   }
   if (!profileLoaded_) {
+    if (type == "bm.save") PostToPage(tab, "{\"type\":\"bm.saved\",\"ok\":false,\"error\":\"书签仍在加载，请稍后重试\"}");
+    else if (type != "bm.get") PostToPage(tab, "{\"type\":\"bm.result\",\"text\":\"书签仍在加载，请稍后重试\"}");
     return;
   }
   bool changed = false;
@@ -2163,6 +2167,10 @@ void BrowserWindow::CloseTab(size_t index) {
   if (index >= tabs_.size()) {
     return;
   }
+  if (tabs_.size() == 1 && std::count_if(liveWindows_.begin(), liveWindows_.end(), [this](const auto* window) { return window->profile_ == profile_; }) <= 1 &&
+      std::any_of(profile_->downloads.begin(), profile_->downloads.end(), [](const auto& d) { return d->operation && (d->state == COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS || d->paused); })) {
+    PostMessageW(hwnd_, WM_CLOSE, 0, 0); return;
+  }
   const uint32_t returnTo = tabs_[index]->openedBy;
   CancelTabDrag(false);
   if (fullscreenTab_ == tabs_[index]->id) ExitContentFullscreen();
@@ -2190,7 +2198,7 @@ void BrowserWindow::CloseTab(size_t index) {
     }
   }
   AbandonNewWindow(*closing);
-  if (closing->controller) {
+  if (closing->controller && !KeepDownloadSource(*closing)) {
     closing->controller->Close();
   }
   if (tabs_.empty()) {
@@ -3659,7 +3667,7 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       return 0;
     case WM_MBUTTONDOWN: {
       const auto hit = HitTest(PointFromLParam(lParam));
-      middleDownTab_ = hit.kind == ChromeHit::kTab && hit.index >= 0 ? tabs_[hit.index]->id : 0;
+      middleDownTab_ = (hit.kind == ChromeHit::kTab || hit.kind == ChromeHit::kTabClose || hit.kind == ChromeHit::kTabAudio) && hit.index >= 0 ? tabs_[hit.index]->id : 0;
       return 0;
     }
     case WM_XBUTTONUP:
@@ -3667,6 +3675,7 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       return TRUE;
     case WM_MBUTTONUP:
       OnMButtonUp(PointFromLParam(lParam));
+      middleDownTab_ = 0;
       return 0;
     case WM_RBUTTONUP:
       OnRButtonUp(PointFromLParam(lParam));
@@ -3908,7 +3917,7 @@ void BrowserWindow::WriteTrayState() {
   state += ",\"commit\":";
   json::AppendQuoted(state, JISU_COMMIT);
   state += "}";
-  WriteFileAtomic(file, state, false);  // 状态文件：不等落盘
+  profile_->writer.Write(file, state, false);  // 状态文件同样移出 UI 写盘
 }
 
 void BrowserWindow::ExecuteTrayCommand(UINT command) {
@@ -3946,6 +3955,15 @@ void BrowserWindow::OnDestroy() {
   if (lastWindow) {
     SaveSession(!profile_->endingSession, true);
   }
+  BrowserWindow* survivor = nullptr;
+  for (auto* window : liveWindows_) if (window != this && window->profile_ == profile_) { survivor = window; break; }
+  const HWND downloadParent = survivor ? survivor->EnsureAgentHost() : nullptr;
+  for (auto& d : profile_->downloads) if (d->detached && d->sourceController) {
+    HWND parent = nullptr; d->sourceController->get_ParentWindow(&parent);
+    if (parent != hwnd_ && parent != agentHost_) continue;
+    if (downloadParent) d->sourceController->put_ParentWindow(downloadParent);
+    else { d->sourceController->Close(); d->sourceController.Reset(); d->sourceView.Reset(); }
+  }
   FlushBookmarkSave();
   for (const UINT_PTR timer : {kTimerTrayRetry, kTimerSession, kTimerBookmarks, kTimerRecover, kTimerExtensions, kTimerCookieGuard}) {
     KillTimer(hwnd_, timer);
@@ -3975,7 +3993,8 @@ void BrowserWindow::OnDestroy() {
       }
       AbandonNewWindow(*tab);
       if (tab->controller) {
-        tab->controller->Close();
+        if (downloadParent && KeepDownloadSource(*tab)) tab->controller->put_ParentWindow(downloadParent);
+        else tab->controller->Close();
       }
     }
   }
@@ -4344,7 +4363,7 @@ ChromeHit BrowserWindow::HitTest(POINT point) const {
 }
 
 void BrowserWindow::InvalidateChrome(bool dataChanged) {
-  if (dataChanged) chromeStateDirty_ = true;
+  if (dataChanged) { chromeStateDirty_ = true; ++chromeRevision_; }
   if (hwnd_) {
     RECT area{}; GetClientRect(hwnd_, &area);
     const Tab* tab = ActiveTab();

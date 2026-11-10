@@ -116,6 +116,8 @@ std::wstring BrowserWindow::TooltipText(const ChromeHit& hit) const {
 void BrowserWindow::UpdateChromeTooltip() {
   if (options_.appMode || destroyed_ || !hwnd_) return;
   const ChromeHit hit = dragTabId_ || draggingBookmark_ ? ChromeHit{} : hover_;
+  if (hit == tooltipHit_ && tooltipRevision_ == chromeRevision_) return;
+  tooltipRevision_ = chromeRevision_;
   const std::wstring text = hit.kind == ChromeHit::kNone ? std::wstring() : TooltipText(hit);
   if (!chromeTooltip_) {
     if (text.empty()) return;
@@ -331,7 +333,7 @@ void BrowserWindow::OnPopupBlocked(Tab& source, const std::wstring& url) {
   auto& list = source.blockedPopups;
   if (std::find(list.begin(), list.end(), url) == list.end()) {
     list.push_back(url);
-    if (list.size() > 8) list.erase(list.begin());
+    if (list.size() > 8) { list.erase(list.begin()); source.popupsTruncated = true; }
   }
   if (IsActive(source)) {
     Relayout();
@@ -347,6 +349,7 @@ void BrowserWindow::ShowPopupBlockedMenu(POINT screen) {
   const std::wstring origin = FaviconOrigin(tab->url);
   HMENU menu = CreatePopupMenu();
   AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"已拦截此网页未经点击就打开的窗口：");
+  if (tab->popupsTruncated) AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"更早的记录已省略，仍已拦截");
   for (size_t i = 0; i < urls.size(); ++i) {
     AppendMenuW(menu, MF_STRING, kMenuPopupBase + static_cast<UINT>(i), MenuText(urls[i].empty() ? L"about:blank" : urls[i]).c_str());
   }

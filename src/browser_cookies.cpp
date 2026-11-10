@@ -182,7 +182,7 @@ void BrowserWindow::WriteCookieGuardStatus(const CookieGuardConfig& config, cons
     out += '}';
   }
   out += "]}";
-  WriteFileAtomic(profileDir_ + L"\\cookie-guard-status.json", out, false);  // 状态文件：不等落盘
+  profile_->writer.Write(profileDir_ + L"\\cookie-guard-status.json", out, false);  // 状态文件：不等落盘
 }
 
 }  // namespace jisu

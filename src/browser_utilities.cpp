@@ -60,6 +60,41 @@ bool BrowserWindow::TabDownloading(uint32_t id) const {
     return d->tabId == id && d->operation && (d->state == COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS || d->paused);
   });
 }
+bool BrowserWindow::KeepDownloadSource(Tab& tab) {
+  bool kept = false;
+  for (auto& d : profile_->downloads) if (d->tabId == tab.id && d->operation) {
+    BOOL canResume = FALSE; d->operation->get_CanResume(&canResume);
+    if (d->state != COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS && !d->paused && !canResume) continue;
+    d->sourceController = tab.controller; d->sourceView = tab.webview; d->detached = true; kept = true;
+  }
+  if (kept) {
+    if (tab.controller) tab.controller->put_IsVisible(FALSE);
+    if (tab.webview) {
+      ComPtr<ICoreWebView2Settings> settings;
+      if (SUCCEEDED(tab.webview->get_Settings(settings.GetAddressOf()))) settings->put_AreDefaultScriptDialogsEnabled(FALSE);
+      tab.webview->CallDevToolsProtocolMethod(L"Page.setWebLifecycleState", L"{\"state\":\"frozen\"}",
+          Callback<ICoreWebView2CallDevToolsProtocolMethodCompletedHandler>([](HRESULT,LPCWSTR)->HRESULT{return S_OK;}).Get());
+    }
+  }
+  return kept;
+}
+void BrowserWindow::ReleaseDownloadSources() {
+  for (auto& d : profile_->downloads) {
+    if (!d->detached || !d->sourceController) continue;
+    const auto id = d->tabId;
+    bool active = false;
+    for (const auto& other : profile_->downloads) if (other->tabId == id && other->operation) {
+      BOOL canResume = FALSE; other->operation->get_CanResume(&canResume);
+      if (other->state == COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS || other->paused || canResume) active = true;
+    }
+    if (active) continue;
+    const auto controller = d->sourceController;
+    for (auto& other : profile_->downloads) if (other->tabId == id) {
+      other->sourceController.Reset(); other->sourceView.Reset(); other->detached = false;
+    }
+    controller->Close();
+  }
+}
 std::wstring BrowserWindow::DownloadsFile() const {
   if (!options_.appMode) return profileDir_ + L"\\Downloads.json";
   std::wstring id;
@@ -100,6 +135,7 @@ std::string BrowserWindow::DownloadsJson() const {
     row.Set("received", json::Value::Number(static_cast<double>(d->received)));
     row.Set("total", json::Value::Number(static_cast<double>(d->total)));
     row.Set("state", json::Value::Number(d->state));
+    row.Set("stateError", json::Value::Number(d->stateError));
     row.Set("paused", json::Value::Bool(d->paused));
     row.Set("live", json::Value::Bool(d->operation != nullptr));
     BOOL canResume = FALSE; if (d->operation) d->operation->get_CanResume(&canResume);
@@ -165,6 +201,8 @@ void BrowserWindow::ConfigureDownloads(Tab& tab) {
       // Do not turn a sanitized signed/token URL into a different retry request.
       if (d->url != uri.Str()) d->url.clear();
       d->operation->get_TotalBytesToReceive(&d->total);
+      const auto* source = self->FindTab(id);
+      if (!source) { retained->put_Cancel(TRUE); deferral->Complete(); return; }
       self->profile_->downloads.insert(self->profile_->downloads.begin(), d);
       if (self->profile_->downloads.size() > 500) {
         auto& rows = self->profile_->downloads;
@@ -172,20 +210,23 @@ void BrowserWindow::ConfigureDownloads(Tab& tab) {
         if (last != rows.rend()) rows.erase(std::next(last).base());
       }
       const auto weak = std::weak_ptr<Download>(d);
-      const auto* source = self->FindTab(id);
-      if (!source) { retained->put_Cancel(TRUE); deferral->Complete(); return; }
       const bool placeholder = source->scriptOpened && source->title.empty();
       auto update = [owner = source->owner, sharedProfile = std::weak_ptr<ProfileState>(self->profile_), weak, placeholder](ICoreWebView2DownloadOperation* operation, IUnknown*) -> HRESULT {
         const auto shared = sharedProfile.lock(); const auto item = weak.lock();
-        if (!shared || !item) return S_OK;
+        if (!shared || !item || !item->operation) return S_OK;
         auto* current = *owner;
         if (!current || current->destroyed_ || current->profile_ != shared) {
           current = nullptr;
           for (auto* window : liveWindows_) if (!window->destroyed_ && window->profile_ == shared) { current = window; break; }
         }
         if (!current) return S_OK;
-        COREWEBVIEW2_DOWNLOAD_STATE state; operation->get_State(&state); item->state = static_cast<int>(state);
-        operation->get_BytesReceived(&item->received); operation->get_TotalBytesToReceive(&item->total);
+        COREWEBVIEW2_DOWNLOAD_STATE state = static_cast<COREWEBVIEW2_DOWNLOAD_STATE>(item->state);
+        const HRESULT readState = operation->get_State(&state);
+        if (FAILED(readState)) { item->stateError = static_cast<uint32_t>(readState); if (GetTickCount64() - current->profile_->downloadsSaved > 1000) current->SaveDownloads(); return S_OK; }
+        item->stateError = 0; item->state = static_cast<int>(state);
+        INT64 received = item->received, total = item->total;
+        if (SUCCEEDED(operation->get_BytesReceived(&received))) item->received = received;
+        if (SUCCEEDED(operation->get_TotalBytesToReceive(&total))) item->total = total;
         COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON reason;
         if (SUCCEEDED(operation->get_InterruptReason(&reason))) item->paused = reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED;
         if (item->state != 0 || GetTickCount64() - current->profile_->downloadsSaved > 1000) current->SaveDownloads();
@@ -196,8 +237,12 @@ void BrowserWindow::ConfigureDownloads(Tab& tab) {
           tab->webview->get_Source(sourceUrl.Put());
           if (sourceUrl.Str() == L"about:blank" && current->IndexOf(*tab) < current->tabs_.size()) current->CloseTab(current->IndexOf(*tab));
         });
-        if (item->state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED) {
+        BOOL canResume = FALSE;
+        const bool terminal = item->state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED ||
+            (item->state == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED && !item->paused && SUCCEEDED(operation->get_CanResume(&canResume)) && !canResume);
+        if (terminal) {
           ComPtr<ICoreWebView2DownloadOperation> keepAlive = operation; item->operation.Reset();
+          current->PostTask([current] { current->ReleaseDownloadSources(); });
         }
         return S_OK;
       };
@@ -224,6 +269,13 @@ bool BrowserWindow::HandleUtilityMessage(Tab& tab, const std::string& text) {
   const auto type = message["type"].AsString();
   if (tab.url == kDownloads && type.starts_with("downloads.")) {
     LoadDownloads();
+    if (type == "downloads.clear") {
+      std::erase_if(profile_->downloads, [](const auto& d) {
+        BOOL canResume = FALSE; if (d->operation) d->operation->get_CanResume(&canResume);
+        return d->state != COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS && !d->paused && !canResume;
+      });
+      SaveDownloads(); PostToPage(tab, DownloadsJson()); return true;
+    }
     const auto id = static_cast<uint64_t>(std::max(0.0, message["id"].AsNumber()));
     for (auto& d : profile_->downloads) if (d->id == id) {
       if (type == "downloads.cancel" && d->operation) { d->paused = false; d->operation->Cancel(); }
