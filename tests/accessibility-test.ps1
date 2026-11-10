@@ -1,7 +1,9 @@
 param([Parameter(Mandatory)][string]$Exe)
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
-Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,Accessibility
+Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,Accessibility,UIAutomationClientsideProviders
+$null=[System.Windows.Automation.AutomationElement]::RootElement
+[System.Windows.Automation.ClientSettings]::RegisterClientSideProviders([UIAutomationClientsideProviders.UIAutomationClientSideProviders]::ClientSideProviderDescriptionTable)
 $c=New-Object CodeDom.Compiler.CompilerParameters;$c.GenerateInMemory=$true;$c.TempFiles=New-Object CodeDom.Compiler.TempFileCollection([IO.Path]::GetTempPath(),$false);$c.ReferencedAssemblies.Add([Accessibility.IAccessible].Assembly.Location)|Out-Null
 Add-Type -CompilerParameters $c -TypeDefinition @'
 using System;using System.Runtime.InteropServices;
@@ -19,6 +21,7 @@ public static class AccessibilityTest {
  [DllImport("user32.dll")]static extern bool EnumChildWindows(IntPtr h,EnumProc f,IntPtr l);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)]static extern int GetClassNameW(IntPtr h,System.Text.StringBuilder b,int n);
  public static string NativeClients(IntPtr root){string text="NATIVE CLIENTS";EnumChildWindows(root,(h,l)=>{var b=new System.Text.StringBuilder(128);GetClassNameW(h,b,128);if(b.ToString().Equals("Edit",StringComparison.OrdinalIgnoreCase)){var id=new Guid("618736E0-3C3D-11CF-810C-00AA00389B71");Accessibility.IAccessible a;int hr=AccessibleObjectFromWindow(h,unchecked((uint)-4),ref id,out a);text+=" | EDIT hr="+hr+" role="+(hr>=0?a.get_accRole(0):null);}return true;},IntPtr.Zero);return text;}
+ public static IntPtr Edit(IntPtr root){IntPtr edit=IntPtr.Zero;EnumChildWindows(root,(h,l)=>{var b=new System.Text.StringBuilder(128);GetClassNameW(h,b,128);if(b.ToString().Equals("Edit",StringComparison.OrdinalIgnoreCase))edit=h;return true;},IntPtr.Zero);return edit;}
  public static bool OwnFocus(IntPtr h){uint p;var t=GetWindowThreadProcessId(h,out p);var g=new GUI{size=Marshal.SizeOf(typeof(GUI))};return GetGUIThreadInfo(t,ref g)&&g.focus==h;}
 }
 '@
@@ -33,6 +36,7 @@ try{
  if($p.MainWindowTitle -notlike 'a11y-source*'){throw 'fixture did not load'}
  $h=$p.MainWindowHandle;$element=[System.Windows.Automation.AutomationElement]::FromHandle($h)
  $scope=[System.Windows.Automation.TreeScope]::Descendants
+ $direct=[System.Windows.Automation.AutomationElement]::FromHandle([AccessibilityTest]::Edit($h));Write-Output ('DIRECT EDIT type='+$direct.Current.ControlType.ProgrammaticName+' name='+$direct.Current.Name+' patterns='+(($direct.GetSupportedPatterns()|ForEach-Object {$_.ProgrammaticName}) -join ','))
  $tabs=$element.FindAll($scope,(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::TabItem)))
  if($tabs.Count -lt 1){
   [AccessibilityTest]::Tree($h)|Write-Output
@@ -52,6 +56,7 @@ try{
  $edits=$element.FindAll($scope,(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Edit)))
  $docs=$element.FindAll($scope,(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Document)))
  if($edits.Count -lt 1 -or $docs.Count -lt 1){
+  $direct=[System.Windows.Automation.AutomationElement]::FromHandle([AccessibilityTest]::Edit($h));Write-Output ('DIRECT EDIT type='+$direct.Current.ControlType.ProgrammaticName+' name='+$direct.Current.Name+' patterns='+(($direct.GetSupportedPatterns()|ForEach-Object {$_.ProgrammaticName}) -join ','));
   Write-Output ('COUNTS Edit='+$edits.Count+' Document='+$docs.Count);[AccessibilityTest]::Tree($h)|Write-Output;[AccessibilityTest]::NativeClients($h)|Write-Output
   $actual=$element.FindAll($scope,[System.Windows.Automation.Condition]::TrueCondition);for($i=0;$i -lt [Math]::Min(80,$actual.Count);$i++){Write-Output ('UIA '+$actual[$i].Current.ControlType.ProgrammaticName+': '+$actual[$i].Current.Name)}
   throw 'custom provider hid native EDIT or WebView document accessibility'
