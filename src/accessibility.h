@@ -1,6 +1,7 @@
 #pragma once
 #include "common.h"
 #include <oleacc.h>
+#include <uiautomationcore.h>
 #include <uiautomationcoreapi.h>
 #include <map>
 #include <memory>

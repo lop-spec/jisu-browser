@@ -147,6 +147,8 @@ add_test(NAME native-omnibox-input COMMAND powershell.exe -NoProfile -NonInterac
 set_tests_properties(native-omnibox-input PROPERTIES TIMEOUT 120)
 add_test(NAME native-protocol-isolation COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol-isolation-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
 set_tests_properties(native-protocol-isolation PROPERTIES TIMEOUT 180)
+add_test(NAME native-keyboard-actions COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/keyboard-actions-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
+set_tests_properties(native-keyboard-actions PROPERTIES TIMEOUT 210)
 add_test(NAME native-version-resource COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/version-resource-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>" -Expected "${PROJECT_VERSION}")
 add_test(NAME native-daily-features COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/daily-features-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
 set_tests_properties(native-daily-features PROPERTIES TIMEOUT 120)
