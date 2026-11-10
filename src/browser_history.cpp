@@ -1,11 +1,12 @@
 #include "browser_window.h"
 #include "json.h"
 #include <algorithm>
+#include <cmath>
 using Microsoft::WRL::Callback;
 namespace jisu {
 namespace { constexpr wchar_t kHistoryUrl[]=L"https://newtab.jisu.example/history.html"; }
 void BrowserWindow::RecordVisit(Tab& tab) {
-  if(tab.agent || !options_.metricsPath.empty() || options_.preheatSeconds>0 || HistoryStore::SafeUrl(tab.url).empty())return;
+  if(options_.inPrivate || tab.agent || !options_.metricsPath.empty() || options_.preheatSeconds>0 || HistoryStore::SafeUrl(tab.url).empty())return;
   history_.Start(profileDir_+L"\\History.json");history_.Visit(tab.url,tab.title,0,tab.typedNavigation);tab.typedNavigation=false;
 }
 void BrowserWindow::OpenHistory() {
@@ -18,6 +19,13 @@ bool BrowserWindow::HandleHistoryMessage(Tab& tab,const std::string& text) {
   const auto type=message["type"].AsString();if(!type.starts_with("history."))return false;
   history_.Start(profileDir_+L"\\History.json");
   if(type=="history.remove")history_.Remove(static_cast<int64_t>(message["id"].AsNumber()));
+  else if(type=="history.removeRange") {
+    const auto origin=FromUtf8(message["origin"].AsString());
+    const double start=message["start"].AsNumber(), end=message["end"].AsNumber(8640000000000000.0);
+    if ((origin.empty() || (origin.size()<=2048 && FaviconOrigin(origin)==origin)) &&
+        std::isfinite(start) && std::isfinite(end) && start>=0 && end>start && end<=8640000000000000.0)
+      history_.RemoveRange(origin,static_cast<int64_t>(start),static_cast<int64_t>(end));
+  }
   else if(type=="history.clear"){
     history_.Clear();
     // 内核自己的访问记录（链接的已访问颜色、站内补全）一并清掉，和页面上说的「清空」一致

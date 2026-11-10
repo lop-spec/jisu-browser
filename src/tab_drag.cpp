@@ -1,4 +1,5 @@
 #include "browser_window.h"
+#include "browser_url.h"
 #include <algorithm>
 #include <cmath>
 
@@ -31,6 +32,11 @@ void BrowserWindow::UpdateTabDrag(POINT point) {
         std::abs(point.y - dragTabStart_.y) < GetSystemMetricsForDpi(SM_CYDRAG, dpi_)) return;
     draggingTab_ = true;
   }
+  const float barTop=layout_.tabStripHeight+layout_.toolbarHeight;
+  if(settings_.bookmarkBar&&layout_.bookmarkBarHeight>0&&point.y/layout_.scale>=barTop&&point.y/layout_.scale<barTop+layout_.bookmarkBarHeight){
+    externalBookmarkDrag_=true;UpdateBookmarkDrop(point);return;
+  }
+  if(externalBookmarkDrag_)CancelBookmarkDrag();
   SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
   if (OutsideTabStrip(point) || layout_.tabs.empty()) return;
   const size_t from = IndexOf(*tab);
@@ -97,6 +103,12 @@ bool BrowserWindow::MoveTabTo(uint32_t id, BrowserWindow& destination) {
 void BrowserWindow::FinishTabDrag(POINT point) {
   UpdateTabDrag(point);
   if (!dragTabId_) return;
+  const float barTop=layout_.tabStripHeight+layout_.toolbarHeight;
+  if(draggingTab_&&settings_.bookmarkBar&&layout_.bookmarkBarHeight>0&&point.y/layout_.scale>=barTop&&point.y/layout_.scale<barTop+layout_.bookmarkBarHeight){
+    const auto* source=FindTab(dragTabId_);const auto url=source?source->url:std::wstring(),title=source?source->title:std::wstring();
+    CancelTabDrag();CancelBookmarkDrag();
+    if(IsStarrable(url))AddDroppedBookmark(url,title,point);return;
+  }
   const uint32_t id = dragTabId_;
   const bool detach = draggingTab_ && OutsideTabStrip(point);
   const float grab = dragTabGrabX_;
@@ -126,6 +138,7 @@ void BrowserWindow::FinishTabDrag(POINT point) {
   }
   Options options;
   options.userDataFolder = profileDir_; options.defaultUserData = options_.defaultUserData;
+  options.inPrivate = options_.inPrivate; options.privateId = options_.privateId;
   options.agentConfigPath = options_.agentConfigPath; options.noAgent = options_.noAgent;
   options.renderTarget = options_.renderTarget; options.trackingPrevention = options_.trackingPrevention;
   options.browserArgs = options_.browserArgs; options.spare = options_.spare;

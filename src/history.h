@@ -11,6 +11,7 @@ namespace jisu {
 // 停止时写完。SPA 频繁改网址时不再每 200ms 整份重写 History.json
 class HistoryStore {
  public:
+  explicit HistoryStore(bool memoryOnly = false) : memoryOnly_(memoryOnly) {}
   ~HistoryStore();
   void Start(const std::wstring& file);
   void Visit(std::wstring url, std::wstring title, int64_t now = 0, bool typed = false);
@@ -19,6 +20,7 @@ class HistoryStore {
   void Title(const std::wstring& url, const std::wstring& title);
   void Remove(int64_t id);
   void Clear();
+  void RemoveRange(std::wstring origin, int64_t start, int64_t end);
   std::string Query(std::wstring query, size_t offset = 0, size_t limit = 100);
   bool WaitIdle(unsigned timeoutMs = 5000);
   void Flush(unsigned timeoutMs = 3000);  // 关机/注销：把未写的改动马上写盘并等它写完
@@ -40,5 +42,6 @@ class HistoryStore {
   ULONGLONG firstDirty_ = 0, lastChange_ = 0;
   uint64_t savedGeneration_ = 0, generation_ = 0;
   int64_t nextId_ = 1;
+  const bool memoryOnly_;
 };
 }  // namespace jisu

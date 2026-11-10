@@ -107,7 +107,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
     return 1;
   }
   Metrics::Get().Mark("comReady");
-  InstallCrashRecord(options.userDataFolder);
+  if (!options.inPrivate) InstallCrashRecord(options.userDataFolder);
 
   int exitCode = 0;
   {

@@ -264,6 +264,12 @@ bool BookmarkStore::RestoreSerialized(const std::string& bytes) {
   return json::Parse(bytes, document) && LoadDocument(document);
 }
 
+void BookmarkStore::AdoptParsed(BookmarkStore& parsed) {
+  const auto file=file_;const auto revision=revision_;
+  std::swap(*this,parsed);file_=file;revision_=revision+1;indexedRevision_=0;byId_.clear();byUrl_.clear();
+  parsed.file_.clear();
+}
+
 bool BookmarkStore::LoadDocument(const json::Value& document) {
   const auto& roots = document["roots"];
   if (!roots.IsObject()) return false;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(jisu_browser VERSION 0.5.0 LANGUAGES CXX RC)
+project(jisu_browser VERSION 0.5.1 LANGUAGES CXX RC)
 
 if(NOT MSVC)
   message(FATAL_ERROR "只支持 MSVC 构建（GitHub Actions windows-latest）")
@@ -56,6 +56,13 @@ add_executable(jisu-browser WIN32
   src/browser_cookies.cpp
   src/browser_history.cpp
   src/browser_utilities.cpp
+  src/browser_private.cpp
+  src/browser_import.cpp
+  src/browser_input.cpp
+  src/browser_accessibility.cpp
+  src/browser_security.cpp
+  src/accessibility.cpp
+  src/url_drop.cpp
   src/browser_omnibox.cpp
   src/browser_media.cpp
   src/history.cpp
@@ -90,7 +97,7 @@ target_compile_options(jisu-browser PRIVATE /W4 /permissive- /utf-8 /Zc:__cplusp
 
 target_link_libraries(jisu-browser PRIVATE
   "${WEBVIEW2_NATIVE}/${WEBVIEW2_ARCH}/WebView2LoaderStatic.lib"
-  version d2d1 dwrite d3d11 dwmapi winhttp shell32 ole32 advapi32 delayimp windowscodecs comctl32 comdlg32)
+  version d2d1 dwrite d3d11 dwmapi winhttp shell32 ole32 advapi32 delayimp windowscodecs comctl32 comdlg32 oleacc oleaut32 crypt32 cryptui)
 
 # 首帧路径之外的 DLL 延迟到第一次调用才加载：D2D/DWrite/D3D 由后台预热线程触发，与建窗并行；
 # WinHTTP（智能体桥）在内核就绪后才用，shell32 只在菜单「设为默认浏览器」时用。
@@ -98,6 +105,7 @@ target_link_libraries(jisu-browser PRIVATE
 target_link_options(jisu-browser PRIVATE
   /DELAYLOAD:d2d1.dll /DELAYLOAD:dwrite.dll /DELAYLOAD:d3d11.dll /DELAYLOAD:dwmapi.dll
   /DELAYLOAD:winhttp.dll /DELAYLOAD:shell32.dll
+  /DELAYLOAD:oleacc.dll /DELAYLOAD:oleaut32.dll /DELAYLOAD:crypt32.dll /DELAYLOAD:cryptui.dll
   /DEBUG /OPT:REF /OPT:ICF)
 
 # Media engine is packaged by CI, never downloaded/loaded during ordinary browsing.
@@ -116,6 +124,25 @@ add_custom_command(TARGET jisu-media POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_directory "${MPV_DIR}/shaders" "$<TARGET_FILE_DIR:jisu-media>/media/shaders")
 
 enable_testing()
+add_executable(url-drop-test tests/url-drop-test.cpp src/url_drop.cpp src/common.cpp)
+target_include_directories(url-drop-test PRIVATE src)
+target_compile_definitions(url-drop-test PRIVATE UNICODE _UNICODE NOMINMAX)
+target_compile_options(url-drop-test PRIVATE /utf-8 /EHsc)
+target_link_libraries(url-drop-test PRIVATE ole32)
+add_test(NAME native-url-drop COMMAND url-drop-test)
+
+add_executable(link-policy-test tests/link-policy-test.cpp)
+target_include_directories(link-policy-test PRIVATE src)
+add_test(NAME native-link-policy COMMAND link-policy-test)
+add_test(NAME native-link-script COMMAND node "${CMAKE_CURRENT_SOURCE_DIR}/tests/input-script-test.mjs")
+add_test(NAME native-link-input COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/link-input-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
+set_tests_properties(native-link-input PROPERTIES TIMEOUT 150)
+add_test(NAME native-private-profile COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/private-window-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
+set_tests_properties(native-private-profile PROPERTIES TIMEOUT 150)
+add_test(NAME native-accessibility COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/accessibility-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
+set_tests_properties(native-accessibility PROPERTIES TIMEOUT 150)
+add_test(NAME native-app-download COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/app-download-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
+set_tests_properties(native-app-download PROPERTIES TIMEOUT 120)
 add_test(NAME native-version-resource COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/version-resource-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>" -Expected "${PROJECT_VERSION}")
 add_test(NAME native-daily-features COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/daily-features-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
 set_tests_properties(native-daily-features PROPERTIES TIMEOUT 120)
@@ -123,6 +150,8 @@ add_test(NAME native-download-source-close COMMAND powershell.exe -NoProfile -No
 set_tests_properties(native-download-source-close PROPERTIES TIMEOUT 120)
 add_test(NAME native-multi-window-session COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/window-session-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
 set_tests_properties(native-multi-window-session PROPERTIES TIMEOUT 120)
+add_test(NAME native-reopen-window COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/window-session-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>" -Reopen)
+set_tests_properties(native-reopen-window PROPERTIES TIMEOUT 150)
 add_executable(extension-popup-focus-test tests/extension-popup-focus-test.cpp)
 target_include_directories(extension-popup-focus-test PRIVATE src)
 target_compile_definitions(extension-popup-focus-test PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)
@@ -164,6 +193,13 @@ add_dependencies(media-host-test jisu-media)
 add_test(NAME native-media-child-lifecycle COMMAND media-host-test "$<TARGET_FILE_DIR:jisu-media>")
 set_tests_properties(native-media-child-lifecycle PROPERTIES TIMEOUT 40)
 set_tests_properties(native-media-codecs-decode PROPERTIES TIMEOUT 30)
+add_executable(favicon-test tests/favicon-test.cpp src/favicons.cpp src/common.cpp)
+target_include_directories(favicon-test PRIVATE src)
+target_compile_definitions(favicon-test PRIVATE UNICODE _UNICODE NOMINMAX)
+target_compile_options(favicon-test PRIVATE /utf-8 /EHsc)
+target_link_libraries(favicon-test PRIVATE windowscodecs ole32)
+add_test(NAME native-favicon-worker COMMAND favicon-test "${CMAKE_CURRENT_SOURCE_DIR}/res/app.ico")
+
 add_executable(history-test tests/history-test.cpp src/history.cpp src/common.cpp src/json.cpp)
 target_include_directories(history-test PRIVATE src)
 target_compile_definitions(history-test PRIVATE UNICODE _UNICODE NOMINMAX)
@@ -228,7 +264,7 @@ set_tests_properties(native-tab-drag-transfer PROPERTIES TIMEOUT 90)
 
 # Same renderer as the browser, but no WebView/profile/window is created.
 # WIC targets exercise actual Direct2D output at desktop/narrow/DPI sizes.
-add_executable(tab-chrome-render-test WIN32 tests/tab-chrome-render-test.cpp src/graphics.cpp src/palette.cpp src/metrics.cpp src/common.cpp)
+add_executable(tab-chrome-render-test WIN32 tests/tab-chrome-render-test.cpp src/graphics.cpp src/favicons.cpp src/palette.cpp src/metrics.cpp src/common.cpp)
 target_include_directories(tab-chrome-render-test PRIVATE src)
 target_compile_definitions(tab-chrome-render-test PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)
 target_compile_options(tab-chrome-render-test PRIVATE /utf-8 /EHsc)

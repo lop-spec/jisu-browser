@@ -1,4 +1,5 @@
 #include "graphics.h"
+#include "favicons.h"
 
 #include "metrics.h"
 
@@ -437,6 +438,18 @@ void ChromePainter::Paint(const Palette& palette, const ChromeLayout& layout, co
 
   // 地址框：底和边框在这里画，文字与光标归系统 EDIT 控件
   FillRounded(layout.omnibox, 6.0f, palette.omnibox);
+  if(layout.siteInfo.right>layout.siteInfo.left){
+    if(state.hover.kind==ChromeHit::kSiteInfo)FillRounded(layout.siteInfo,4,palette.buttonHover);
+    const auto center=Center(layout.siteInfo);SetColor(state.securityState==3?Rgb{190,35,35}:palette.textMuted);
+    if(state.securityState==1){
+      target_->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(center.x-3,center.y-7,center.x+3,center.y+2),3,3),brush_.Get(),1.3f);
+      target_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(center.x-5,center.y-1,center.x+5,center.y+7),1.5f,1.5f),brush_.Get());
+    }else{
+      target_->DrawEllipse(D2D1::Ellipse(center,6,6),brush_.Get(),1.2f);
+      Stroke(D2D1::Point2F(center.x,center.y-3),D2D1::Point2F(center.x,center.y+1),1.3f);
+      target_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(center.x,center.y+3.5f),0.8f,0.8f),brush_.Get());
+    }
+  }
   if (state.canStar) {
     if (state.hover.kind == ChromeHit::kStar) {
       FillRounded(layout.star, 5.0f, palette.buttonHover);
@@ -476,6 +489,20 @@ void ChromePainter::Paint(const Palette& palette, const ChromeLayout& layout, co
                       D2D1::RectF(24.0f, top, size.width - 24.0f, size.height), brush_.Get());
   }
 
+  if(state.keyboardFocus.kind!=ChromeHit::kNone){
+    const auto hit=state.keyboardFocus;D2D1_RECT_F rect{};const auto at=static_cast<size_t>(std::max(0,hit.index));
+    switch(hit.kind){
+      case ChromeHit::kTab:if(at<layout.tabs.size())rect=layout.tabs[at];break;
+      case ChromeHit::kTabClose:if(at<layout.tabCloses.size())rect=layout.tabCloses[at];break;
+      case ChromeHit::kTabAudio:if(at<layout.tabAudio.size())rect=layout.tabAudio[at];break;
+      case ChromeHit::kNewTab:rect=layout.newTab;break;case ChromeHit::kBack:rect=layout.back;break;case ChromeHit::kForward:rect=layout.forward;break;
+      case ChromeHit::kReload:rect=layout.reload;break;case ChromeHit::kSiteInfo:rect=layout.siteInfo;break;case ChromeHit::kStar:rect=layout.star;break;case ChromeHit::kMenu:rect=layout.menu;break;
+      case ChromeHit::kBookmark:if(at<layout.bookmarks.size())rect=layout.bookmarks[at];break;case ChromeHit::kBookmarkOverflow:rect=layout.bookmarkOverflow;break;
+      case ChromeHit::kMinimize:rect=layout.minimize;break;case ChromeHit::kMaximize:rect=layout.maximize;break;case ChromeHit::kWindowClose:rect=layout.windowClose;break;
+      default:break;
+    }
+    if(rect.right-rect.left>4&&rect.bottom-rect.top>4){rect.left+=2;rect.top+=2;rect.right-=2;rect.bottom-=2;SetColor(palette.accent);target_->DrawRoundedRectangle(D2D1::RoundedRect(rect,3,3),brush_.Get(),2);}
+  }
   if (clipToChrome) {
     target_->PopAxisAlignedClip();
   }
@@ -701,16 +728,11 @@ bool ChromePainter::DrawFavicon(const std::wstring& file, D2D1_POINT_2F center, 
   if (file.empty() || !target_) return false;
   auto found = faviconBitmaps_.find(file);
   if (found == faviconBitmaps_.end()) {
-    if (!wic_) CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(wic_.GetAddressOf()));
-    ComPtr<IWICBitmapDecoder> decoder;
-    ComPtr<IWICBitmapFrameDecode> frame;
-    ComPtr<IWICFormatConverter> converter;
+    const auto pixels = DecodedFavicon(file);
+    if (!pixels) return false;
     ComPtr<ID2D1Bitmap> bitmap;
-    if (wic_ && SUCCEEDED(wic_->CreateDecoderFromFilename(file.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, decoder.GetAddressOf())) &&
-        SUCCEEDED(decoder->GetFrame(0, frame.GetAddressOf())) && SUCCEEDED(wic_->CreateFormatConverter(converter.GetAddressOf())) &&
-        SUCCEEDED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom))) {
-      target_->CreateBitmapFromWicBitmap(converter.Get(), nullptr, bitmap.GetAddressOf());
-    }
+    const auto properties = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED),96,96);
+    target_->CreateBitmap(D2D1::SizeU(pixels->width,pixels->height),pixels->bytes.data(),pixels->stride,properties,bitmap.GetAddressOf());
     if (faviconBitmaps_.size() >= 512) faviconBitmaps_.clear();
     found = faviconBitmaps_.emplace(file, bitmap).first;
   }

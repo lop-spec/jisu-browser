@@ -17,7 +17,7 @@ namespace jisu {
 
 class FileWriter {
  public:
-  FileWriter() = default;
+  explicit FileWriter(bool readOnly = false) : readOnly_(readOnly) {}
   FileWriter(const FileWriter&) = delete;
   FileWriter& operator=(const FileWriter&) = delete;
   ~FileWriter() {
@@ -32,7 +32,7 @@ class FileWriter {
   void Write(const std::wstring& path, std::string bytes, bool durable) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (stop_) return;
+      if (stop_ || readOnly_) return;
       pending_[path] = Item{std::move(bytes), durable};
       if (!worker_.joinable()) worker_ = std::thread([this] { Run(); });
     }
@@ -101,6 +101,7 @@ class FileWriter {
   std::atomic<bool> failed_{false};
   std::set<std::wstring> failedPaths_;
   bool stop_ = false;
+  const bool readOnly_;
 };
 
 }  // namespace jisu

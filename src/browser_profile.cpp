@@ -14,10 +14,10 @@ void BrowserWindow::ConfigureProfile(Tab& tab) {
   profileConfigured_ = true;
   ComPtr<ICoreWebView2Profile6> autofill;
   if (SUCCEEDED(profile.As(&autofill))) {
-    autofill->put_IsPasswordAutosaveEnabled(TRUE);
-    autofill->put_IsGeneralAutofillEnabled(TRUE);
+    autofill->put_IsPasswordAutosaveEnabled(options_.inPrivate ? FALSE : TRUE);
+    autofill->put_IsGeneralAutofillEnabled(options_.inPrivate ? FALSE : TRUE);
   }
-  if (!options_.metricsPath.empty() || options_.preheatSeconds > 0) return;
+  if (options_.inPrivate || !options_.metricsPath.empty() || options_.preheatSeconds > 0) return;
   StartCookieGuard();  // 内核重建后 ConfigureProfile 会再来一次，定时器重新排即可
   // extensions.json 只读一次：内核退出重建后在新内核里重装同一批扩展，不重复加条目
   if (!extensionsConfigLoaded_) {

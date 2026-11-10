@@ -3,6 +3,7 @@
 #pragma once
 
 #include "agent_bridge.h"
+#include "accessibility.h"
 #include "bookmarks.h"
 #include "common.h"
 #include "cookie_policy.h"
@@ -11,11 +12,13 @@
 #include "file_writer.h"
 #include "fullscreen_window.h"
 #include "history.h"
+#include "link_policy.h"
 #include "media_session.h"
 #include "menu_icons.h"
 #include "options.h"
 #include "palette.h"
 #include "tray_icon.h"
+#include "url_drop.h"
 
 #include <WebView2.h>
 
@@ -69,6 +72,7 @@ class BrowserWindow : public AgentHost {
     std::wstring url;
     std::wstring pendingUrl;  // 控件建好后要打开的网址；空 = 新标签页
     bool creating = false;
+    bool waitingScripts = false;
     ULONGLONG creatingAt = 0;
     uint64_t createAttempt = 0;
     uint64_t lastUsed = 0;
@@ -77,6 +81,12 @@ class BrowserWindow : public AgentHost {
     bool crashPage = false;
     bool unresponsive = false;
     bool typedNavigation = false;
+    LinkGesture gesture;
+    bool inputConfigured = false;
+    int securityState = 0;
+    bool certificateError = false, securityConfigured = false;
+    std::wstring securityOrigin;
+    ComPtr<ICoreWebView2DevToolsProtocolEventReceiver> securityEvents;
     bool retried = false;     // 控件创建失败后已重试过一次
     bool visible = true;      // 控件新建时默认可见
     bool loading = false;
@@ -156,6 +166,8 @@ class BrowserWindow : public AgentHost {
     size_t index = 0;
     bool pinned = false;
     bool muted = false;
+    uint64_t group = 0, lastUsed = 0;
+    bool active = false;
   };
   struct Download {
     uint64_t id = 0;
@@ -184,6 +196,7 @@ class BrowserWindow : public AgentHost {
   void OpenSettings();
   void PageAction(UINT action);
   BrowserWindow* CreatePeerWindow();
+  void OpenPrivateWindow();
   void ShowSuggestions();
   void HideSuggestions();
   void AcceptSuggestion();
@@ -212,6 +225,11 @@ class BrowserWindow : public AgentHost {
   void ApplyWindowTheme();
   void OnThemeChanged();
   void UpdateEditFont();
+  void UpdateAccessibility();
+  void QueueAccessibility();
+  void AccessibleAction(LONG id,bool focusOnly);
+  void AdvanceChromeFocus(int direction);
+  ChromeHit KeyboardChromeHit() const;
   void Relayout();
   void OnContentFullscreenChanged(uint32_t id);
   void UpdateFullscreen();
@@ -247,7 +265,14 @@ class BrowserWindow : public AgentHost {
   bool AppWebViewLive() const;
   void AbandonNewWindow(Tab& tab);
   void ConfigureWebView(Tab& tab);
+  void ConfigureLinkInput(Tab& tab, bool firstNavigation);
+  void ObserveInputFrame(uint32_t id, ICoreWebView2Frame* frame);
+  bool HandleLinkInput(uint32_t id, const std::wstring& message);
+  void FinishControllerNavigation(uint32_t id);
   void ConfigureProfile(Tab& tab);
+  void ConfigureSecurity(Tab& tab);
+  void ShowSiteInfo(POINT screen);
+  void ShowCertificate(uint32_t id);
   void InstallNextExtension();
   void PruneUnlistedExtensions();
   void RemoveNextUnlistedExtension();
@@ -321,6 +346,8 @@ class BrowserWindow : public AgentHost {
   void CancelBookmarkDrag();
   void UpdateBookmarkDrop(POINT point);
   void FinishBookmarkDrag(POINT point);
+  void EnableBookmarkDrop();
+  bool AddDroppedBookmark(const std::wstring& url,const std::wstring& title,POINT point);
   void ShowBookmarkFolderMenu(BookmarkNode& folder, POINT screen);
   void ShowBookmarkContextMenu(BookmarkNode& node, POINT screen);
   void ShowOverflowMenu(POINT screen);
@@ -329,7 +356,8 @@ class BrowserWindow : public AgentHost {
   void ShowMainMenu(POINT screen);
   void OpenBookmarkManager(const std::wstring& fragment);
   void OpenBookmarkGroup(const std::vector<std::wstring>& urls);
-  void OnBookmarksChanged();
+  void OnBookmarksChanged(std::string preparedSnapshot = {});
+  void QueueBookmarkImport(uint32_t tabId, std::string request, unsigned retry = 0);
   void BroadcastBookmarks();
   void LoadSettings();
   void SaveSettings();
@@ -345,6 +373,8 @@ class BrowserWindow : public AgentHost {
   void TogglePinned(size_t index);
   void ToggleMuted(size_t index);
   void RememberClosedTab(const Tab& tab);
+  void RememberClosedWindow();
+  void TrimClosedTabs();
   void ReopenClosedTab();
   size_t InsertIndexFor(uint32_t openerId) const;
   void HardReload();
@@ -406,6 +436,7 @@ class BrowserWindow : public AgentHost {
   std::vector<std::unique_ptr<BrowserWindow>> detachedWindows_;
   inline static std::vector<BrowserWindow*> liveWindows_;
   struct ProfileState {
+    explicit ProfileState(bool ephemeral = false) : history(ephemeral), writer(ephemeral) {}
     BookmarkStore bookmarks;
     HistoryStore history;
     Settings settings;
@@ -423,6 +454,7 @@ class BrowserWindow : public AgentHost {
     std::string bookmarkSnapshot;
     std::vector<std::string> bookmarkUndo;
     size_t bookmarkUndoBytes = 0;
+    std::atomic<unsigned> importJobs{0};
     bool bookmarksDirty = false;
     bool sessionWanted = false;    // 日常主实例才读写会话（后台启动在窗口显示前不写，免得盖掉上次没恢复的会话）
     bool sessionWritable = false;
@@ -560,13 +592,24 @@ class BrowserWindow : public AgentHost {
   int64_t dragBookmarkId_ = 0;
   POINT dragStart_{};
   bool draggingBookmark_ = false;
+  bool externalBookmarkDrag_ = false, dropOle_ = false;
+  ComPtr<IDropTarget> bookmarkDropTarget_;
+  bool addressLinkCandidate_ = false, addressLinkDragging_ = false;
+  std::wstring addressLink_;
+  LPARAM addressDownParam_ = 0; WPARAM addressDownKeys_ = 0;
   int dropBookmark_ = -1;
   bool dropIntoFolder_ = false;
   int64_t dropParentId_ = 0;
   size_t dropIndex_ = 0;
   bool trackingMouse_ = false;
   bool omniboxFocused_ = false;
+  bool addressMouseDown_ = false, addressSelectOnUp_ = false, addressDragged_ = false;
+  POINT addressMouseStart_{};
   bool focusInWebView_ = false;
+  std::shared_ptr<AccessibilityState> accessibility_;
+  ComPtr<IAccessible> accessibleObject_;
+  bool accessibilityQueued_ = false, chromeKeyboardFocus_ = false;
+  LONG chromeFocusId_ = 0;
   HWND suggestions_ = nullptr;
   std::vector<std::wstring> suggestionUrls_;
   uint64_t suggestionGeneration_ = 0;

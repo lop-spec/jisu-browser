@@ -189,13 +189,52 @@ void BrowserWindow::RememberClosedTab(const Tab& tab) {
   const auto safe = IsWebUrl(url) ? HistoryStore::SafeUrl(url) : url;
   if (safe.empty()) return;
   closed.push_back(ClosedTab{safe, tab.title, IndexOf(tab), tab.pinned, tab.muted});
-  if (closed.size() > kClosedTabLimit) closed.erase(closed.begin());
+  TrimClosedTabs();
+}
+void BrowserWindow::TrimClosedTabs() {
+  auto& closed = profile_->closedTabs;
+  for (;;) {
+    size_t events = 0, bytes = 0; uint64_t previous = 0;
+    for (const auto& tab : closed) {
+      if (!tab.group || tab.group != previous) ++events;
+      previous = tab.group; bytes += (tab.url.size() + tab.title.size()) * sizeof(wchar_t) + 96;
+    }
+    if (closed.empty() || (events <= kClosedTabLimit && bytes <= 4 * 1024 * 1024)) return;
+    const auto group = closed.front().group; size_t remove = 1;
+    while (group && remove < closed.size() && closed[remove].group == group) ++remove;
+    closed.erase(closed.begin(), closed.begin() + static_cast<std::ptrdiff_t>(remove));
+  }
+}
+void BrowserWindow::RememberClosedWindow() {
+  if (options_.appMode || profile_->endingSession) return;
+  const auto group = UseStamp();
+  for (size_t i = 0; i < tabs_.size(); ++i) {
+    const auto& tab = *tabs_[i]; auto url = tab.url.empty() ? tab.pendingUrl : tab.url;
+    if (tab.agent || IsNewTabPageUrl(url) || IsBlockedNavigationUrl(url)) continue;
+    if (IsWebUrl(url) && !IsInternalPage(url)) url = HistoryStore::SafeUrl(url);
+    if (url.empty() || url.size() > 16384) continue;
+    profile_->closedTabs.push_back({url, TruncateUtf16(tab.title,512), i, tab.pinned, tab.muted, group, tab.lastUsed, i == active_});
+  }
+  TrimClosedTabs();
 }
 
 void BrowserWindow::ReopenClosedTab() {
   auto& closed = profile_->closedTabs;
   if (closed.empty()) return;
   const ClosedTab item = closed.back();
+  if (item.group) {
+    std::vector<SessionTab> items; size_t begin = closed.size();
+    while (begin && closed[begin - 1].group == item.group) --begin;
+    for (size_t i = begin; i < closed.size(); ++i) {
+      const auto& t = closed[i]; items.push_back({0,t.url,t.title,t.active,t.pinned,t.muted,t.lastUsed});
+    }
+    if (auto* window = CreatePeerWindow()) {
+      closed.erase(closed.begin()+static_cast<std::ptrdiff_t>(begin),closed.end());
+      window->RestoreSessionItems(std::move(items)); window->ShowFirstFrame(SW_SHOWNOACTIVATE);
+      ScheduleSessionSave();
+    }
+    return;
+  }
   closed.pop_back();
   NewTab(item.url, true, item.index);
   if (Tab* tab = ActiveTab()) {
@@ -241,6 +280,9 @@ bool BrowserWindow::AdoptAgentTab(Tab& tab) {
     ComPtr<ICoreWebView2Settings> settings;
     if (SUCCEEDED(tab.webview->get_Settings(settings.GetAddressOf()))) {
       settings->put_AreDefaultScriptDialogsEnabled(TRUE);
+      settings->put_AreDefaultContextMenusEnabled(TRUE);
+      ComPtr<ICoreWebView2Settings3> keyboard;
+      if (SUCCEEDED(settings.As(&keyboard))) keyboard->put_AreBrowserAcceleratorKeysEnabled(TRUE);
     }
     if (!tab.agentScript.empty()) {
       tab.webview->RemoveScriptToExecuteOnDocumentCreated(tab.agentScript.c_str());
@@ -248,6 +290,8 @@ bool BrowserWindow::AdoptAgentTab(Tab& tab) {
     }
     tab.webview->ExecuteScript(L"window.__jisuAllowMedia=true", nullptr);  // 当前页面里已装的拦截随之放行
   }
+  ConfigureLinkInput(tab,false);
+  ConfigureSecurity(tab);
   PlaceTab(tab);
   UpdateMemoryTarget(tab);
   InvalidateChrome();
@@ -256,6 +300,7 @@ bool BrowserWindow::AdoptAgentTab(Tab& tab) {
 
 // 外壳发起的打开：可以是内部页面（书签、历史……）；没建控件的标签现在建
 void BrowserWindow::NavigateTab(Tab& tab, const std::wstring& url) {
+  if (IsBlockedNavigationUrl(url)) return;
   tab.hasDraft = false; tab.addressDraft.clear();
   if (IsActive(tab)) editing_ = false;
   tab.url = url;
@@ -306,7 +351,8 @@ void BrowserWindow::SaveSession(bool clean, bool durable) {
     out += "{\"url\":"; json::AppendQuoted(out, ToUtf8(tab.url));
     out += ",\"title\":"; json::AppendQuoted(out, ToUtf8(TruncateUtf16(tab.title, 512)));
     out += ",\"index\":" + std::to_string(tab.index) + ",\"pinned\":" + (tab.pinned ? "true" : "false") +
-        ",\"muted\":" + (tab.muted ? "true" : "false") + "}";
+        ",\"muted\":" + (tab.muted ? "true" : "false") + ",\"group\":" + std::to_string(tab.group) +
+        ",\"lastUsed\":" + std::to_string(tab.lastUsed) + ",\"active\":" + (tab.active ? "true" : "false") + "}";
   }
   out += "]}";
   if (!durable && out == profile_->lastSession) return;
@@ -522,6 +568,8 @@ void BrowserWindow::ResetTabWebView(Tab& tab) {
   tab.controller.Reset();
   tab.webview.Reset();
   tab.creating = false;
+  tab.waitingScripts = false; tab.inputConfigured = false; tab.gesture = {};
+  tab.securityEvents.Reset();tab.securityConfigured=false;tab.securityState=0;tab.certificateError=false;tab.securityOrigin.clear();
   tab.retried = false;
   tab.visible = true;
   tab.suspended = false;

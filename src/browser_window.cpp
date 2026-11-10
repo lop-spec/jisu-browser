@@ -14,9 +14,11 @@
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <ole2.h>
 
 #include <algorithm>
 #include <cmath>
+#include <climits>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
@@ -95,6 +97,7 @@ constexpr UINT_PTR kTimerControllers = 14;
 constexpr UINT_PTR kTimerSuggestions = 15;
 constexpr UINT_PTR kTimerProfile = 16;
 constexpr UINT_PTR kTimerPlacement = 17;
+constexpr UINT_PTR kTimerDrop = 19;
 constexpr UINT kMenuOpen = 2001;
 constexpr UINT kMenuOpenNewTab = 2002;
 constexpr UINT kMenuEdit = 2003;
@@ -203,7 +206,7 @@ bool SetRegString(HKEY root, const std::wstring& key, const wchar_t* name, const
 
 BrowserWindow::BrowserWindow(const Options& options, GraphicsWarmup& warmup, BrowserWindow* root)
     : options_(options), root_(root ? root : this), ownsPrimary_(!root),
-      profile_(root ? root->profile_ : std::make_shared<ProfileState>()),
+      profile_(root ? root->profile_ : std::make_shared<ProfileState>(options.inPrivate)),
       warmup_(warmup), palette_(LoadPalette()), bookmarks_(profile_->bookmarks),
       history_(profile_->history), favicons_(profile_->favicons), settings_(profile_->settings) {}
 
@@ -263,9 +266,11 @@ DWORD WINAPI BrowserWindow::ProfileThreadMain(void* param) {
       for (const auto& item : root["closed"].Items()) {
         auto url = FromUtf8(item["url"].AsString());
         if (IsWebUrl(url) && !IsInternalPage(url)) url = HistoryStore::SafeUrl(url);
-        if (url.empty() || url.size() > 16384 || self->loadingClosed_.size() >= 25) continue;
+        if (url.empty() || url.size() > 16384 || IsBlockedNavigationUrl(url)) continue;
         self->loadingClosed_.push_back({url, TruncateUtf16(FromUtf8(item["title"].AsString()),512),
-            static_cast<size_t>(std::clamp(item["index"].AsNumber(),0.0,500.0)), item["pinned"].AsBool(), item["muted"].AsBool()});
+            static_cast<size_t>(std::clamp(item["index"].AsNumber(),0.0,1000000.0)), item["pinned"].AsBool(), item["muted"].AsBool(),
+            static_cast<uint64_t>(std::clamp(item["group"].AsNumber(),0.0,9007199254740991.0)),
+            static_cast<uint64_t>(std::clamp(item["lastUsed"].AsNumber(),0.0,9007199254740991.0)), item["active"].AsBool()});
       }
       for (const json::Value& item : root["tabs"].Items()) {
         if (root["clean"].AsBool(true) && !self->settings_.continueSession) break;
@@ -285,7 +290,10 @@ DWORD WINAPI BrowserWindow::ProfileThreadMain(void* param) {
     }
   }
   if (!self->profileDir_.empty()) {
-    self->loadingBookmarks_->Load(self->profileDir_ + L"\\Bookmarks");
+    if (self->options_.inPrivate) {
+      std::string bytes;
+      if (ReadFileBytes(self->profileDir_ + L"\\Bookmarks", bytes)) self->loadingBookmarks_->RestoreSerialized(bytes);
+    } else self->loadingBookmarks_->Load(self->profileDir_ + L"\\Bookmarks");
     // 导入由用户在书签管理页主动发起，不在首帧前扫描其他浏览器。
   }
   Metrics::Get().Mark("profileReady");
@@ -303,7 +311,7 @@ bool BrowserWindow::Create(HINSTANCE instance) {
   if (options_.background) options_.spare = false;  // 窗口显示之前不预建备用控件
   // 会话只由日常主实例写：测量、预热、应用窗口、主实例卡住时的备用实例都不碰
   if (root_ == this) {
-    profile_->sessionWanted = !options_.appMode && !options_.secondary && options_.metricsPath.empty() &&
+    profile_->sessionWanted = !options_.appMode && !options_.inPrivate && !options_.secondary && options_.metricsPath.empty() &&
                               options_.preheatSeconds <= 0 && !profileDir_.empty();
     profile_->sessionWritable = profile_->sessionWanted && !options_.background;
   }
@@ -358,10 +366,11 @@ bool BrowserWindow::Create(HINSTANCE instance) {
   }
   SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
   // 图标缓存同一资料只起一份，由主窗口启动；拆出的窗口共用
-  if (root_ == this && !options_.appMode && options_.metricsPath.empty() && options_.preheatSeconds <= 0) {
+  if (root_ == this && !options_.appMode && !options_.inPrivate && options_.metricsPath.empty() && options_.preheatSeconds <= 0) {
     favicons_.Start(profileDir_, hwnd_, kMsgFavicon);
   }
   if (!options_.secondary) SetPropW(hwnd_, kProfileProp, reinterpret_cast<HANDLE>(static_cast<uintptr_t>(ProfileHash(options_.InstanceKey()))));
+  if (options_.inPrivate) SetPropW(hwnd_, L"JisuBrowser.InPrivate", reinterpret_cast<HANDLE>(1));
   if (options_.appMode) {
     SetPropW(hwnd_, L"JisuBrowser.AppMode", reinterpret_cast<HANDLE>(1));
     if (!options_.appIcon.empty()) {
@@ -395,6 +404,7 @@ void BrowserWindow::FinishProfileLoad() {
   profile_->bookmarkSnapshot = loader->bookmarks_.Serialized();
   profile_->restoreTabs = std::move(loader->loadingRestore_);
   profile_->closedTabs = std::move(loader->loadingClosed_);
+  TrimClosedTabs();
   loader->profileLoaded_ = true;
   Metrics::Get().Mark("profileJoined");
   for (auto* window : liveWindows_) if (window->profile_ == profile_) {
@@ -456,6 +466,7 @@ void BrowserWindow::ShowWindowFirstFrame(int showCmd, bool activate) {
   metrics.Mark("firstPaint");
   warmup_.NotifyFirstPaint();
   firstFrameShown_ = true;
+  if(!options_.appMode)SetTimer(hwnd_,kTimerDrop,250,nullptr);
   // Register after the first frame, never in the latency-sensitive startup path.
   if (ownsPrimary_ && !options_.appMode && options_.metricsPath.empty() && !options_.secondary && !trayPosted_) {
     trayPosted_ = true;
@@ -646,9 +657,14 @@ void BrowserWindow::CreateController(Tab& tab) {
     if (SUCCEEDED(controllerOptions.As(&options3))) {
       options3->put_DefaultBackgroundColor(ToWebViewColor(palette_.content));
     }
-    hr = environment10->CreateCoreWebView2ControllerWithOptions(parent, controllerOptions.Get(), handler.Get());
+    HRESULT privacy = S_OK;
+    if (options_.inPrivate) {
+      privacy = controllerOptions->put_ProfileName(options_.privateId.c_str());
+      if (SUCCEEDED(privacy)) privacy = controllerOptions->put_IsInPrivateModeEnabled(TRUE);
+    }
+    hr = SUCCEEDED(privacy) ? environment10->CreateCoreWebView2ControllerWithOptions(parent, controllerOptions.Get(), handler.Get()) : privacy;
   }
-  if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_INVALID_STATE)) {
+  if (FAILED(hr) && !options_.inPrivate && hr != HRESULT_FROM_WIN32(ERROR_INVALID_STATE)) {
     hr = environment_->CreateCoreWebView2Controller(parent, handler.Get());
   }
   if (FAILED(hr)) {
@@ -674,6 +690,14 @@ void BrowserWindow::OnControllerCreated(uint32_t id, HRESULT result, ICoreWebVie
 
   tab->controller = controller;
   tab->controller->get_CoreWebView2(tab->webview.ReleaseAndGetAddressOf());
+  if (options_.inPrivate) {
+    ComPtr<ICoreWebView2_13> view; ComPtr<ICoreWebView2Profile> profile; BOOL privateMode = FALSE;
+    if (!tab->webview || FAILED(tab->webview.As(&view)) || FAILED(view->get_Profile(profile.GetAddressOf())) ||
+        FAILED(profile->get_IsInPrivateModeEnabled(&privateMode)) || !privateMode) {
+      controller->Close(); tab->controller.Reset(); tab->webview.Reset(); OnControllerFailed(*tab,E_ACCESSDENIED); return;
+    }
+    SetPropW(hwnd_,L"JisuBrowser.PrivateVerified",reinterpret_cast<HANDLE>(1));
+  }
   const bool spare = IsSpare(*tab);
   const bool show = !spare && options_.preheatSeconds <= 0 && IsActive(*tab) && !IsIconic(hwnd_);
   // 先藏再定位：备用控件、后台标签、智能体标签从头到尾不露面
@@ -708,16 +732,23 @@ void BrowserWindow::OnControllerCreated(uint32_t id, HRESULT result, ICoreWebVie
     metrics.Mark("spareReady");
   }
 
+  tab->creating = true; tab->creatingAt = GetTickCount64(); tab->waitingScripts = true;
+  ConfigureLinkInput(*tab,true);
+}
+void BrowserWindow::FinishControllerNavigation(uint32_t id) {
+  auto* tab=FindTab(id);if(!tab||!tab->webview||!tab->controller)return;
+  tab->creating=false;tab->waitingScripts=false;const bool spare=IsSpare(*tab);auto& metrics=Metrics::Get();
   if (tab->newWindowArgs) {
     if (FAILED(tab->newWindowArgs->put_NewWindow(tab->webview.Get()))) {
       AbandonNewWindow(*tab);
-      tab->webview->Navigate(tab->url.empty() ? L"about:blank" : tab->url.c_str());
+      tab->webview->Navigate(tab->url.empty() || IsBlockedNavigationUrl(tab->url) ? L"about:blank" : tab->url.c_str());
     } else {
       tab->newWindowDeferral->Complete();
       tab->newWindowArgs.Reset();
       tab->newWindowDeferral.Reset();
     }
   } else if (!tab->pendingUrl.empty()) {
+    if (IsBlockedNavigationUrl(tab->pendingUrl)) { tab->pendingUrl = L"about:blank"; tab->url = tab->pendingUrl; }
     tab->allowInternal = IsInternalPage(tab->pendingUrl);  // 外壳发起的打开：可以是书签、历史等内部页面
     tab->webview->Navigate(tab->pendingUrl.c_str());
     tab->pendingUrl.clear();
@@ -851,6 +882,7 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
   tab.faviconHost = false;
   self->ConfigureProfile(tab);
   self->ConfigureDownloads(tab);
+  self->ConfigureSecurity(tab);
   if (self->extensionProfile_ && !self->extensionsStarted_) {
     // 扩展等首个页面加载完再装（NavigationCompleted 里开始）；页面迟迟不落地也最多等 2 秒
     SetTimer(self->hwnd_, kTimerExtensions, 2000, nullptr);
@@ -884,6 +916,9 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
     ComPtr<ICoreWebView2Settings> settings;
     if (SUCCEEDED(tab.webview->get_Settings(settings.GetAddressOf()))) {
       settings->put_AreDefaultScriptDialogsEnabled(FALSE);
+      settings->put_AreDefaultContextMenusEnabled(FALSE);
+      ComPtr<ICoreWebView2Settings3> keyboard;
+      if (SUCCEEDED(settings.As(&keyboard))) keyboard->put_AreBrowserAcceleratorKeysEnabled(FALSE);
     }
     if (self->agentConfig_.blockAutoplay) {
       // 记下脚本 id：用户接管这个标签时移除，之后打开的网页照常播放
@@ -1030,6 +1065,7 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
             if (Tab* t = self->FindTab(id)) {
               CoTaskString uri; args->get_Uri(uri.Put());
               const std::wstring target = uri.Str();
+              if (IsBlockedNavigationUrl(target)) { args->put_Cancel(TRUE); return S_OK; }
               // 内部页面（书签、历史、扩展管理……）只能由外壳打开：网页里的链接、脚本跳转一律拦下；
               // 前进后退、刷新、内部页面之间互跳、智能体（用户自己的自动化）照常
               if (IsInternalPage(target) && !t->agent && !t->allowInternal && !IsInternalPage(t->url)) {
@@ -1042,6 +1078,8 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
                 }
               }
               t->allowInternal = false;
+              t->gesture.at = 0;
+              t->securityOrigin=FaviconOrigin(target);t->securityState=0;t->certificateError=false;
               // 图标缓存只给书签管理页（它显示书签图标），别的页面拿不到
               const bool wantFavicons = IsBookmarksPageUrl(target);
               if (wantFavicons != t->faviconHost) {
@@ -1074,7 +1112,7 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
   tab.webview->add_FrameNavigationStarting(Callback<ICoreWebView2NavigationStartingEventHandler>(
       [](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
         CoTaskString uri; args->get_Uri(uri.Put());
-        if (IsInternalPage(uri.Str())) args->put_Cancel(TRUE);
+        if (IsInternalPage(uri.Str()) || IsDangerousBrowserUrl(uri.Str())) args->put_Cancel(TRUE);
         return S_OK;
       }).Get(), &token);
   tab.webview->add_NavigationCompleted(
@@ -1114,13 +1152,14 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
             auto* self = *owner;
             if (!self || self->destroyed_) { args->put_Handled(TRUE); return S_OK; }
             Tab* source = self->FindTab(id);
+            CoTaskString uri;
+            args->get_Uri(uri.Put());
+            const std::wstring target = uri.Str();
+            if (IsBlockedNavigationUrl(target)) { args->put_Handled(TRUE); return S_OK; }
             if (self->options_.appMode) {
               self->OpenNewWindowAsTab(args, true, id);
               return S_OK;
             }
-            CoTaskString uri;
-            args->get_Uri(uri.Put());
-            const std::wstring target = uri.Str();
             const bool agentSource = source && source->agent;
             // 网页不能弹出内部页面
             if (!agentSource && IsInternalPage(target) && !(source && IsInternalPage(source->url))) {
@@ -1149,7 +1188,7 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
               return S_OK;
             }
             // 智能体页面弹出的窗口作为普通后台标签打开，不抢用户的视线；Ctrl+点击同主流浏览器开在后台
-            const bool background = agentSource || (user && (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0);
+            const bool background = source ? source->gesture.TakeBackground(user != FALSE,agentSource,GetTickCount64()) : true;
             self->OpenNewWindowAsTab(args, !background, id);
             return S_OK;
           })
@@ -1213,12 +1252,29 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
           })
           .Get(),
       &token);
+  ComPtr<ICoreWebView2_18> external;
+  if (SUCCEEDED(tab.webview.As(&external))) external->add_LaunchingExternalUriScheme(
+      Callback<ICoreWebView2LaunchingExternalUriSchemeEventHandler>([owner,id](ICoreWebView2*,ICoreWebView2LaunchingExternalUriSchemeEventArgs* args)->HRESULT {
+        auto* self=*owner; const auto* source=self&&!self->destroyed_?self->FindTab(id):nullptr; BOOL user=FALSE; args->get_IsUserInitiated(&user);
+        if(!source||!user||!self->IsActive(*source)||GetForegroundWindow()!=self->hwnd_)args->put_Cancel(TRUE);
+        return S_OK;
+      }).Get(),&token);
+  ComPtr<ICoreWebView2_24> notifications;
+  if(SUCCEEDED(tab.webview.As(&notifications)))notifications->add_NotificationReceived(
+    Callback<ICoreWebView2NotificationReceivedEventHandler>([owner,id](ICoreWebView2*,ICoreWebView2NotificationReceivedEventArgs* args)->HRESULT{
+      auto* self=*owner;const auto* source=self&&!self->destroyed_?self->FindTab(id):nullptr;
+      if(!source||source->agent||source->fromAgent||self->options_.inPrivate){args->put_Handled(TRUE);ComPtr<ICoreWebView2Notification> notification;if(SUCCEEDED(args->get_Notification(notification.GetAddressOf())))notification->ReportClosed();}
+      else SetPropW(self->hwnd_,L"JisuBrowser.NotificationReceived",reinterpret_cast<HANDLE>(1));
+      return S_OK;
+    }).Get(),&token);
   tab.webview->add_PermissionRequested(
       Callback<ICoreWebView2PermissionRequestedEventHandler>(
           [owner, id](ICoreWebView2*, ICoreWebView2PermissionRequestedEventArgs* args) -> HRESULT {
             auto* self = *owner;
             if (!self || self->destroyed_) { args->put_State(COREWEBVIEW2_PERMISSION_STATE_DENY); return S_OK; }
             const Tab* t = self->FindTab(id);
+            COREWEBVIEW2_PERMISSION_KIND kind=COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION;args->get_PermissionKind(&kind);
+            if(self->options_.inPrivate&&kind==COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS){args->put_State(COREWEBVIEW2_PERMISSION_STATE_DENY);return S_OK;}
             if (t && t->agent && !self->IsActive(*t)) {
               args->put_State(COREWEBVIEW2_PERMISSION_STATE_DENY);  // 屏幕外的权限气泡没人能点
             }
@@ -1274,12 +1330,23 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
         else if (self->settings_.siteZoom.size() < 500 || previous != self->settings_.siteZoom.end()) self->settings_.siteZoom[origin] = factor;
         self->SaveSettings(); return S_OK;
       }).Get(), &token);
+  tab.controller->add_MoveFocusRequested(Callback<ICoreWebView2MoveFocusRequestedEventHandler>(
+      [owner,id](ICoreWebView2Controller*,ICoreWebView2MoveFocusRequestedEventArgs* args)->HRESULT {
+        auto* self=*owner;const auto* source=self&&!self->destroyed_?self->FindTab(id):nullptr;
+        if(!source||!self->IsActive(*source)||self->options_.appMode)return S_OK;
+        COREWEBVIEW2_MOVE_FOCUS_REASON reason=COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC;args->get_Reason(&reason);
+        if(reason==COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT){args->put_Handled(TRUE);self->FocusAddressBar();}
+        else if(reason==COREWEBVIEW2_MOVE_FOCUS_REASON_PREVIOUS){args->put_Handled(TRUE);self->AdvanceChromeFocus(-1);}
+        return S_OK;
+      }).Get(),&token);
   tab.controller->add_GotFocus(Callback<ICoreWebView2FocusChangedEventHandler>(
                                    [owner](ICoreWebView2Controller*, IUnknown*) -> HRESULT {
                                      auto* self = *owner;
                                      if (!self || self->destroyed_) return S_OK;
                                      if(self->extensionPopupWindow_) PostMessageW(self->hwnd_,kMsgCloseExtensionPopup,static_cast<WPARAM>(self->extensionPopupGeneration_),0);
+                                     if((self->edit_&&GetFocus()==self->edit_)||(self->chromeKeyboardFocus_&&GetFocus()==self->hwnd_))return S_OK;
                                      self->focusInWebView_ = true;
+                                     self->chromeKeyboardFocus_=false;self->chromeFocusId_=0;self->QueueAccessibility();
                                      return S_OK;
                                    })
                                    .Get(),
@@ -1306,6 +1373,7 @@ void BrowserWindow::OnWebMessage(uint32_t id, ICoreWebView2WebMessageReceivedEve
   if (FAILED(args->TryGetWebMessageAsString(text.Put()))) {
     return;
   }
+  if (HandleLinkInput(id,text.Str())) return;
   CoTaskString source;
   args->get_Source(source.Put());
   const std::wstring origin = source.Str();
@@ -1320,6 +1388,9 @@ void BrowserWindow::OnWebMessage(uint32_t id, ICoreWebView2WebMessageReceivedEve
   if (!message.empty() && message.front() == L'{') {
     Tab* tab = FindTab(id);
     if (tab && ours) {
+      if (message == L"{\"type\":\"privacy.get\"}") {
+        PostToPage(*tab, options_.inPrivate ? "{\"type\":\"privacy.mode\",\"inPrivate\":true}" : "{\"type\":\"privacy.mode\",\"inPrivate\":false}"); return;
+      }
       OnPageMessage(*tab, ToUtf8(message));
     }
     return;
@@ -1368,6 +1439,9 @@ void BrowserWindow::PostToPage(Tab& tab, const std::string& json) {
 
 // 外壳自带页面（新标签页、书签管理页）的请求
 void BrowserWindow::OnPageMessage(Tab& tab, const std::string& text) {
+  if (IsBookmarksPageUrl(tab.url) && (text.starts_with("{\"type\":\"bm.importHtml\"") || text.starts_with("{\"type\":\"bm.import\""))) {
+    QueueBookmarkImport(tab.id,text); return;
+  }
   if (HandleUtilityMessage(tab, text) || HandleHistoryMessage(tab, text)) return;
   json::Value message;
   if (!json::Parse(text, message)) {
@@ -1568,53 +1642,8 @@ void BrowserWindow::OnPageMessage(Tab& tab, const std::string& text) {
       });
       if (!PostMessageW(target, kMsgTask, 0, reinterpret_cast<LPARAM>(task))) delete task;
     }).detach();
-  } else if (type == "bm.importHtml") {
-    size_t count = 0, nodes = 0;
-    std::function<bool(const json::Value&, size_t)> validate = [&](const json::Value& rows, size_t depth) {
-      if (!rows.IsArray() || depth > 32) return false;
-      for (const auto& row : rows.Items()) {
-        if (++nodes > 20000 || row["title"].AsString().size() > 16000) return false;
-        if (row["children"].IsArray()) { if (!validate(row["children"], depth + 1)) return false; }
-        else if (!IsWebUrl(FromUtf8(row["url"].AsString())) || row["url"].AsString().size() > 16384) return false;
-      }
-      return true;
-    };
-    if (!validate(message["nodes"], 0)) { PostToPage(tab, "{\"type\":\"bm.imported\",\"count\":-1,\"error\":\"HTML 书签过大或格式无效\"}"); return; }
-    std::function<void(const json::Value&, BookmarkNode&)> import = [&](const json::Value& rows, BookmarkNode& parent) {
-      for (const auto& row : rows.Items()) {
-        const auto title = FromUtf8(row["title"].AsString());
-        if (row["children"].IsArray()) {
-          BookmarkNode* folder = nullptr;
-          for (auto& child : parent.children) if (child->folder && child->title == title) { folder = child.get(); break; }
-          if (!folder) folder = bookmarks_.AddFolder(parent, parent.children.size(), title);
-          if (folder) import(row["children"], *folder);
-        } else {
-          const auto url = FromUtf8(row["url"].AsString());
-          if (!bookmarks_.FindByUrl(url) && bookmarks_.AddUrl(parent, parent.children.size(), title, url)) ++count;
-        }
-      }
-    };
-    import(message["nodes"], bookmarks_.Bar());
-    if (count || nodes) OnBookmarksChanged();
-    PostToPage(tab, "{\"type\":\"bm.imported\",\"count\":" + std::to_string(count) + ",\"error\":\"\"}");
-  } else if (type == "bm.import") {
-    // 只接受已知浏览器的书签文件，页面不能指定任意文件；按路径比对，不再把所有浏览器的书签重新解析一遍
-    const std::wstring file = FromUtf8(message["file"].AsString());
-    std::wstring name = TruncateUtf16(Trim(FromUtf8(message["name"].AsString())), 40);
-    if (name.empty()) name = L"其他浏览器";
-    std::string error = "unknown import source";
-    int count = -1;
-    if (BookmarkStore::IsImportSourceFile(file)) {
-      error.clear();
-      count = bookmarks_.Import(file, name, &error);
-    }
-    std::string out = "{\"type\":\"bm.imported\",\"count\":" + std::to_string(count) + ",\"error\":";
-    json::AppendQuoted(out, error);
-    out += "}";
-    PostToPage(tab, out);
-    if (count >= 0) {
-      OnBookmarksChanged();
-    }
+  } else if (type == "bm.importHtml" || type == "bm.import") {
+    QueueBookmarkImport(tab.id,text); return;
   } else if (type == "bm.export") {
     std::string out = "{\"type\":\"bm.exported\",\"html\":";
     json::AppendQuoted(out, bookmarks_.ExportHtml());
@@ -2116,6 +2145,7 @@ RECT BrowserWindow::AgentHostRect() const {
 // 标签
 
 void BrowserWindow::NewTab(const std::wstring& url, bool activate, size_t at) {
+  if (IsBlockedNavigationUrl(url)) return;
   if (at == static_cast<size_t>(-1)) at = tabs_.empty() ? 0 : active_ + 1;
   std::unique_ptr<Tab> tab;
   if (url.empty() && spare_ && spare_->controller) {
@@ -2426,6 +2456,14 @@ bool BrowserWindow::PreTranslate(const MSG& msg) {
   if (key == VK_ESCAPE && dragBookmarkId_) { CancelBookmarkDrag(); return true; }
   const bool ctrl = GetKeyState(VK_CONTROL) < 0;
   const bool alt = GetKeyState(VK_MENU) < 0;
+  if(key==VK_TAB&&!ctrl&&!alt&&!options_.appMode&&(chromeKeyboardFocus_||msg.hwnd==edit_)){
+    AdvanceChromeFocus(GetKeyState(VK_SHIFT)<0?-1:1);return true;
+  }
+  if(chromeKeyboardFocus_&&!ctrl&&!alt){
+    if(key==VK_LEFT||key==VK_RIGHT){AdvanceChromeFocus(key==VK_LEFT?-1:1);return true;}
+    if(key==VK_RETURN||key==VK_SPACE){AccessibleAction(chromeFocusId_,false);return true;}
+    if(key==VK_ESCAPE){chromeKeyboardFocus_=false;chromeFocusId_=0;FocusAddressBar();QueueAccessibility();return true;}
+  }
   if (msg.hwnd == edit_ && key == VK_RETURN) {
     if (msg.message == WM_SYSKEYDOWN && alt && !ctrl) {
       NavigateFromAddressBar(true);  // Alt+Enter：在新标签页打开
@@ -2474,6 +2512,10 @@ bool BrowserWindow::PreTranslate(const MSG& msg) {
 }
 
 bool BrowserWindow::DispatchShortcut(UINT key, bool repeat) {
+  if (key == VK_ESCAPE && addressLinkCandidate_) {
+    addressLinkCandidate_=addressLinkDragging_=addressMouseDown_=addressSelectOnUp_=false;addressLink_.clear();
+    CancelBookmarkDrag();if(GetCapture()==edit_)ReleaseCapture();return true;
+  }
   // WebView-focused keyboard events arrive through AcceleratorKeyPressed too.
   if (key == VK_ESCAPE && dragTabId_) { CancelTabDrag(); return true; }
   const bool ctrl = GetKeyState(VK_CONTROL) < 0;
@@ -2505,8 +2547,20 @@ bool BrowserWindow::DispatchShortcut(UINT key, bool repeat) {
         command = kCmdPrevTab;
         break;
       case 'N':
-        if (!repeat && !shift) PostTask([this] { PageAction(0); });
-        return !shift;
+        if (!repeat) PostTask([this,shift] { if(shift)OpenPrivateWindow();else PageAction(0); });
+        return true;
+      case 'F': if(shift)break; if(!repeat)PostTask([this]{PageAction(1);}); return true;
+      case 'P': if(shift)break; if(!repeat)PostTask([this]{PageAction(5);}); return true;
+      case 'U': if(shift)break; if(!repeat)PostTask([this]{PageAction(9);}); return true;
+      case 'S': if(shift)break; if(!repeat)PostTask([this]{PageAction(10);}); return true;
+      case VK_ADD:
+      case VK_OEM_PLUS: if(!repeat)PostTask([this]{PageAction(2);}); return true;
+      case VK_SUBTRACT:
+      case VK_OEM_MINUS: if(!repeat)PostTask([this]{PageAction(3);}); return true;
+      case '0':
+      case VK_NUMPAD0: if(!repeat)PostTask([this]{PageAction(4);}); return true;
+      case VK_DELETE:
+        if(shift){if(!repeat)PostTask([this]{OpenSettings();});return true;}break;
       case 'J':
         if (!repeat) PostTask([this] { OpenDownloads(); });
         return true;
@@ -2562,11 +2616,15 @@ bool BrowserWindow::DispatchShortcut(UINT key, bool repeat) {
       case 'D':
         command = kCmdFocusAddress;
         break;
+      case VK_HOME:
+        if(!repeat)PostTask([this]{OpenUrl(kNtpUrl,false);});return true;
       default:
         break;
     }
   } else if (!ctrl && !alt) {
     switch (key) {
+      case VK_F12:
+        if(!repeat)PostTask([this]{PageAction(6);});return true;
       case VK_F11:
         command = kCmdToggleFullscreen;
         once = true;
@@ -2584,8 +2642,10 @@ bool BrowserWindow::DispatchShortcut(UINT key, bool repeat) {
         command = shift ? kCmdHardReload : kCmdReload;  // Shift+F5：跳过缓存
         break;
       case VK_F6:
-        command = kCmdFocusAddress;
-        break;
+        if(chromeKeyboardFocus_){chromeKeyboardFocus_=false;chromeFocusId_=0;omniboxFocused_=false;FocusActiveContent();QueueAccessibility();}
+        else if(omniboxFocused_)AdvanceChromeFocus(shift?-1:1);
+        else FocusAddressBar();
+        return true;
       default:
         break;
     }
@@ -2756,7 +2816,7 @@ void BrowserWindow::UpdateWindowTitle() {
   const Tab* tab = ActiveTab();
   const std::wstring title =
       (tab && !tab->title.empty() ? tab->title : std::wstring(kNewTabTitle)) + L" - " + kAppName +
-      (writerError_ ? L" [资料保存失败]" : L"");
+      (options_.inPrivate ? L" [无痕]" : L"") + (writerError_ ? L" [资料保存失败]" : L"");
   SetWindowTextW(hwnd_, title.c_str());
 }
 
@@ -3014,7 +3074,7 @@ void BrowserWindow::ShowMainMenu(POINT screen) {
   const auto zoomLabel = L"当前缩放：" + std::to_wstring(static_cast<int>(std::lround(zoom * 100))) + L"%";
   AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, zoomLabel.c_str());
   const wchar_t* actions[] = {L"新建窗口\tCtrl+N", L"页面查找\tCtrl+F", L"放大\tCtrl++", L"缩小\tCtrl+-",
-                             L"重置缩放\tCtrl+0", L"打印\tCtrl+P", L"开发者工具\tF12", L"任务管理器"};
+                             L"重置缩放\tCtrl+0", L"打印\tCtrl+P", L"开发者工具\tF12", L"任务管理器", L"新建无痕窗口\tCtrl+Shift+N", L"查看网页源码\tCtrl+U", L"保存网页\tCtrl+S", L"站点信息"};
   for (UINT i = 0; i < ARRAYSIZE(actions); ++i) AppendMenuW(menu, MF_STRING, kMenuPageBase + i, actions[i]);
   AppendMenuW(menu, MF_STRING | (profile_->closedTabs.empty() ? MF_GRAYED : 0), kMenuReopenClosed,
               L"重新打开关闭的标签页\tCtrl+Shift+T");
@@ -3038,7 +3098,7 @@ void BrowserWindow::ShowMainMenu(POINT screen) {
     if (Tab* tab = FindTab(tabIds[command - kMenuTabListBase]); tab && IndexOf(*tab) < tabs_.size()) Activate(IndexOf(*tab));
     return;
   }
-  if (command >= kMenuPageBase && command < kMenuPageBase + 8) { PageAction(command - kMenuPageBase); return; }
+  if (command >= kMenuPageBase && command < kMenuPageBase + 12) { PageAction(command - kMenuPageBase); return; }
   switch (command) {
     case kMenuDownloads: OpenDownloads(); break;
     case kMenuSettings: OpenSettings(); break;
@@ -3111,11 +3171,11 @@ void BrowserWindow::OpenBookmarkManager(const std::wstring& fragment) {
   NewTab(url, true);
 }
 
-void BrowserWindow::OnBookmarksChanged() {
+void BrowserWindow::OnBookmarksChanged(std::string preparedSnapshot) {
   if (!profileLoaded_) {
     return;
   }
-  const auto snapshot = bookmarks_.Serialized();
+  const auto snapshot = preparedSnapshot.empty() ? bookmarks_.Serialized() : std::move(preparedSnapshot);
   if (profile_->bookmarkSnapshot != snapshot && !profile_->bookmarkSnapshot.empty() && profile_->bookmarkSnapshot.size() <= 8 * 1024 * 1024) {
     profile_->bookmarkUndoBytes += profile_->bookmarkSnapshot.size();
     profile_->bookmarkUndo.push_back(std::move(profile_->bookmarkSnapshot));
@@ -3455,6 +3515,15 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
     return 0;
   }
   switch (msg) {
+    case WM_GETOBJECT:
+      if(!options_.appMode&&static_cast<LONG>(lParam)==OBJID_CLIENT){
+        if(!accessibility_){accessibility_=std::make_shared<AccessibilityState>();accessibility_->window=hwnd_;accessibility_->cookie=NextAccessibilityCookie();accessibility_->name=options_.inPrivate?L"极速浏览器（无痕）":L"极速浏览器";}
+        UpdateAccessibility();if(!accessibleObject_)accessibleObject_=MakeAccessibilityObject(accessibility_);
+        return AccessibilityObject(accessibleObject_.Get(),wParam);
+      }
+      break;
+    case kAccessibilityAction:
+      if(accessibility_&&wParam==accessibility_->cookie){const LONG id=static_cast<LONG>(lParam);if(id!=LONG_MIN)AccessibleAction(id<0?-id:id,id<0);}return 0;
     case WM_NCCALCSIZE:
       if (wParam) {
         auto* p = reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
@@ -3499,9 +3568,17 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
         if (top) return HTTOP; if (bottom) return HTBOTTOM;
       }
       ScreenToClient(hwnd_, &p);
+      if (HitTest(p).kind == ChromeHit::kMaximize) return HTMAXBUTTON;
       if (p.y >= 0 && p.y < layout_.tabStripHeight * layout_.scale && HitTest(p).kind == ChromeHit::kNone) return HTCAPTION;
       return HTCLIENT;
     }
+    case WM_NCMOUSEMOVE: {
+      POINT point=PointFromLParam(lParam);ScreenToClient(hwnd_,&point);
+      if(wParam==HTMAXBUTTON)OnMouseMove(point);
+      break;
+    }
+    case WM_NCMOUSELEAVE:
+      hover_={};InvalidateChrome(false);break;
     case WM_SYSCOMMAND:
       // 单按 Alt / F10：没有菜单栏，进了看不见的系统菜单模式后接下来的按键都被吞掉；Alt+空格的系统菜单照常
       if ((wParam & 0xFFF0) == SC_KEYMENU && lParam == 0 && !options_.appMode) return 0;
@@ -3624,6 +3701,7 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       break;
     case WM_SETFOCUS:
+      if(chromeKeyboardFocus_)return 0;
       if (focusInWebView_) {
         if (Tab* tab = ActiveTab(); tab && tab->controller) {
           tab->controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
@@ -3745,8 +3823,9 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
           case EN_SETFOCUS:
             CloseExtensionPopup();
             omniboxFocused_ = true;
+            chromeKeyboardFocus_ = false; chromeFocusId_ = 0; QueueAccessibility();
             focusInWebView_ = false;
-            PostMessageW(edit_, EM_SETSEL, 0, -1);  // 点进地址栏即全选，和主流浏览器一致
+            if (!addressMouseDown_) SendMessageW(edit_, EM_SETSEL, 0, -1);
             InvalidateChrome();
             break;
           case EN_KILLFOCUS:
@@ -3772,6 +3851,7 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       return FALSE;
     case WM_TIMER:
+      if (wParam == kTimerDrop) { KillTimer(hwnd_,kTimerDrop); EnableBookmarkDrop(); return 0; }
       if (wParam == kTimerPlacement) { KillTimer(hwnd_, kTimerPlacement); SaveWindowPlacement(); return 0; }
       if (wParam == kTimerProfile) { FinishProfileLoad(); return 0; }
       if (wParam == kTimerControllers) { WatchControllers(); return 0; }
@@ -3895,7 +3975,7 @@ void BrowserWindow::OnCreate() {
 }
 
 void BrowserWindow::InstallTrayIcon() {
-  if (destroyed_ || options_.appMode || options_.preheatSeconds > 0 || !options_.metricsPath.empty() || options_.secondary) return;
+  if (destroyed_ || options_.appMode || options_.inPrivate || options_.preheatSeconds > 0 || !options_.metricsPath.empty() || options_.secondary) return;
   ++trayInstallAttempts_;
   const std::wstring version = FromUtf8(JISU_VERSION) + L" · " + FromUtf8(std::string(JISU_COMMIT).substr(0, 7));
   if (!tray_.Install(hwnd_, instance_, version) && trayInstallAttempts_ < 6) {
@@ -3944,10 +4024,14 @@ void BrowserWindow::ExecuteTrayCommand(UINT command) {
 }
 
 void BrowserWindow::OnDestroy() {
+  if(accessibility_){std::lock_guard lock(accessibility_->mutex);accessibility_->alive=false;}
+  accessibleObject_.Reset();
+  if(bookmarkDropTarget_){bookmarkDropTarget_.Reset();RevokeDragDrop(hwnd_);}
   HideSuggestions();
   if (suggestions_) { DestroyWindow(suggestions_); suggestions_ = nullptr; }
   CancelTabDrag(false);
   // 窗口还在、标签还在：先记下位置大小与会话。最后一个窗口正常关闭 = 干净退出（关机中除外）
+  RememberClosedWindow();
   SaveWindowPlacement();
   const bool lastWindow = std::count_if(liveWindows_.begin(), liveWindows_.end(), [this](const BrowserWindow* window) {
                             return window->profile_ == profile_;
@@ -4005,6 +4089,7 @@ void BrowserWindow::OnDestroy() {
   tabs_.clear();
   agentTabs_.clear();
   spare_.reset();
+  if(dropOle_){OleUninitialize();dropOle_=false;}
   environment_.Reset();
   if (agentHost_) {
     DestroyWindow(agentHost_);
@@ -4144,6 +4229,7 @@ void BrowserWindow::ExitFullscreen() {
 }
 
 void BrowserWindow::Relayout() {
+  QueueAccessibility();
   chromeStateDirty_ = true;
   RECT client{};
   GetClientRect(hwnd_, &client);
@@ -4184,6 +4270,7 @@ void BrowserWindow::Relayout() {
   l.menu = D2D1::RectF(std::max(160.0f, l.width - 40.0f), top + 4.0f, std::max(192.0f, l.width - 8.0f), top + 36.0f);
   const float toolbarRight = LayoutExtensionToolbar(l.menu.left - 6.0f, top, l.scale);
   l.omnibox = D2D1::RectF(120.0f, top + 5.0f, std::max(160.0f, toolbarRight - 6.0f), top + 35.0f);
+  l.siteInfo=l.omnibox.right-l.omnibox.left>=90?D2D1::RectF(l.omnibox.left+4,l.omnibox.top+2,l.omnibox.left+32,l.omnibox.bottom-2):D2D1_RECT_F{};
   l.star = D2D1::RectF(l.omnibox.right - 32.0f, l.omnibox.top + 2.0f, l.omnibox.right - 4.0f, l.omnibox.bottom - 2.0f);
   // 当前页拦下过弹出窗口：星标左侧放提示钮
   const Tab* active = ActiveTab();
@@ -4196,7 +4283,7 @@ void BrowserWindow::Relayout() {
 
   if (edit_) {
     const float editRight = l.popupBlocked.right > l.popupBlocked.left ? l.popupBlocked.left : l.star.left;
-    const int left = static_cast<int>(std::lround((l.omnibox.left + 12.0f) * l.scale));
+    const int left = static_cast<int>(std::lround((l.siteInfo.right>l.siteInfo.left?l.siteInfo.right+6.0f:l.omnibox.left+12.0f) * l.scale));
     const int right = static_cast<int>(std::lround((editRight - 2.0f) * l.scale));
     const int centerY = static_cast<int>(std::lround((l.omnibox.top + l.omnibox.bottom) * 0.5f * l.scale));
     const RECT rect{left, centerY - editHeightPx_ / 2, std::max(left, right), centerY - editHeightPx_ / 2 + editHeightPx_};
@@ -4257,7 +4344,7 @@ RECT BrowserWindow::ContentRect() const {
 }
 
 const ChromeState& BrowserWindow::BuildChromeState() const {
-  if (!chromeStateDirty_) { chromeState_.hover = hover_; return chromeState_; }
+  if (!chromeStateDirty_) { chromeState_.hover = hover_; chromeState_.keyboardFocus=KeyboardChromeHit(); return chromeState_; }
   chromeStateDirty_ = false;
   ChromeState state;
   state.tabs.reserve(tabs_.size());
@@ -4265,6 +4352,7 @@ const ChromeState& BrowserWindow::BuildChromeState() const {
     const Tab& tab = *tabs_[i];
     std::wstring title = tab.title.empty() ? std::wstring(tab.agent ? kAgentTabTitle : kNewTabTitle) : tab.title;
     if (tab.unresponsive) title = L"未响应 · " + title;
+    if (options_.inPrivate) title = L"无痕 · " + title;
     ChromeTab item{std::move(title), i == active_, tab.loading, tab.agent, tab.agentAwake,
                    tab.agent ? L"" : favicons_.Request(tab.url.empty() ? tab.pendingUrl : tab.url)};
     item.audible = tab.audible;
@@ -4273,11 +4361,13 @@ const ChromeState& BrowserWindow::BuildChromeState() const {
     state.tabs.push_back(std::move(item));
   }
   state.hover = hover_;
-  state.bookmarkDrag = draggingBookmark_;
+  state.keyboardFocus=KeyboardChromeHit();
+  state.bookmarkDrag = draggingBookmark_ || externalBookmarkDrag_;
   state.bookmarkDrop = dropBookmark_;
   state.bookmarkDropIntoFolder = dropIntoFolder_;
   const Tab* active = ActiveTab();
   if (active) {
+    state.securityState=IsInternalPage(active->url)?4:active->certificateError?3:active->url.starts_with(L"http://")?2:active->securityState==1&&active->url.starts_with(L"https://")?1:active->securityState==2?2:0;
     state.canBack = active->canBack;
     state.canForward = active->canForward;
     state.loading = active->loading;
@@ -4339,6 +4429,7 @@ ChromeHit BrowserWindow::HitTest(POINT point) const {
   if (layout_.popupBlocked.right > layout_.popupBlocked.left && inside(layout_.popupBlocked)) {
     return ChromeHit{ChromeHit::kPopupBlocked, -1};
   }
+  if (layout_.siteInfo.right>layout_.siteInfo.left&&inside(layout_.siteInfo)) return {ChromeHit::kSiteInfo,-1};
   if (inside(layout_.star)) {
     const Tab* tab = ActiveTab();
     if (tab && profileLoaded_ && IsStarrable(tab->url)) {
@@ -4363,7 +4454,7 @@ ChromeHit BrowserWindow::HitTest(POINT point) const {
 }
 
 void BrowserWindow::InvalidateChrome(bool dataChanged) {
-  if (dataChanged) { chromeStateDirty_ = true; ++chromeRevision_; }
+  if (dataChanged) { chromeStateDirty_ = true; ++chromeRevision_; QueueAccessibility(); }
   if (hwnd_) {
     RECT area{}; GetClientRect(hwnd_, &area);
     const Tab* tab = ActiveTab();
@@ -4398,6 +4489,7 @@ void BrowserWindow::OnMouseMove(POINT point) {
 }
 
 void BrowserWindow::OnLButtonDown(POINT point) {
+  chromeKeyboardFocus_=false;chromeFocusId_=0;QueueAccessibility();
   CloseExtensionPopup();
   pressed_ = HitTest(point);
   if (pressed_.kind == ChromeHit::kBookmark && static_cast<size_t>(pressed_.index) < barItems_.size()) {
@@ -4465,6 +4557,8 @@ void BrowserWindow::OnLButtonUp(POINT point) {
     case ChromeHit::kStar:
       ToggleBookmark();
       break;
+    case ChromeHit::kSiteInfo:
+      ShowSiteInfo(below(layout_.siteInfo,false));break;
     case ChromeHit::kPopupBlocked:
       ShowPopupBlockedMenu(below(layout_.popupBlocked, false));
       break;
@@ -4544,7 +4638,7 @@ void BrowserWindow::FlushBookmarkSave() {
   if (hwnd_) KillTimer(hwnd_, kTimerBookmarks);
   if (!profile_->bookmarksDirty || bookmarks_.File().empty()) return;
   profile_->bookmarksDirty = false;
-  profile_->writer.Write(bookmarks_.File(), bookmarks_.Serialized(), true);
+  profile_->writer.Write(bookmarks_.File(), profile_->bookmarkSnapshot.empty() ? bookmarks_.Serialized() : profile_->bookmarkSnapshot, true);
   bookmarks_.MarkWritten();
 }
 

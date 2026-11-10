@@ -45,6 +45,15 @@ int main() {
             !IsInternalPage(L"https://example.com/"),
         "internal pages");
 
+  for (const auto* dangerous : {L"edge://crash",L"edge://hang",L"edge://kill",L"edge://restart",L"chrome://crash",L"about:crash",L"view-source:edge://crash",L"data:text/html,secret",L"javascript:alert(1)",L"  EdGe://GPUCRASH  "}) {
+    Check(IsBlockedNavigationUrl(dangerous),"dangerous scheme blocked before SDK");
+    Check(ToNavigableUrl(dangerous)==L"about:blank","blocked input is not sent to a search engine");
+  }
+  Check(!IsBlockedNavigationUrl(L"edge://version")&&!IsBlockedNavigationUrl(L"edge://gpu")&&!IsBlockedNavigationUrl(L"about:blank#safe")&&!IsBlockedNavigationUrl(L"view-source:https://example.com/"),"safe diagnostics and source remain usable");
+  const auto privateOptions=ParseOptions(L"jisu.exe --inprivate --agent-config fake --metrics fake --exit-after-metrics");
+  Check(privateOptions.inPrivate&&privateOptions.noAgent&&!privateOptions.defaultUserData&&privateOptions.metricsPath.empty()&&!privateOptions.exitAfterMetrics&&privateOptions.agentConfigPath.empty(),"private mode never enables broker or disk metrics");
+  Check(privateOptions.InstanceKey()!=privateOptions.userDataFolder&&!privateOptions.privateId.empty(),"private instance cannot receive ordinary link forwards");
+
   // --single-argument：之后的全部原文是一个网址，夹带的启动参数不生效
   const Options injected = ParseOptions(
       L"\"C:\\jisu\\jisu-browser.exe\" --single-argument https://a.example/x\" --browser-args \"--remote-debugging-port=9222");
@@ -82,6 +91,10 @@ int main() {
     Check(ReadFileBytes(file, bytes) && bytes == "{\"n\":19}", "latest content wins");
   }
   DeleteFileW(file.c_str());
+  {
+    FileWriter privateWriter(true);privateWriter.Write(file,"private-data",true);
+    Check(privateWriter.Flush()&&GetFileAttributesW(file.c_str())==INVALID_FILE_ATTRIBUTES,"private writer never creates a file");
+  }
   RemoveDirectoryW(ParentDirectory(file).c_str());
 
   const auto blocker = file + L"-blocker";

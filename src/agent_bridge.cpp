@@ -1,4 +1,5 @@
 #include "agent_bridge.h"
+#include "browser_url.h"
 
 #include "cdp_events.h"
 #include "json.h"
@@ -573,8 +574,11 @@ void AgentBridge::OnRelayMessage(uint32_t connectionId, const std::string& text)
     Fail(connection, idJson, "Missing CDP method");
     return;
   }
-  if (cdpMethod == "Target.createTarget" || cdpMethod == "Target.closeTarget" || cdpMethod == "Page.close") {
-    Fail(connection, idJson, "Single fixed-tab mode: creating or closing tabs is disabled");
+  if ((cdpMethod.starts_with("Browser.") && cdpMethod != "Browser.getVersion") ||
+      cdpMethod == "Target.getTargets" || cdpMethod == "Target.attachToTarget" || cdpMethod == "Target.attachToBrowserTarget" ||
+      cdpMethod == "Target.setDiscoverTargets" || cdpMethod == "Target.setRemoteLocations" || cdpMethod == "Target.sendMessageToTarget" ||
+      cdpMethod == "Target.createTarget" || cdpMethod == "Target.closeTarget" || cdpMethod == "Page.close" || cdpMethod == "Page.crash") {
+    Fail(connection, idJson, "Single fixed-tab mode: browser-wide and cross-target operations are disabled");
     return;
   }
   if (cdpMethod == "Target.activateTarget") {
@@ -595,6 +599,11 @@ void AgentBridge::OnRelayMessage(uint32_t connectionId, const std::string& text)
   }
   const std::string session = childSession.empty() ? connection.rootSession : childSession;
   const json::Value& cdpParams = params.size() > 2 ? params[2] : kNull;
+  if ((cdpMethod.starts_with("Target.") && cdpMethod != "Target.setAutoAttach" && cdpMethod != "Target.getTargetInfo" && cdpMethod != "Target.detachFromTarget") ||
+      (cdpMethod == "Target.getTargetInfo" && !cdpParams["targetId"].AsString().empty()) ||
+      (cdpMethod == "Target.detachFromTarget" && !connection.childSessions.contains(cdpParams["sessionId"].AsString()))) {
+    Fail(connection,idJson,"Target operation is outside the owned page and child-frame lease"); return;
+  }
   if (childSession.empty() && cdpMethod == "Emulation.setFocusEmulationEnabled") {
     // 焦点模拟由桥按唤醒状态开关：记下 Playwright 的意图，醒着时立即生效
     connection.focusDesired = cdpParams["enabled"].AsBool();
@@ -646,6 +655,12 @@ void AgentBridge::OnRelayMessage(uint32_t connectionId, const std::string& text)
 
 void AgentBridge::Forward(Connection& connection, const std::string& idJson, const std::string& session,
                           const std::string& method, const std::string& paramsJson) {
+  if (method == "Page.navigate") {
+    json::Value parameters;
+    if (json::Parse(paramsJson, parameters) && IsBlockedNavigationUrl(FromUtf8(parameters["url"].AsString()))) {
+      Fail(connection, idJson, "Navigation protocol is blocked by browser safety policy"); return;
+    }
+  }
   Execute(connection, idJson, session, method, paramsJson);
   if (method == "Network.enable") {
     // 同一会话上按顺序执行：网址拦截紧跟在开启网络域之后生效（iframe 子会话各自开启，各自补上）

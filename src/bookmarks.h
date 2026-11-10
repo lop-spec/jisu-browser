@@ -42,6 +42,7 @@ class BookmarkStore {
   bool Load(const std::wstring& file);
   bool Save();
   bool RestoreSerialized(const std::string& bytes);
+  void AdoptParsed(BookmarkStore& parsed);
   // 整份文件内容：界面线程上生成（快），交给后台写盘；写出后调 MarkWritten
   std::string Serialized() const;
   void MarkWritten() { existed_ = true; }

@@ -39,11 +39,13 @@ struct Options {
   // --no-agent 关掉。带 --metrics 的测量运行不开桥，除非显式给了 --agent-config
   std::wstring agentConfigPath;
   bool noAgent = false;
+  bool inPrivate = false;
+  std::wstring privateId;
   bool appMode = false;           // --app <URL>: independent, single-page native app window
   std::wstring appId = L"web-app"; // --app-id: singleton/taskbar identity, not a new profile
   std::wstring appTitle = L"Web App";
   std::wstring appIcon;            // --app-icon: local .ico path
-  std::wstring InstanceKey() const { return appMode ? userDataFolder + L"|app:" + appId : userDataFolder; }
+  std::wstring InstanceKey() const { return inPrivate ? userDataFolder + L"|private:" + privateId : appMode ? userDataFolder + L"|app:" + appId : userDataFolder; }
   std::wstring startUrl;           // 第一个非选项参数：启动时打开的网址
   // --single-argument：其后的全部原文是一个网址/路径（默认浏览器登记用），不再当作选项解析，
   // 构造的链接夹带不了 --browser-args、--udf 之类的启动参数

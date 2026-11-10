@@ -121,6 +121,8 @@ Options ParseOptions(const wchar_t* commandLine) {
       options.appTitle = next();
     } else if (arg == L"--app-icon") {
       options.appIcon = next();
+    } else if (arg == L"--inprivate") {
+      options.inPrivate = true;
     } else if (arg == L"--udf") {
       options.userDataFolder = next();
       options.defaultUserData = false;
@@ -178,6 +180,11 @@ Options ParseOptions(const wchar_t* commandLine) {
   }
   if (!options.metricsPath.empty() && !agentConfigExplicit) {
     options.noAgent = true;  // 测量运行与日常实例隔离：不去抢 broker 的连接票据
+  }
+  if (options.inPrivate) {
+    options.privateId = L"Private_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64());
+    options.appMode = false; options.noAgent = true; options.defaultUserData = false;
+    options.agentConfigPath.clear(); options.metricsPath.clear(); options.exitAfterMetrics = false;
   }
   if (options.warmD3D < 0) {
     options.warmD3D = options.renderTarget == RenderTargetKind::kSoftware ? 1 : 0;

@@ -70,8 +70,13 @@ void HistoryStore::Start(const std::wstring& file) {
 }
 void HistoryStore::Queue(Operation op) {
   { std::lock_guard lock(mutex_); if (!worker_.joinable()) return;
-    if (pending_.size() >= 2048) { diskError_ = true; return; }
-    pending_.push_back(std::move(op)); }
+    // Coalesce only adjacent operations: a remove/clear remains an ordering barrier.
+    if (memoryOnly_) return;
+    if (!pending_.empty() && pending_.back().kind == op.kind && pending_.back().entry.url == op.entry.url && op.kind <= 1) {
+      auto& previous = pending_.back().entry;
+      if (op.kind == 0) { op.entry.visits += previous.visits; op.entry.typed += previous.typed; if (op.entry.title.empty()) op.entry.title = previous.title; }
+      previous = std::move(op.entry);
+    } else pending_.push_back(std::move(op)); }
   cv_.notify_all();
 }
 void HistoryStore::Visit(std::wstring url, std::wstring title, int64_t now, bool typed) {
@@ -84,6 +89,12 @@ void HistoryStore::Title(const std::wstring& url, const std::wstring& title) {
 }
 void HistoryStore::Remove(int64_t id) { Queue({2, {id, 0, {}, {}, {}}}); }
 void HistoryStore::Clear() { Queue({3, {}}); }
+void HistoryStore::RemoveRange(std::wstring origin, int64_t start, int64_t end) {
+  if (start < 0 || end <= start) return;
+  origin = Lower(std::move(origin));
+  if (!origin.empty() && !(origin.starts_with(L"https://") || origin.starts_with(L"http://"))) return;
+  Queue({4, {end, start, std::move(origin), {}, {}}});
+}
 bool HistoryStore::WaitIdle(unsigned timeoutMs) {
   std::unique_lock lock(mutex_);
   return cv_.wait_for(lock, std::chrono::milliseconds(timeoutMs), [this] { return ready_ && pending_.empty() && !busy_; });
@@ -137,6 +148,11 @@ bool HistoryStore::Apply(Operation& op) {
     return false; // Title-only changes are visible immediately but do not create disk churn.
   } else if (op.kind == 2) return std::erase_if(entries_, [&n](const auto& e) { return e.id == n.id; }) != 0;
   else if (op.kind == 3) { if (entries_.empty()) return false; entries_.clear(); }
+  else if (op.kind == 4) return std::erase_if(entries_, [&n](const auto& e) {
+    const auto split = e.url.find(L"://");
+    const auto origin = Lower(e.url.substr(0, e.url.find_first_of(L"/?#", split + 3)));
+    return e.at >= n.at && e.at < n.id && (n.url.empty() || n.url == origin);
+  }) != 0;
   return true;
 }
 // 持锁进入、持锁返回；序列化与写盘时放开锁
@@ -152,7 +168,7 @@ bool HistoryStore::SaveLocked(std::unique_lock<std::mutex>& lock) {
     row.Set("typed", json::Value::Number(static_cast<double>(e.typed)));
     data.Push(std::move(row));
   }
-  const bool saved = WriteFileAtomic(file_, json::Serialize(data));
+  const bool saved = memoryOnly_ || WriteFileAtomic(file_, json::Serialize(data));
   lock.lock();
   diskError_ = !saved;
   if (saved) {
@@ -166,7 +182,7 @@ bool HistoryStore::SaveLocked(std::unique_lock<std::mutex>& lock) {
 void HistoryStore::Run() {
   std::string bytes; json::Value root;
   std::vector<Entry> loaded;
-  if (ReadFileBytes(file_, bytes) && json::Parse(bytes, root)) {
+  if (!memoryOnly_ && ReadFileBytes(file_, bytes) && json::Parse(bytes, root)) {
     const int64_t now = Now();
     for (const auto& row : root.Items()) {
       auto url = SafeUrl(FromUtf8(row["url"].AsString()));
@@ -185,8 +201,8 @@ void HistoryStore::Run() {
     if (!pending_.empty()) {
       busy_ = true;
       bool changed = false;
-      while (!pending_.empty()) { auto op = std::move(pending_.front()); pending_.pop_front(); changed = Apply(op) || changed; }
-      if (!changed) { busy_ = false; cv_.notify_all(); continue; }
+      for (size_t batch = 0; batch < 64 && !pending_.empty(); ++batch) { auto op = std::move(pending_.front()); pending_.pop_front(); changed = Apply(op) || changed; }
+      if (!changed) { busy_ = false; cv_.notify_all(); lock.unlock(); std::this_thread::yield(); lock.lock(); continue; }
       const int64_t now = Now();
       std::erase_if(entries_, [now](const auto& e) { return e.at < now - 90LL*86400000; });
       if (entries_.size() > 20000) entries_.resize(20000);
@@ -197,6 +213,7 @@ void HistoryStore::Run() {
       dirty_ = true;
       busy_ = false;
       cv_.notify_all();
+      lock.unlock(); std::this_thread::yield(); lock.lock();
       continue;
     }
     if (dirty_) {

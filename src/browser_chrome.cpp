@@ -88,6 +88,8 @@ std::wstring BrowserWindow::TooltipText(const ChromeHit& hit) const {
       return L"前进 (Alt+→)";
     case ChromeHit::kReload:
       return active && active->loading ? L"停止加载" : L"重新加载 (F5)\nCtrl+F5 跳过缓存重新加载";
+    case ChromeHit::kSiteInfo:
+      return L"站点信息与连接证书";
     case ChromeHit::kStar:
       return starredValue_ && active && active->url == starredUrl_ ? L"编辑书签 (Ctrl+D)" : L"为此网页添加书签 (Ctrl+D)";
     case ChromeHit::kPopupBlocked:
@@ -150,6 +152,7 @@ void BrowserWindow::UpdateChromeTooltip() {
     case ChromeHit::kBack: area = layout_.back; break;
     case ChromeHit::kForward: area = layout_.forward; break;
     case ChromeHit::kReload: area = layout_.reload; break;
+    case ChromeHit::kSiteInfo: area = layout_.siteInfo; break;
     case ChromeHit::kStar: area = layout_.star; break;
     case ChromeHit::kPopupBlocked: area = layout_.popupBlocked; break;
     case ChromeHit::kMenu: area = layout_.menu; break;
@@ -182,6 +185,48 @@ LRESULT CALLBACK BrowserWindow::AddressBarProc(HWND hwnd, UINT msg, WPARAM wPara
                                                DWORD_PTR data) {
   auto* self = reinterpret_cast<BrowserWindow*>(data);
   switch (msg) {
+    case WM_LBUTTONDOWN:
+      self->addressMouseDown_ = true; self->addressSelectOnUp_ = GetFocus() != hwnd; self->addressDragged_ = false;
+      self->addressMouseStart_ = POINT{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};
+      if(!self->addressSelectOnUp_){
+        DWORD start=0,end=0;SendMessageW(hwnd,EM_GETSEL,reinterpret_cast<WPARAM>(&start),reinterpret_cast<LPARAM>(&end));
+        const auto at=LOWORD(SendMessageW(hwnd,EM_CHARFROMPOS,0,lParam));const int length=GetWindowTextLengthW(hwnd);
+        if(start<end&&at>=start&&at<end&&length<=32768){
+          std::wstring text(static_cast<size_t>(length)+1,L'\0');GetWindowTextW(hwnd,text.data(),length+1);text.resize(length);
+          const auto url=Trim(text.substr(start,end-start));
+          if(IsStarrable(url)&&url.size()<=16384){self->addressLink_=url;self->addressLinkCandidate_=true;self->addressLinkDragging_=false;self->addressDownParam_=lParam;self->addressDownKeys_=wParam;SetCapture(hwnd);return 0;}
+        }
+      }
+      break;
+    case WM_MOUSEMOVE:
+      if (self->addressMouseDown_ && (wParam & MK_LBUTTON) &&
+          (std::abs(GET_X_LPARAM(lParam)-self->addressMouseStart_.x) >= GetSystemMetricsForDpi(SM_CXDRAG,self->dpi_) ||
+           std::abs(GET_Y_LPARAM(lParam)-self->addressMouseStart_.y) >= GetSystemMetricsForDpi(SM_CYDRAG,self->dpi_))) self->addressDragged_ = true;
+      if(self->addressLinkCandidate_){
+        if(self->addressDragged_){self->addressLinkDragging_=true;POINT point{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};MapWindowPoints(hwnd,self->hwnd_,&point,1);self->externalBookmarkDrag_=true;self->UpdateBookmarkDrop(point);}
+        return 0;
+      }
+      break;
+    case WM_LBUTTONUP: {
+      if(self->addressLinkCandidate_){
+        const auto url=self->addressLink_;const bool dragged=self->addressLinkDragging_;const auto down=self->addressDownParam_;const auto keys=self->addressDownKeys_;
+        self->addressLinkCandidate_=self->addressLinkDragging_=self->addressMouseDown_=self->addressSelectOnUp_=false;self->addressLink_.clear();
+        if(GetCapture()==hwnd)ReleaseCapture();self->CancelBookmarkDrag();
+        if(dragged){POINT point{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)};MapWindowPoints(hwnd,self->hwnd_,&point,1);const auto* active=self->ActiveTab();self->AddDroppedBookmark(url,active&&active->url==url?active->title:url,point);return 0;}
+        DefSubclassProc(hwnd,WM_LBUTTONDOWN,keys,down);return DefSubclassProc(hwnd,msg,wParam,lParam);
+      }
+      const bool select = self->addressSelectOnUp_ && !self->addressDragged_;
+      self->addressMouseDown_ = self->addressSelectOnUp_ = false;
+      const auto result = DefSubclassProc(hwnd,msg,wParam,lParam);
+      if (select && GetFocus()==hwnd) SendMessageW(hwnd,EM_SETSEL,0,-1);
+      return result;
+    }
+    case WM_LBUTTONDBLCLK:
+    case WM_CAPTURECHANGED:
+    case WM_CANCELMODE:
+      self->addressMouseDown_ = self->addressSelectOnUp_ = false;
+      self->addressLinkCandidate_=self->addressLinkDragging_=false;self->addressLink_.clear();self->CancelBookmarkDrag();
+      break;
     case WM_IME_STARTCOMPOSITION: self->imeComposing_ = true; self->HideSuggestions(); break;
     case WM_IME_ENDCOMPOSITION: self->imeComposing_ = false; break;
     case WM_CHAR: self->allowInline_ = wParam >= 32 && !self->imeComposing_; break;

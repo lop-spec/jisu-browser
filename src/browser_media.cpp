@@ -10,10 +10,12 @@ std::wstring PlayerDirectory(){wchar_t path[MAX_PATH];GetModuleFileNameW(nullptr
 bool PlayerUrl(const std::wstring& url){return url==kPlayerUrl;}
 }
 void BrowserWindow::OpenMedia(){
+  if(options_.inPrivate){ShowNotice(L"无痕窗口不使用外部播放器；请使用网页播放器。");return;}
   Tab* source=ActiveTab();if(source&&!PlayerUrl(source->url)&&!source->agent&&source->webview){CaptureMedia(*source);return;}
   NewTab(kPlayerUrl);
 }
 bool BrowserWindow::EnsureMedia(Tab& tab){
+  if(options_.inPrivate)return false;
   if(tab.media)return tab.media->Running();
   tab.mediaSurface=CreateWindowExW(0,L"STATIC",L"",WS_CHILD|WS_CLIPCHILDREN|SS_BLACKRECT,0,0,0,0,hwnd_,nullptr,instance_,nullptr);
   tab.media=std::make_unique<MediaSession>();
@@ -56,6 +58,7 @@ void BrowserWindow::SourceMediaAction(Tab& tab,const std::string& action,int lin
   else if(action=="next"||action=="prev"){const auto script=L"document.getElementById('"+FromUtf8(action)+L"')?.click();";source->webview->ExecuteScript(script.c_str(),nullptr);}
 }
 bool BrowserWindow::HandleMediaMessage(Tab& tab,const std::wstring& origin,const std::string& text){
+  if(options_.inPrivate)return false;
   json::Value message;if(!json::Parse(text,message))return false;const auto type=message["type"].AsString();
   if(type=="media.request"){
     if(tab.agent||!IsActive(tab)||origin!=tab.url||!tab.webview)return true;

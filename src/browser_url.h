@@ -131,11 +131,33 @@ inline std::wstring UrlEncode(const std::wstring& text) {
   return out;
 }
 
-// 地址栏输入 → 网址：带协议的原样打开；像域名的补 https://；localhost 与 IPv4 补 http://；其余交给搜索
+// Browser diagnostic schemes can execute before NavigationStarting; check before every Navigate too.
+inline bool IsDangerousBrowserUrl(std::wstring url) {
+  url = Trim(url);
+  std::transform(url.begin(), url.end(), url.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+  if (url.starts_with(L"edge:") || url.starts_with(L"chrome:")) {
+    const auto page = url.substr(0, url.find_first_of(L"?#"));
+    return !(page == L"edge://version" || page == L"edge://version/" || page == L"edge://gpu" || page == L"edge://gpu/" || page == L"edge://credits" || page == L"edge://credits/");
+  }
+  if (url.starts_with(L"about:")) { const auto page=url.substr(0,url.find_first_of(L"?#")); return page != L"about:blank" && page != L"about:srcdoc"; }
+  if (url.starts_with(L"view-source:")) {
+    const auto inner = url.substr(12);
+    return !(inner.starts_with(L"https://") || inner.starts_with(L"http://") || inner.starts_with(L"file://"));
+  }
+  return false;
+}
+inline bool IsBlockedNavigationUrl(std::wstring url) {
+  url = Trim(url);
+  std::transform(url.begin(), url.end(), url.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+  return IsDangerousBrowserUrl(url) || url.starts_with(L"data:") || url.starts_with(L"javascript:") || url.starts_with(L"vbscript:");
+}
+
+// 地址栏输入 → 网址：带协议的安全地址原样打开；其余按域名或搜索处理。
 inline std::wstring ToNavigableUrl(const std::wstring& input) {
   std::wstring lower = input;
   std::transform(lower.begin(), lower.end(), lower.begin(),
                  [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+  if (IsBlockedNavigationUrl(lower)) return L"about:blank";
   if (lower == kBookmarksDisplay || lower.starts_with(std::wstring(kBookmarksDisplay) + L"#")) {
     return kBookmarksUrl + input.substr(wcslen(kBookmarksDisplay));
   }

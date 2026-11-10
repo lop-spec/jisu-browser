@@ -1,0 +1,11 @@
+import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';
+const header=fs.readFileSync(new URL('../src/link_policy.h',import.meta.url),'utf8');
+const code=header.match(/LR"JS\(([\s\S]*?)\)JS"/)[1],handlers={},records=[];
+const context={window:{chrome:{webview:{postMessage:text=>records.push(JSON.parse(text))}},addEventListener:(type,fn)=>handlers[type]=fn}};
+new vm.Script(code).runInNewContext(context);
+handlers.pointerdown({type:'pointerdown',isTrusted:false,button:1});assert.equal(records.length,0);
+handlers.keydown({type:'keydown',isTrusted:true,key:'a',ctrlKey:false});assert.equal(records.length,0);
+handlers.pointerdown({type:'pointerdown',isTrusted:true,button:0,ctrlKey:true,shiftKey:false});
+assert.equal(records[0].ctrl,true);assert.deepEqual(Object.keys(records[0]).sort(),['button','ctrl','shift','type']);
+handlers.pointerdown({type:'pointerdown',isTrusted:true,button:1,ctrlKey:false,shiftKey:false});assert.equal(records[1].button,1);
+console.log('PASS actual injected script parses; trusted modifier/button snapshots; no typed text; no synthetic dispatch authority');

@@ -55,7 +55,7 @@ class GraphicsWarmup {
 };
 
 struct ChromeHit {
-  enum Kind { kNone, kTab, kTabClose, kNewTab, kBack, kForward, kReload, kStar, kMenu, kBookmark, kBookmarkOverflow, kMinimize, kMaximize, kWindowClose,
+  enum Kind { kNone, kTab, kTabClose, kNewTab, kBack, kForward, kReload, kSiteInfo, kStar, kMenu, kBookmark, kBookmarkOverflow, kMinimize, kMaximize, kWindowClose,
               kTabAudio,      // 标签上的扬声器：点一下静音 / 取消静音
               kPopupBlocked,  // 地址框里的「已拦截弹出窗口」
               kBookmarkBar };  // 书签栏的空白处（右键菜单）
@@ -81,6 +81,7 @@ struct ChromeLayout {
   D2D1_RECT_F forward{};
   D2D1_RECT_F reload{};
   D2D1_RECT_F omnibox{};
+  D2D1_RECT_F siteInfo{};
   D2D1_RECT_F star{};  // 地址框右端的书签星标
   D2D1_RECT_F menu{};  // 工具栏最右的菜单钮
   std::vector<D2D1_RECT_F> bookmarks;  // 书签栏里放得下的项
@@ -111,10 +112,12 @@ struct ChromeBookmark {
 struct ChromeState {
   std::vector<ChromeTab> tabs;
   ChromeHit hover;
+  ChromeHit keyboardFocus;
   bool canBack = false;
   bool canForward = false;
   bool loading = false;
   bool omniboxFocused = false;
+  int securityState = 0;
   bool canStar = false;  // 当前页能加书签（http/https）
   bool starred = false;  // 当前页已在书签里
   std::vector<ChromeBookmark> bookmarks;  // 书签栏各项，与 ChromeLayout::bookmarks 一一对应
@@ -168,7 +171,6 @@ class ChromePainter {
   void DrawPopupBlocked(D2D1_POINT_2F center);
   std::map<std::wstring, ComPtr<ID2D1Bitmap>> faviconBitmaps_;
   mutable std::map<std::wstring, float> bookmarkWidths_;
-  ComPtr<IWICImagingFactory> wic_;
 
   ComPtr<ID2D1Factory> factory_;
   ComPtr<IDWriteFactory> dwrite_;

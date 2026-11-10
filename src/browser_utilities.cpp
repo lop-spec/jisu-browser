@@ -45,6 +45,7 @@ void BrowserWindow::WatchControllers() {
     if (t->creating && now - t->creatingAt >= 15000) overdue.push_back(t->id);
   if (spare_ && spare_->creating && now - spare_->creatingAt >= 15000) overdue.push_back(spare_->id);
   for (auto id : overdue) if (Tab* t = FindTab(id)) {
+    if (t->waitingScripts) { const bool retried=t->retried; ResetTabWebView(*t); t->retried=retried; }
     ++t->createAttempt; t->creating = false;
     OnControllerFailed(*t, HRESULT_FROM_WIN32(ERROR_TIMEOUT));
   }
@@ -104,6 +105,7 @@ std::wstring BrowserWindow::DownloadsFile() const {
 void BrowserWindow::LoadDownloads() {
   if (profile_->downloadsLoaded) return;
   profile_->downloadsLoaded = true;
+  if (options_.inPrivate) { settings_.askDownload = true; return; }
   if (options_.appMode) {
     std::string settings; json::Value value;
     if (ReadFileBytes(profileDir_ + L"\\jisu-settings.json", settings) && json::Parse(settings, value)) {
@@ -155,6 +157,16 @@ void BrowserWindow::ConfigureDownloads(Tab& tab) {
   if (FAILED(tab.webview.As(&view))) return;
   const auto owner = tab.owner; const auto id = tab.id;
   EventRegistrationToken token{};
+  if(options_.appMode){
+    ComPtr<ICoreWebView2_9> dialog;
+    if(SUCCEEDED(tab.webview.As(&dialog)))dialog->add_IsDefaultDownloadDialogOpenChanged(
+      Callback<ICoreWebView2IsDefaultDownloadDialogOpenChangedEventHandler>([owner](ICoreWebView2* sender,IUnknown*)->HRESULT{
+        auto* self=*owner;ComPtr<ICoreWebView2_9> view;BOOL open=FALSE;
+        if(self&&!self->destroyed_&&SUCCEEDED(sender->QueryInterface(IID_PPV_ARGS(view.GetAddressOf())))&&SUCCEEDED(view->get_IsDefaultDownloadDialogOpen(&open))&&open)
+          SetPropW(self->hwnd_,L"JisuBrowser.DownloadDialogSeen",reinterpret_cast<HANDLE>(1));
+        return S_OK;
+      }).Get(),&token);
+  }
   view->add_DownloadStarting(Callback<ICoreWebView2DownloadStartingEventHandler>(
       [owner, id](ICoreWebView2*, ICoreWebView2DownloadStartingEventArgs* args) -> HRESULT {
     auto* self = *owner;
@@ -178,7 +190,8 @@ void BrowserWindow::ConfigureDownloads(Tab& tab) {
         retained->put_Cancel(TRUE); deferral->Complete(); self->ShowNotice(L"下载目录不可写，请在设置中更换目录。"); return;
       }
       d->path = directory + L"\\" + FileName(path.Str());
-      if (self->settings_.askDownload) {
+      if (self->settings_.askDownload || self->options_.inPrivate) {
+        if (self->options_.inPrivate && GetForegroundWindow()!=self->hwnd_) { retained->put_Cancel(TRUE); deferral->Complete(); return; }
         std::vector<wchar_t> file(32768, 0); wcscpy_s(file.data(), file.size(), d->path.c_str());
         OPENFILENAMEW dialog{}; dialog.lStructSize = sizeof(dialog); dialog.hwndOwner = self->hwnd_;
         dialog.lpstrFile = file.data(); dialog.nMaxFile = static_cast<DWORD>(file.size());
@@ -336,7 +349,7 @@ bool BrowserWindow::HandleUtilityMessage(Tab& tab, const std::string& text) {
   }
   if (type == "settings.save") {
     settings_.continueSession = message["continueSession"].AsBool();
-    settings_.askDownload = message["askDownload"].AsBool();
+    settings_.askDownload = options_.inPrivate || message["askDownload"].AsBool();
     const auto engine = FromUtf8(message["searchEngine"].AsString());
     if (engine == L"bing" || engine == L"google" || engine == L"baidu") settings_.searchEngine = engine;
     const auto dir = FromUtf8(message["downloadDirectory"].AsString());
@@ -357,7 +370,7 @@ bool BrowserWindow::HandleUtilityMessage(Tab& tab, const std::string& text) {
   }
   auto out = json::Value::MakeObject(); out.Set("type", json::Value::String("settings.data"));
   out.Set("continueSession", json::Value::Bool(settings_.continueSession));
-  out.Set("askDownload", json::Value::Bool(settings_.askDownload));
+  out.Set("askDownload", json::Value::Bool(settings_.askDownload || options_.inPrivate));
   out.Set("downloadDirectory", json::Value::String(ToUtf8(settings_.downloadDirectory.empty() ? DefaultDownloads() : settings_.downloadDirectory)));
   out.Set("searchEngine", json::Value::String(ToUtf8(settings_.searchEngine)));
   out.Set("maxRegularTabs", json::Value::Number(settings_.maxRegularTabs));
@@ -367,6 +380,7 @@ bool BrowserWindow::HandleUtilityMessage(Tab& tab, const std::string& text) {
 BrowserWindow* BrowserWindow::CreatePeerWindow() {
   Options options;
   options.userDataFolder = profileDir_; options.defaultUserData = options_.defaultUserData;
+  options.inPrivate = options_.inPrivate; options.privateId = options_.privateId;
   options.agentConfigPath = options_.agentConfigPath;
   options.noAgent = options_.noAgent; options.spare = options_.spare;
   options.browserArgs = options_.browserArgs; options.trackingPrevention = options_.trackingPrevention;
@@ -377,6 +391,8 @@ BrowserWindow* BrowserWindow::CreatePeerWindow() {
   auto* target = window.get(); root_->detachedWindows_.push_back(std::move(window)); return target;
 }
 void BrowserWindow::PageAction(UINT action) {
+  if (action == 8) { OpenPrivateWindow(); return; }
+  if (action == 11) { POINT point{static_cast<LONG>(layout_.omnibox.left*layout_.scale),static_cast<LONG>(layout_.omnibox.bottom*layout_.scale)};ClientToScreen(hwnd_,&point);ShowSiteInfo(point);return; }
   if (action == 0) {
     if (auto* target = CreatePeerWindow()) { target->NewTab(L""); target->ShowFirstFrame(SW_SHOWNORMAL); }
     return;
@@ -404,6 +420,14 @@ void BrowserWindow::PageAction(UINT action) {
   } else if (action == 5) {
     ComPtr<ICoreWebView2_16> view;
     if (SUCCEEDED(tab->webview.As(&view))) hr = view->ShowPrintUI(COREWEBVIEW2_PRINT_DIALOG_KIND_BROWSER);
+  } else if (action == 9) {
+    if (IsWebUrl(tab->url) || tab->url.starts_with(L"file://")) { NewTab(L"view-source:"+tab->url); return; }
+  } else if (action == 10) {
+    ComPtr<ICoreWebView2_25> view;
+    if (SUCCEEDED(tab->webview.As(&view))) hr = view->ShowSaveAsUI(Callback<ICoreWebView2ShowSaveAsUICompletedHandler>(
+      [this,alive=std::weak_ptr<int>(alive_)](HRESULT result,COREWEBVIEW2_SAVE_AS_UI_RESULT)->HRESULT {
+        if(!alive.expired()&&FAILED(result)&&GetForegroundWindow()==hwnd_)ShowNotice(L"网页保存失败，请重试。");return S_OK;
+      }).Get());
   } else if (action == 6) hr = tab->webview->OpenDevToolsWindow();
   else if (action == 7) {
     ComPtr<ICoreWebView2_6> view;

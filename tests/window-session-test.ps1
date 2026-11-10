@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$Exe)
+param([Parameter(Mandatory)][string]$Exe,[switch]$Reopen)
 $ErrorActionPreference='Stop'
 $env:PSModulePath=(Join-Path $PSHOME 'Modules')+';'+(Join-Path $env:ProgramFiles 'WindowsPowerShell/Modules')
 Import-Module Microsoft.PowerShell.Utility,Microsoft.PowerShell.Management
@@ -35,6 +35,16 @@ try{
  Pump 2000
  $before=Get-Content -LiteralPath $session -Raw -Encoding UTF8|ConvertFrom-Json
  if(@($before.tabs).Count -ne 2 -or @($before.tabs.window|Sort-Object -Unique).Count -ne 2 -or @($before.tabs|Where-Object {$_.active}).Count -ne 2){throw 'restored window groups/active flags were flattened'}
+ if($Reopen){
+  [WindowSessionTest]::PostMessageW($windows[0],0x10,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null;Pump 2200
+  $remaining=@([WindowSessionTest]::Windows([uint32]$process.Id));if($remaining.Count -ne 1){throw 'ordinary window close did not leave one window'}
+  [WindowSessionTest]::PostMessageW($remaining[0],0x8001,[IntPtr]18,[IntPtr]::Zero)|Out-Null
+  $deadline=(Get-Date).AddSeconds(12);do{Pump 100;$windows=@([WindowSessionTest]::Windows([uint32]$process.Id))}while($windows.Count -ne 2 -and (Get-Date)-lt $deadline)
+  if($windows.Count -ne 2){throw 'Ctrl+Shift+T did not restore the closed native window'}
+  Pump 2000;$restored=Get-Content -LiteralPath $session -Raw -Encoding UTF8|ConvertFrom-Json
+  if(@($restored.tabs).Count -ne 2 -or @($restored.tabs.window|Sort-Object -Unique).Count -ne 2){throw 'reopened window tab grouping lost'}
+  'PASS ordinary native window close and Ctrl+Shift+T reopens the entire window'
+ }
  [IntPtr]$result=[IntPtr]::Zero
  if([WindowSessionTest]::SendMessageTimeoutW($windows[0],0x16,[IntPtr]1,[IntPtr]::Zero,2,10000,[ref]$result) -eq [IntPtr]::Zero){throw 'end-session preparation failed'}
  # Deliberately close one window and wait longer than the session debounce: it must not overwrite the full shutdown snapshot.
