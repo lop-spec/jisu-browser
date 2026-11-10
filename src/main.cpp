@@ -3,6 +3,7 @@
 // 环境就绪后建首个控件打开新标签页，新标签页画出来后再预建一个隐藏的备用控件。
 #include "browser_window.h"
 #include "common.h"
+#include "crash_record.h"
 #include "graphics.h"
 #include "metrics.h"
 #include "options.h"
@@ -30,7 +31,7 @@ Forward ForwardToRunningInstance(const jisu::Options& options) {
   wchar_t name[64];
   swprintf_s(name, L"Local\\JisuBrowser-%08X", hash);
   // 句柄留到进程退出：主实例靠它让后来者知道自己在
-  const HANDLE mutex = CreateMutexW(nullptr, FALSE, name);
+  const HANDLE mutex = CreateMutexW(nullptr, TRUE, name);
   if (!mutex || GetLastError() != ERROR_ALREADY_EXISTS) {
     return Forward::kNone;
   }
@@ -63,7 +64,8 @@ Forward ForwardToRunningInstance(const jisu::Options& options) {
         return Forward::kHung;
       }
     }
-    Sleep(100);
+    const auto acquired = WaitForSingleObject(mutex, 100);
+    if (acquired == WAIT_OBJECT_0 || acquired == WAIT_ABANDONED) return Forward::kNone;
   }
   return Forward::kNone;  // 有互斥体但始终没有窗口：上一个实例已在退出，自己正常启动
 }
@@ -105,6 +107,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd) {
     return 1;
   }
   Metrics::Get().Mark("comReady");
+  InstallCrashRecord(options.userDataFolder);
 
   int exitCode = 0;
   {

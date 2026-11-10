@@ -190,6 +190,13 @@ target_compile_options(menu-icons-test PRIVATE /utf-8)
 target_link_libraries(menu-icons-test PRIVATE windowscodecs ole32 gdi32 user32)
 add_test(NAME native-bookmark-menu-icons COMMAND menu-icons-test "${CMAKE_CURRENT_SOURCE_DIR}/res/app.ico")
 
+add_executable(bookmark-store-test tests/bookmark-store-test.cpp src/bookmarks.cpp src/common.cpp src/json.cpp)
+target_include_directories(bookmark-store-test PRIVATE src)
+target_compile_definitions(bookmark-store-test PRIVATE UNICODE _UNICODE NOMINMAX)
+target_compile_options(bookmark-store-test PRIVATE /utf-8 /EHsc)
+target_link_libraries(bookmark-store-test PRIVATE ole32 advapi32)
+add_test(NAME native-bookmark-store COMMAND bookmark-store-test)
+
 add_executable(bookmark-editor-test tests/bookmark-editor-test.cpp src/bookmark_editor.cpp src/bookmarks.cpp src/common.cpp src/json.cpp)
 target_include_directories(bookmark-editor-test PRIVATE src)
 target_compile_definitions(bookmark-editor-test PRIVATE UNICODE _UNICODE NOMINMAX)

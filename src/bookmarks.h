@@ -3,6 +3,7 @@
 #pragma once
 
 #include "common.h"
+#include <unordered_map>
 
 #include <cstdint>
 #include <memory>
@@ -19,6 +20,9 @@ struct BookmarkNode {
   std::string guid;
   int64_t dateAdded = 0;  // Chromium 时间：1601-01-01 起的微秒
   int64_t dateModified = 0;
+  int64_t dateLastUsed = 0;
+  std::string extraFields;
+  std::vector<std::string> unknownChildren;
   BookmarkNode* parent = nullptr;
   std::vector<std::unique_ptr<BookmarkNode>> children;
 };
@@ -73,6 +77,11 @@ class BookmarkStore {
  private:
   std::unique_ptr<BookmarkNode> MakeRoot(int64_t id, const wchar_t* title, const char* guid);
   void Touch();
+  void EnsureIndex();
+  std::unordered_map<int64_t, BookmarkNode*> byId_;
+  std::unordered_map<std::wstring, BookmarkNode*> byUrl_;
+  uint64_t indexedRevision_ = 0;
+  std::string extraRoots_, extraTop_;
   int64_t NextId() { return nextId_++; }
 
   std::wstring file_;

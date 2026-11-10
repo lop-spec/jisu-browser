@@ -28,7 +28,7 @@ class HistoryStore {
   struct Operation { int kind; Entry entry; };
   void Queue(Operation op);
   void Run();
-  void Apply(Operation& op);
+  bool Apply(Operation& op);
   bool SaveLocked(std::unique_lock<std::mutex>& lock);
   std::wstring file_;
   std::vector<Entry> entries_;

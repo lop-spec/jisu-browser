@@ -46,8 +46,24 @@ void AppendField(std::string& out, const char* key, const std::string& value, bo
   }
 }
 
+std::string Extra(const json::Value& value, const std::set<std::string>& known) {
+  std::string out;
+  for (const auto& [key, item] : value.Members()) if (!known.contains(key)) {
+    json::AppendQuoted(out, key); out += ':' + json::Serialize(item) + ',';
+  }
+  return out;
+}
+void Metadata(BookmarkNode& node, const json::Value& item) {
+  node.dateLastUsed = ParseInt(item["date_last_used"]);
+  if (item["date_added"].IsString()) node.dateAdded = ParseInt(item["date_added"]);
+  if (item["date_modified"].IsString()) node.dateModified = ParseInt(item["date_modified"]);
+  if (item["name"].IsString()) node.title = FromUtf8(item["name"].AsString());
+  if (!item["guid"].AsString().empty()) node.guid = item["guid"].AsString();
+  node.extraFields = Extra(item, {"children","date_added","date_last_used","date_modified","guid","id","name","type","url"});
+}
 void SerializeNode(std::string& out, const BookmarkNode& node) {
   out += '{';
+  out += node.extraFields;
   if (node.folder) {
     out += "\"children\":[";
     for (size_t i = 0; i < node.children.size(); ++i) {
@@ -56,10 +72,14 @@ void SerializeNode(std::string& out, const BookmarkNode& node) {
       }
       SerializeNode(out, *node.children[i]);
     }
+    for (const auto& raw : node.unknownChildren) {
+      if (!node.children.empty() || &raw != &node.unknownChildren.front()) out += ',';
+      out += raw;
+    }
     out += "],";
   }
   AppendField(out, "date_added", std::to_string(node.dateAdded));
-  AppendField(out, "date_last_used", "0");
+  AppendField(out, "date_last_used", std::to_string(node.dateLastUsed));
   if (node.folder) {
     AppendField(out, "date_modified", std::to_string(node.dateModified));
   }
@@ -155,7 +175,7 @@ int CountUrls(const json::Value& node) {
   return count;
 }
 
-bool ReadChromiumBookmarks(const std::wstring& file, json::Value& roots, std::string* error) {
+bool ReadChromiumBookmarks(const std::wstring& file, json::Value& roots, std::string* error, json::Value* document = nullptr) {
   std::string text;
   if (!ReadFileBytes(file, text)) {
     if (error) {
@@ -168,6 +188,7 @@ bool ReadChromiumBookmarks(const std::wstring& file, json::Value& roots, std::st
     return false;
   }
   roots = root["roots"];
+  if (document) *document = root;
   if (!roots.IsObject()) {
     if (error) {
       *error = "not a Chromium bookmarks file";
@@ -222,8 +243,8 @@ std::unique_ptr<BookmarkNode> BookmarkStore::MakeRoot(int64_t id, const wchar_t*
 
 bool BookmarkStore::Load(const std::wstring& file) {
   file_ = file;
-  json::Value roots;
-  if (!ReadChromiumBookmarks(file, roots, nullptr)) {
+  json::Value roots, document;
+  if (!ReadChromiumBookmarks(file, roots, nullptr, &document)) {
     existed_ = GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES;
     if (existed_) {
       // 存在却读不了（损坏、被别的程序写坏）：之后任何一次保存都会写回整份书签，先把原文件另存，不让它被空书签覆盖
@@ -236,14 +257,25 @@ bool BookmarkStore::Load(const std::wstring& file) {
     return !existed_;  // 不存在算成功（空书签）；存在却读不了算失败（原文件已另存）
   }
   existed_ = true;
+  extraRoots_ = Extra(roots, {"bookmark_bar","other","synced"});
+  extraTop_ = Extra(document, {"roots","version","checksum"});
+  Metadata(*bar_, roots["bookmark_bar"]); Metadata(*other_, roots["other"]); Metadata(*mobile_, roots["synced"]);
+  ++revision_;
   int64_t maxId = 3;
+  auto reserveIds = [&](auto&& self, const json::Value& value) -> void {
+    if (value.IsObject()) {
+      maxId = std::max(maxId, ParseInt(value["id"]));
+      for (const auto& [key, child] : value.Members()) { (void)key; self(self, child); }
+    } else for (const auto& child : value.Items()) self(self, child);
+  };
+  reserveIds(reserveIds, roots);
   // 递归读入；id 沿用文件里的（便于和其他浏览器对照），缺失或重复时重新分配
   std::set<int64_t> seen;
   auto readChildren = [&](auto&& self, const json::Value& source, BookmarkNode& parent) -> void {
     for (const json::Value& item : source["children"].Items()) {
       const std::string& type = item["type"].AsString();
       if (type != "url" && type != "folder") {
-        continue;
+        parent.unknownChildren.push_back(json::Serialize(item)); continue;
       }
       auto node = std::make_unique<BookmarkNode>();
       node->folder = type == "folder";
@@ -253,6 +285,7 @@ bool BookmarkStore::Load(const std::wstring& file) {
       node->guid = item["guid"].AsString();
       node->dateAdded = ParseInt(item["date_added"]);
       node->dateModified = ParseInt(item["date_modified"]);
+      Metadata(*node, item);
       node->parent = &parent;
       if (node->id > maxId) {
         maxId = node->id;
@@ -289,7 +322,7 @@ bool BookmarkStore::Load(const std::wstring& file) {
 }
 
 std::string BookmarkStore::Serialized() const {
-  std::string out = "{\"roots\":{\"bookmark_bar\":";
+  std::string out = "{" + extraTop_ + "\"roots\":{" + extraRoots_ + "\"bookmark_bar\":";
   SerializeNode(out, *bar_);
   out += ",\"other\":";
   SerializeNode(out, *other_);
@@ -309,47 +342,22 @@ bool BookmarkStore::Save() {
   return ok;
 }
 
-BookmarkNode* BookmarkStore::FindById(int64_t id) {
-  auto find = [id](auto&& self, BookmarkNode& node) -> BookmarkNode* {
-    if (node.id == id) {
-      return &node;
-    }
-    for (auto& child : node.children) {
-      if (BookmarkNode* found = self(self, *child)) {
-        return found;
-      }
-    }
-    return nullptr;
+void BookmarkStore::EnsureIndex() {
+  if (indexedRevision_ == revision_) return;
+  byId_.clear(); byUrl_.clear();
+  auto add = [&](auto&& self, BookmarkNode& node) -> void {
+    byId_[node.id] = &node;
+    if (!node.folder && !node.url.empty()) byUrl_.try_emplace(node.url, &node);
+    for (auto& child : node.children) self(self, *child);
   };
-  for (BookmarkNode* root : {bar_.get(), other_.get(), mobile_.get()}) {
-    if (BookmarkNode* found = find(find, *root)) {
-      return found;
-    }
-  }
-  return nullptr;
+  for (auto* root : {bar_.get(), other_.get(), mobile_.get()}) add(add, *root);
+  indexedRevision_ = revision_;
 }
-
+BookmarkNode* BookmarkStore::FindById(int64_t id) {
+  EnsureIndex(); const auto found = byId_.find(id); return found == byId_.end() ? nullptr : found->second;
+}
 BookmarkNode* BookmarkStore::FindByUrl(const std::wstring& url) {
-  if (url.empty()) {
-    return nullptr;
-  }
-  auto find = [&url](auto&& self, BookmarkNode& node) -> BookmarkNode* {
-    if (!node.folder && node.url == url) {
-      return &node;
-    }
-    for (auto& child : node.children) {
-      if (BookmarkNode* found = self(self, *child)) {
-        return found;
-      }
-    }
-    return nullptr;
-  };
-  for (BookmarkNode* root : {bar_.get(), other_.get(), mobile_.get()}) {
-    if (BookmarkNode* found = find(find, *root)) {
-      return found;
-    }
-  }
-  return nullptr;
+  EnsureIndex(); const auto found = byUrl_.find(url); return found == byUrl_.end() ? nullptr : found->second;
 }
 
 bool BookmarkStore::IsRoot(const BookmarkNode& node) const {
@@ -476,24 +484,41 @@ int BookmarkStore::Import(const std::wstring& file, const std::wstring& sourceNa
     return -1;
   }
   int count = 0;
+  std::set<std::wstring> urls;
+  auto collect = [&](auto&& self, const BookmarkNode& node) -> void {
+    if (!node.folder) urls.insert(node.url);
+    for (const auto& child : node.children) self(self, *child);
+  };
+  for (auto* root : {bar_.get(), other_.get(), mobile_.get()}) collect(collect, *root);
+  auto unseen = [&](auto&& self, const json::Value& value) -> bool {
+    const auto url = FromUtf8(value["url"].AsString());
+    if ((url.starts_with(L"http://") || url.starts_with(L"https://")) && !urls.contains(url)) return true;
+    for (const auto& child : value["children"].Items()) if (self(self, child)) return true;
+    return false;
+  };
+  if (!unseen(unseen, roots["bookmark_bar"]) && !unseen(unseen, roots["other"]) && !unseen(unseen, roots["synced"])) return 0;
+  auto folderFor = [this](BookmarkNode& parent, const std::wstring& title) {
+    for (auto& child : parent.children) if (child->folder && child->title == title) return child.get();
+    return AddFolder(parent, parent.children.size(), title);
+  };
   auto copy = [&](auto&& self, const json::Value& source, BookmarkNode& parent) -> void {
     for (const json::Value& item : source["children"].Items()) {
       const std::string& type = item["type"].AsString();
       const std::wstring title = FromUtf8(item["name"].AsString());
       if (type == "url") {
         const std::wstring url = FromUtf8(item["url"].AsString());
-        if (url.empty()) {
-          continue;
-        }
+        if (!(url.starts_with(L"http://") || url.starts_with(L"https://")) || !urls.insert(url).second) continue;
         if (BookmarkNode* node = AddUrl(parent, parent.children.size(), title, url)) {
           const int64_t added = ParseInt(item["date_added"]);
           if (added > 0) {
             node->dateAdded = added;
           }
+          Metadata(*node, item);
           ++count;
         }
       } else if (type == "folder") {
-        if (BookmarkNode* folder = AddFolder(parent, parent.children.size(), title)) {
+        if (BookmarkNode* folder = folderFor(parent, title)) {
+          Metadata(*folder, item);
           self(self, item, *folder);
         }
       }
@@ -505,19 +530,17 @@ int BookmarkStore::Import(const std::wstring& file, const std::wstring& sourceNa
     copy(copy, roots["other"], *other_);
     copy(copy, roots["synced"], *mobile_);
   } else {
-    BookmarkNode* target = AddFolder(*bar_, bar_->children.size(), L"从 " + sourceName + L" 导入");
+    BookmarkNode* target = folderFor(*bar_, L"从 " + sourceName + L" 导入");
     copy(copy, roots["bookmark_bar"], *target);
     if (!roots["other"]["children"].Items().empty()) {
-      copy(copy, roots["other"], *AddFolder(*target, target->children.size(), L"其他书签"));
+      copy(copy, roots["other"], *folderFor(*target, L"其他书签"));
     }
     if (!roots["synced"]["children"].Items().empty()) {
-      copy(copy, roots["synced"], *AddFolder(*target, target->children.size(), L"移动设备书签"));
+      copy(copy, roots["synced"], *folderFor(*target, L"移动设备书签"));
     }
   }
   Touch();
-  if (!Save() && error) {
-    *error = "imported but could not save";
-  }
+  // 调用方统一经 FileWriter 合并保存；导入不在 UI 线程 fsync。
   return count;
 }
 

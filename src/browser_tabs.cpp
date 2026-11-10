@@ -123,13 +123,16 @@ void BrowserWindow::DuplicateTab(size_t index) {
 }
 
 void BrowserWindow::CloseTabs(const std::vector<uint32_t>& ids) {
+  closingBatch_ = true;
   for (const uint32_t id : ids) {
-    if (destroyed_) return;
+    if (destroyed_) { closingBatch_ = false; return; }
     if (Tab* tab = FindTab(id)) {
       const size_t index = IndexOf(*tab);
       if (index < tabs_.size()) CloseTab(index);
     }
   }
+  closingBatch_ = false;
+  if (!destroyed_ && !tabs_.empty()) Activate(std::min(active_, tabs_.size() - 1));
 }
 
 // 固定的标签排在最左边一组，不被「自动关旧标签」关掉；取消固定放回这一组后面

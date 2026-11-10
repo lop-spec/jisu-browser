@@ -284,16 +284,6 @@ DWORD WINAPI BrowserWindow::ProfileThreadMain(void* param) {
   if (!self->profileDir_.empty()) {
     self->bookmarks_.Load(self->profileDir_ + L"\\Bookmarks");
     // 导入由用户在书签管理页主动发起，不在首帧前扫描其他浏览器。
-    if (false && self->options_.defaultUserData && self->options_.metricsPath.empty() && !self->bookmarks_.Existed() &&
-        !self->settings_.importedDefaultBrowser) {
-      std::wstring name;
-      const std::wstring source = BookmarkStore::DefaultBrowserBookmarksFile(&name);
-      if (!source.empty()) {
-        self->bookmarks_.Import(source, name, nullptr);
-      }
-      self->settings_.importedDefaultBrowser = true;
-      self->SaveSettings();
-    }
   }
   Metrics::Get().Mark("profileReady");
   return 0;
@@ -363,7 +353,7 @@ bool BrowserWindow::Create(HINSTANCE instance) {
   if (root_ == this && !options_.appMode && options_.metricsPath.empty() && options_.preheatSeconds <= 0) {
     favicons_.Start(profileDir_, hwnd_, kMsgFavicon);
   }
-  SetPropW(hwnd_, kProfileProp, reinterpret_cast<HANDLE>(static_cast<uintptr_t>(ProfileHash(options_.InstanceKey()))));
+  if (!options_.secondary) SetPropW(hwnd_, kProfileProp, reinterpret_cast<HANDLE>(static_cast<uintptr_t>(ProfileHash(options_.InstanceKey()))));
   if (options_.appMode) {
     SetPropW(hwnd_, L"JisuBrowser.AppMode", reinterpret_cast<HANDLE>(1));
     if (!options_.appIcon.empty()) {
@@ -563,6 +553,7 @@ void BrowserWindow::OnEnvironmentCreated(HRESULT result, ICoreWebView2Environmen
   }
   if (ownsPrimary_) {
     StartAgentBridge();  // 桥只在主窗口上开：拆出的窗口重建内核时不另开一个去抢 broker 邀请
+    if (envGeneration_ > 1 && options_.spare && !spare_) SetTimer(hwnd_, kTimerSpare, 500, nullptr);
   }
 }
 
@@ -2113,6 +2104,11 @@ void BrowserWindow::CloseTab(size_t index) {
     return;
   }
   hover_ = {};
+  if (closingBatch_) {
+    if (index < active_) --active_;
+    active_ = std::min(active_, tabs_.size() - 1);
+    return;
+  }
   if (wasActive) {
     Relayout();
     const Tab* opener = FindTab(returnTo);
@@ -2156,11 +2152,7 @@ void BrowserWindow::Activate(size_t index) {
   PostMessageW(hwnd_, kMsgTabLimit, 0, 0);
   // 先显示新标签再隐藏旧的，中间不露底色
   PlaceTab(tab);
-  for (auto& other : tabs_) {
-    if (other.get() != &tab) {
-      PlaceTab(*other);
-    }
-  }
+  if (previous && previous != &tab) PlaceTab(*previous);
   editing_ = false;
   Relayout();  // 地址框里的「已拦截弹出窗口」跟着当前标签走
   UpdateAddressBar();
@@ -2986,8 +2978,9 @@ void BrowserWindow::OnBookmarksChanged() {
   ScheduleBookmarkSave();  // 合并到 400ms 后在后台写盘：拖动、连续改名不再每次在界面线程上 fsync
   for (auto* window : liveWindows_) {
     if (window->profile_ != profile_) continue;
+    const auto before = window->layout_.contentTopPx;
     window->Relayout();
-    window->PlaceAllTabs();
+    if (before != window->layout_.contentTopPx) window->PlaceAllTabs();
     window->InvalidateChrome();
     window->BroadcastBookmarks();
   }
@@ -3594,7 +3587,7 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_TIMER:
       if (wParam == kTimerControllers) { WatchControllers(); return 0; }
       if (wParam == kTimerSuggestions) { KillTimer(hwnd_, kTimerSuggestions); ShowSuggestions(); return 0; }
-      if (wParam == 7) { PollMedia(); return 0; }
+      if (wParam == kTimerMedia) { PollMedia(); return 0; }
       if (wParam == kTimerAppRecover) {
         RecoverAppWebView();
         return 0;
@@ -4007,6 +4000,9 @@ void BrowserWindow::Relayout() {
 }
 
 void BrowserWindow::LayoutBookmarkBar() {
+  if (profileLoaded_ && barLayoutRevision_ == bookmarks_.Revision() && barLayoutWidth_ == layout_.width &&
+      barLayoutVisible_ == settings_.bookmarkBar) return;
+  barLayoutRevision_ = profileLoaded_ ? bookmarks_.Revision() : 0; barLayoutWidth_ = layout_.width; barLayoutVisible_ = settings_.bookmarkBar;
   ChromeLayout& l = layout_;
   barItems_.clear();
   overflowItems_.clear();

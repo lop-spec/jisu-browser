@@ -157,7 +157,8 @@ void BrowserWindow::ConfigureDownloads(Tab& tab) {
       const auto weak = std::weak_ptr<Download>(d);
       const auto* source = self->FindTab(id);
       if (!source) { retained->put_Cancel(TRUE); deferral->Complete(); return; }
-      auto update = [owner = source->owner, weak](ICoreWebView2DownloadOperation* operation, IUnknown*) -> HRESULT {
+      const bool placeholder = source->scriptOpened && source->title.empty();
+      auto update = [owner = source->owner, weak, placeholder](ICoreWebView2DownloadOperation* operation, IUnknown*) -> HRESULT {
         auto* current = *owner; const auto item = weak.lock();
         if (!current || current->destroyed_ || !item) return S_OK;
         COREWEBVIEW2_DOWNLOAD_STATE state; operation->get_State(&state); item->state = static_cast<int>(state);
@@ -165,6 +166,13 @@ void BrowserWindow::ConfigureDownloads(Tab& tab) {
         COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON reason;
         if (SUCCEEDED(operation->get_InterruptReason(&reason))) item->paused = reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED;
         if (item->state != 0 || GetTickCount64() - current->profile_->downloadsSaved > 1000) current->SaveDownloads();
+        if (placeholder && item->state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED) current->PostTask([current, owner, id = item->tabId] {
+          if (*owner != current) return;
+          Tab* tab = current->FindTab(id); CoTaskString sourceUrl;
+          if (!tab || !tab->webview || !tab->scriptOpened || !tab->title.empty()) return;
+          tab->webview->get_Source(sourceUrl.Put());
+          if (sourceUrl.Str() == L"about:blank" && current->IndexOf(*tab) < current->tabs_.size()) current->CloseTab(current->IndexOf(*tab));
+        });
         return S_OK;
       };
       EventRegistrationToken event{};

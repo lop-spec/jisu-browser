@@ -108,7 +108,7 @@ std::vector<HistoryStore::Suggestion> HistoryStore::Suggest(std::wstring query, 
   if (rows.size() > limit) rows.resize(limit);
   return rows;
 }
-void HistoryStore::Apply(Operation& op) {
+bool HistoryStore::Apply(Operation& op) {
   auto& n = op.entry;
   if (op.kind == 0) {
     auto old = std::find_if(entries_.begin(), entries_.end(), [&n](const auto& e) { return e.url == n.url; });
@@ -121,9 +121,11 @@ void HistoryStore::Apply(Operation& op) {
     entries_.insert(entries_.begin(), std::move(n));
   } else if (op.kind == 1) {
     auto it = std::find_if(entries_.begin(), entries_.end(), [&n](const auto& e) { return e.url == n.url; });
-    if (it != entries_.end()) { it->title = std::move(n.title); it->search = SearchKey(it->title, it->url); }
-  } else if (op.kind == 2) std::erase_if(entries_, [&n](const auto& e) { return e.id == n.id; });
-  else if (op.kind == 3) entries_.clear();
+    if (it != entries_.end() && it->title != n.title) { it->title = std::move(n.title); it->search = SearchKey(it->title, it->url); }
+    return false; // Title-only changes are visible immediately but do not create disk churn.
+  } else if (op.kind == 2) return std::erase_if(entries_, [&n](const auto& e) { return e.id == n.id; }) != 0;
+  else if (op.kind == 3) { if (entries_.empty()) return false; entries_.clear(); }
+  return true;
 }
 // 持锁进入、持锁返回；序列化与写盘时放开锁
 bool HistoryStore::SaveLocked(std::unique_lock<std::mutex>& lock) {
@@ -170,7 +172,9 @@ void HistoryStore::Run() {
   for (;;) {
     if (!pending_.empty()) {
       busy_ = true;
-      while (!pending_.empty()) { auto op = std::move(pending_.front()); pending_.pop_front(); Apply(op); }
+      bool changed = false;
+      while (!pending_.empty()) { auto op = std::move(pending_.front()); pending_.pop_front(); changed = Apply(op) || changed; }
+      if (!changed) { busy_ = false; cv_.notify_all(); continue; }
       const int64_t now = Now();
       std::erase_if(entries_, [now](const auto& e) { return e.at < now - 90LL*86400000; });
       if (entries_.size() > 20000) entries_.resize(20000);

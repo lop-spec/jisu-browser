@@ -74,7 +74,7 @@ bool BrowserWindow::MoveTabTo(uint32_t id, BrowserWindow& destination) {
       tab->controller->put_ParentWindow(hwnd_);
       return false;
     }
-    SetTimer(destination.hwnd_, 7, 250, nullptr);  // Same media polling timer as EnsureMedia.
+    SetTimer(destination.hwnd_, kTimerMedia, 250, nullptr);  // Same media polling timer as EnsureMedia.
   }
   tab->parent = destination.hwnd_;
   const size_t previous = active_;

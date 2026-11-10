@@ -375,6 +375,7 @@ class BrowserWindow : public AgentHost {
 
   // Cookie 守卫（browser_cookies.cpp）：站点 cookie 超限时回收最早的带 ID 一次性 cookie，策略见 cookie_policy.h
   static constexpr UINT_PTR kTimerCookieGuard = 13;
+  static constexpr UINT_PTR kTimerMedia = 7;
   void StartCookieGuard();
   void RunCookieGuard();
   CookieGuardConfig LoadCookieGuardConfig(std::string& problem) const;
@@ -469,6 +470,10 @@ class BrowserWindow : public AgentHost {
   float frozenTabWidth_ = 0;             // 用鼠标连续关标签时保持的宽度，鼠标离开标签条后展开
   UINT recoverDelay_ = 0;                // 日常窗口内核重建的退避（毫秒）
   bool sessionTimerPending_ = false;
+  bool closingBatch_ = false;
+  uint64_t barLayoutRevision_ = 0;
+  float barLayoutWidth_ = -1;
+  bool barLayoutVisible_ = false;
   RECT editRect_{};                      // 地址栏上次的位置：没变就不再 MoveWindow 重画
   HICON appIconBig_ = nullptr;           // --app-icon 的大小两档
   HICON appIconSmall_ = nullptr;

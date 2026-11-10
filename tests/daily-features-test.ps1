@@ -64,8 +64,12 @@ try{
   if($process.MainWindowTitle -notlike '*downloads*' -and $process.MainWindowTitle -notlike ('*'+[char]0x4E0B+[char]0x8F7D+'*')){throw 'downloads internal page failed'}
   'PASS native right-of-current order, real target-blank download, persisted record, internal download page'
  }
- $process.CloseMainWindow()|Out-Null
- if(-not $process.WaitForExit(15000)){throw 'browser did not close'}
+ [DailyTest]::PostMessageW($h,0x10,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+ if(-not $process.WaitForExit(15000)){
+  if(Test-Path -LiteralPath $record){Write-Host (Get-Content -LiteralPath $record -Raw -Encoding UTF8)}
+  $process.Refresh();Write-Host ('remaining main title: '+$process.MainWindowTitle)
+  throw 'browser did not close after WM_CLOSE to known root window'
+ }
 } finally {
  if($process -and -not $process.HasExited){Stop-Process -Id $process.Id -Force}
  $server.Stop()

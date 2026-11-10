@@ -6,7 +6,6 @@ using Microsoft::WRL::Callback;
 namespace jisu {
 namespace {
 constexpr wchar_t kPlayerUrl[]=L"https://newtab.jisu.example/player.html";
-constexpr UINT_PTR kMediaTimer=7;
 std::wstring PlayerDirectory(){wchar_t path[MAX_PATH];GetModuleFileNameW(nullptr,path,MAX_PATH);return ParentDirectory(path);}
 bool PlayerUrl(const std::wstring& url){return url==kPlayerUrl;}
 }
@@ -19,7 +18,7 @@ bool BrowserWindow::EnsureMedia(Tab& tab){
   tab.mediaSurface=CreateWindowExW(0,L"STATIC",L"",WS_CHILD|WS_CLIPCHILDREN|SS_BLACKRECT,0,0,0,0,hwnd_,nullptr,instance_,nullptr);
   tab.media=std::make_unique<MediaSession>();
   if(!tab.media->Start(tab.mediaSurface,PlayerDirectory(),profileDir_)){StopMedia(tab);PostToPage(tab,"{\"type\":\"player.error\",\"error\":\"播放器组件启动失败，请安装完整运行包\"}");return false;}
-  SetTimer(hwnd_,kMediaTimer,250,nullptr);PlaceTab(tab);return true;
+  SetTimer(hwnd_,kTimerMedia,250,nullptr);PlaceTab(tab);return true;
 }
 void BrowserWindow::CaptureMedia(Tab& source){
   const auto id=source.id;const auto url=source.url;const auto owner=source.owner;
@@ -115,7 +114,7 @@ void BrowserWindow::PollMedia(){
       if(IsActive(tab)||type!="player.status")PostToPage(tab,text);
     }
   }
-  if(!any)KillTimer(hwnd_,kMediaTimer);
+  if(!any)KillTimer(hwnd_,kTimerMedia);
 }
 void BrowserWindow::StopMedia(Tab& tab){
   if(!destroyed_&&tab.media&&IsActive(tab)&&fullscreen_.Active())ExitFullscreen();
