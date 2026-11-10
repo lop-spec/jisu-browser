@@ -39,9 +39,9 @@ void BrowserWindow::CaptureMedia(Tab& source){
 void BrowserWindow::StartMedia(uint32_t sourceId,const std::string& text){
   json::Value offer;if(!json::Parse(text,offer))return;const auto url=offer["url"].AsString();
   if(url.size()>16384||url.find_first_of("\r\n")!=std::string::npos||!(url.starts_with("https://")||url.starts_with("http://")))return;
-  Tab* source=FindTab(sourceId);if(!source||source->agent)return;
-  Tab* target=FindTab(source->mediaTarget);
-  if(!target||!PlayerUrl(target->url)){NewTab(kPlayerUrl);target=ActiveTab();source=FindTab(sourceId);if(!target||!source)return;source->mediaTarget=target->id;target->mediaSource=sourceId;target->mediaPage=ToUtf8(source->url);}
+  Tab* source=FindRelatedTab(sourceId);if(!source||source->agent)return;
+  Tab* target=FindRelatedTab(source->mediaTarget);
+  if(!target||!PlayerUrl(target->url)){NewTab(kPlayerUrl);target=ActiveTab();source=FindRelatedTab(sourceId);if(!target||!source)return;source->mediaTarget=target->id;target->mediaSource=sourceId;target->mediaPage=ToUtf8(source->url);}
   if(auto* owner=*target->owner;owner&&owner!=this){owner->StartMedia(sourceId,text);return;}
   target->mediaIntegration=offer["integration"].AsString()=="qingfan";
   target->mediaAuto=offer["auto"].AsBool();target->mediaOffer=text;
@@ -51,7 +51,7 @@ void BrowserWindow::StartMedia(uint32_t sourceId,const std::string& text){
   PostToPage(*target,"{\"type\":\"player.offer\",\"data\":"+text+"}");PlaceTab(*target);
 }
 void BrowserWindow::SourceMediaAction(Tab& tab,const std::string& action,int line){
-  Tab* source=FindTab(tab.mediaSource);if(!source||!source->webview||!tab.mediaIntegration||ToUtf8(source->url)!=tab.mediaPage)return;
+  Tab* source=FindRelatedTab(tab.mediaSource);if(!source||!source->webview||!tab.mediaIntegration||ToUtf8(source->url)!=tab.mediaPage)return;
   if(action=="line"&&line>=0){const auto script=L"document.querySelector('[data-line=\""+std::to_wstring(line)+L"\"]')?.click();";source->webview->ExecuteScript(script.c_str(),nullptr);}
   else if(action=="next"||action=="prev"){const auto script=L"document.getElementById('"+FromUtf8(action)+L"')?.click();";source->webview->ExecuteScript(script.c_str(),nullptr);}
 }
@@ -64,7 +64,7 @@ bool BrowserWindow::HandleMediaMessage(Tab& tab,const std::wstring& origin,const
     return true;
   }
   if(type=="media.offer"){
-    Tab* target=FindTab(tab.mediaTarget);
+    Tab* target=FindRelatedTab(tab.mediaTarget);
     if(!tab.agent&&target&&target->media&&ToUtf8(tab.url)==target->mediaPage&&origin==tab.url)StartMedia(tab.id,text);
     return true;
   }
@@ -101,7 +101,7 @@ void BrowserWindow::PollMedia(){
       if(type=="player.status"){
         tab.mediaStatus=text;
         if(GetTickCount64()-tab.mediaSaved>5000){tab.mediaSaved=GetTickCount64();const auto time=event["time-pos"].AsNumber();
-          if(auto* source=FindTab(tab.mediaSource);source&&source->webview&&tab.mediaIntegration&&ToUtf8(source->url)==tab.mediaPage){
+          if(auto* source=FindRelatedTab(tab.mediaSource);source&&source->webview&&tab.mediaIntegration&&ToUtf8(source->url)==tab.mediaPage){
             const auto script=L"window.dispatchEvent(new CustomEvent('jisu-native-progress',{detail:"+std::to_wstring(time)+L"}));";source->webview->ExecuteScript(script.c_str(),nullptr);
           }
         }
@@ -109,7 +109,7 @@ void BrowserWindow::PollMedia(){
       else if(type=="player.fullscreen"&&IsActive(tab)){if(fullscreen_.Active())ExitFullscreen();else{browserFullscreen_=true;UpdateFullscreen();}PlaceTab(tab);}
       else if(type=="player.escape"&&IsActive(tab)){ExitFullscreen();PlaceTab(tab);}
       else if(type=="player.ended"&&tab.mediaAuto)SourceMediaAction(tab,"next");
-      else if(type=="player.error"&&event["fatal"].AsBool()&&tab.mediaIntegration){if(auto* source=FindTab(tab.mediaSource);source&&source->webview&&ToUtf8(source->url)==tab.mediaPage)source->webview->ExecuteScript(L"window.dispatchEvent(new Event('jisu-native-error'));",nullptr);}
+      else if(type=="player.error"&&event["fatal"].AsBool()&&tab.mediaIntegration){if(auto* source=FindRelatedTab(tab.mediaSource);source&&source->webview&&ToUtf8(source->url)==tab.mediaPage)source->webview->ExecuteScript(L"window.dispatchEvent(new Event('jisu-native-error'));",nullptr);}
       else if(type=="player.stopped"){PostToPage(tab,"{\"type\":\"player.error\",\"error\":\"媒体进程已退出，可重新打开视频\"}");StopMedia(tab);PlaceTab(tab);break;}
       if(IsActive(tab)||type!="player.status")PostToPage(tab,text);
     }
@@ -118,7 +118,7 @@ void BrowserWindow::PollMedia(){
 }
 void BrowserWindow::StopMedia(Tab& tab){
   if(!destroyed_&&tab.media&&IsActive(tab)&&fullscreen_.Active())ExitFullscreen();
-  if(auto* source=FindTab(tab.mediaSource);source&&source->mediaTarget==tab.id){source->mediaTarget=0;if(source->webview)source->webview->ExecuteScript(L"window.dispatchEvent(new Event('jisu-native-stop'));",nullptr);}
+  if(auto* source=FindRelatedTab(tab.mediaSource);source&&source->mediaTarget==tab.id){source->mediaTarget=0;if(source->webview)source->webview->ExecuteScript(L"window.dispatchEvent(new Event('jisu-native-stop'));",nullptr);}
   tab.media.reset();if(tab.mediaSurface){DestroyWindow(tab.mediaSurface);tab.mediaSurface=nullptr;}
   tab.mediaSource=0;tab.mediaPage.clear();tab.mediaOffer.clear();tab.mediaStatus.clear();
 }

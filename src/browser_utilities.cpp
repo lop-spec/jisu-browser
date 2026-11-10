@@ -248,17 +248,21 @@ bool BrowserWindow::HandleUtilityMessage(Tab& tab, const std::string& text) {
   out.Set("popupCount", json::Value::Number(static_cast<double>(settings_.popupAllow.size())));
   PostToPage(tab, json::Serialize(out)); return true;
 }
+BrowserWindow* BrowserWindow::CreatePeerWindow() {
+  Options options;
+  options.userDataFolder = profileDir_; options.defaultUserData = options_.defaultUserData;
+  options.agentConfigPath = options_.agentConfigPath;
+  options.browserArgs = options_.browserArgs; options.trackingPrevention = options_.trackingPrevention;
+  options.renderTarget = options_.renderTarget;
+  auto window = std::make_unique<BrowserWindow>(options, warmup_, root_);
+  window->environment_ = environment_;
+  if (!window->Create(instance_)) return nullptr;
+  auto* target = window.get(); root_->detachedWindows_.push_back(std::move(window)); return target;
+}
 void BrowserWindow::PageAction(UINT action) {
   if (action == 0) {
-    Options options;
-    options.userDataFolder = profileDir_; options.defaultUserData = options_.defaultUserData;
-    options.agentConfigPath = options_.agentConfigPath;
-    options.browserArgs = options_.browserArgs; options.trackingPrevention = options_.trackingPrevention;
-    auto window = std::make_unique<BrowserWindow>(options, warmup_, root_);
-    window->environment_ = environment_;
-    if (!window->Create(instance_)) return;
-    auto* target = window.get(); root_->detachedWindows_.push_back(std::move(window));
-    target->NewTab(L""); target->ShowFirstFrame(SW_SHOWNORMAL); return;
+    if (auto* target = CreatePeerWindow()) { target->NewTab(L""); target->ShowFirstFrame(SW_SHOWNORMAL); }
+    return;
   }
   auto* tab = ActiveTab(); if (!tab || !tab->webview) return;
   HRESULT hr = E_NOINTERFACE;

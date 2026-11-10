@@ -1,5 +1,6 @@
 #include "favicons.h"
 #include <winhttp.h>
+#include <wincodec.h>
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -44,6 +45,18 @@ bool PrivateHost(const std::wstring& host) {
          std::all_of(host.begin(), host.end(), [](wchar_t c) { return (c >= L'0' && c <= L'9') || c == L'.'; });
 }
 
+bool ValidImage(IWICImagingFactory* factory, const std::string& bytes) {
+  if (!factory || bytes.empty() || bytes.size() > 512 * 1024) return false;
+  ComPtr<IStream> stream; ComPtr<IWICBitmapDecoder> decoder; ComPtr<IWICBitmapFrameDecode> frame;
+  if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, stream.GetAddressOf()))) return false;
+  ULONG written = 0;
+  if (FAILED(stream->Write(bytes.data(), static_cast<ULONG>(bytes.size()), &written)) || written != bytes.size()) return false;
+  LARGE_INTEGER zero{}; stream->Seek(zero, STREAM_SEEK_SET, nullptr);
+  if (FAILED(factory->CreateDecoderFromStream(stream.Get(), nullptr, WICDecodeMetadataCacheOnLoad, decoder.GetAddressOf())) ||
+      FAILED(decoder->GetFrame(0, frame.GetAddressOf()))) return false;
+  UINT width = 0, height = 0;
+  return SUCCEEDED(frame->GetSize(&width, &height)) && width > 0 && height > 0 && width <= 1024 && height <= 1024;
+}
 enum class FetchResult { kOk, kMissing, kError };
 }  // namespace
 
@@ -182,6 +195,10 @@ struct FaviconCache::State {
 
   // 后台线程：持有自己的 State，窗口和缓存对象先销毁也安全
   static void Run(std::shared_ptr<State> self) {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    struct ComScope { bool ok; ~ComScope() { if (ok) CoUninitialize(); } } scope{SUCCEEDED(com)};
+    ComPtr<IWICImagingFactory> images;
+    CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(images.GetAddressOf()));
     EnsureDirectory(self->directory);
     self->LoadMisses();
     for (;;) {
@@ -219,6 +236,7 @@ struct FaviconCache::State {
       const std::wstring key = FaviconKeyFromHash(hash);
       const std::wstring file = self->File(key);
       if (!job.bytes.empty()) {
+        if (!ValidImage(images.Get(), job.bytes)) continue;
         std::string existing;
         const bool same = ReadFileBytes(file, existing) && existing == job.bytes;
         if (same || WriteFileAtomic(file, job.bytes, false)) {
@@ -240,7 +258,8 @@ struct FaviconCache::State {
         }
       }
       if (skip) continue;
-      if (GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES) {
+      std::string cached;
+      if (ReadFileBytes(file, cached) && ValidImage(images.Get(), cached)) {
         {
           std::lock_guard<std::mutex> lock(self->mutex);
           self->known[key] = 1;
@@ -248,9 +267,10 @@ struct FaviconCache::State {
         self->Notify(hash);
         continue;
       }
+      if (!cached.empty()) DeleteFileW(file.c_str());
       std::string bytes;
       const FetchResult result = self->Fetch(job.origin, bytes);
-      if (result == FetchResult::kOk) {
+      if (result == FetchResult::kOk && ValidImage(images.Get(), bytes)) {
         // Content decoding is done with WIC on the UI thread; a failed image retains the globe fallback.
         if (GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES && WriteFileAtomic(file, bytes, false)) {
           {

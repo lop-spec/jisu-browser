@@ -258,13 +258,13 @@ std::wstring BrowserWindow::SessionFile() const { return profileDir_ + L"\\Sessi
 // 记下所有窗口里用户开着的标签。clean = 用户正常关掉了最后一个窗口：下次启动不恢复；
 // 崩溃、被结束、关机时文件停在 clean=false，下次启动恢复
 void BrowserWindow::SaveSession(bool clean, bool durable) {
-  if (!profile_->sessionWritable || profileDir_.empty()) return;
+  if (!profileLoaded_ || !profile_->sessionWritable || profileDir_.empty()) return;
   std::string out = std::string("{\"clean\":") + (clean ? "true" : "false") + ",\"tabs\":[";
   bool first = true;
-  const BrowserWindow* main = nullptr;
+  uint32_t ordinal = 0;
   for (const auto* window : liveWindows_) {
     if (window->profile_ != profile_) continue;
-    if (!main) main = window;
+    const uint32_t group = ordinal++;
     for (size_t i = 0; i < window->tabs_.size(); ++i) {
       const Tab& tab = *window->tabs_[i];
       std::wstring url = tab.url.empty() ? tab.pendingUrl : tab.url;
@@ -275,7 +275,8 @@ void BrowserWindow::SaveSession(bool clean, bool durable) {
       json::AppendQuoted(out, ToUtf8(url));
       out += ",\"title\":";
       json::AppendQuoted(out, ToUtf8(TruncateUtf16(tab.title, 512)));
-      out += std::string(",\"active\":") + (window == main && i == window->active_ ? "true" : "false");
+      out += ",\"window\":" + std::to_string(group);
+      out += std::string(",\"active\":") + (i == window->active_ ? "true" : "false");
       out += std::string(",\"pinned\":") + (tab.pinned ? "true" : "false");
       out += std::string(",\"muted\":") + (tab.muted ? "true" : "false");
       out += ",\"lastUsed\":" + std::to_string(tab.lastUsed) + "}";
@@ -298,10 +299,29 @@ void BrowserWindow::SaveSession(bool clean, bool durable) {
 
 // 首帧前：上次没正常退出时开着的标签放回来。只有当时的当前标签马上加载，其余点到才建（不一下子全开）
 void BrowserWindow::RestoreSession() {
+  if (!profileLoaded_) return;
   auto& saved = profile_->restoreTabs;
   if (saved.empty() || root_ != this || options_.appMode || tabs_.empty()) return;
-  const std::vector<SessionTab> items = std::move(saved);
+  std::vector<SessionTab> items = std::move(saved);
   saved.clear();
+  std::map<uint32_t, std::vector<SessionTab>> groups;
+  for (auto& item : items) groups[item.window].push_back(std::move(item));
+  if (groups.empty()) return;
+  RestoreSessionItems(std::move(groups.begin()->second));
+  groups.erase(groups.begin());
+  for (auto& [id, group] : groups) {
+    (void)id;
+    PostTask([this, group = std::move(group)]() mutable {
+      if (auto* window = CreatePeerWindow()) {
+        window->options_.noActivate = true;
+        window->RestoreSessionItems(std::move(group)); window->ShowFirstFrame(SW_SHOWNOACTIVATE);
+      }
+    });
+  }
+}
+
+void BrowserWindow::RestoreSessionItems(std::vector<SessionTab> items) {
+  if (items.empty()) return;
   std::vector<std::unique_ptr<Tab>> restored;
   const Tab* chosen = nullptr;
   for (const SessionTab& item : items) {
@@ -320,11 +340,11 @@ void BrowserWindow::RestoreSession() {
   std::stable_partition(restored.begin(), restored.end(), [](const auto& tab) { return tab->pinned; });
   // 空白启动：恢复的标签替换掉初始的新标签页；带网址启动：恢复的标签排在前面，新网址仍是当前标签。
   // 内核已在运行时（刚崩溃、被结束）环境回调会早于首帧到达，初始新标签页的控件可能已建好或正在建：照样替换
-  const bool replaceFirst = options_.startUrl.empty() && tabs_.size() == 1 && tabs_[0]->pendingUrl.empty() &&
-                            !tabs_[0]->agent && IsNewTabPageUrl(tabs_[0]->url);
+  const bool replaceFirst = tabs_.empty() || (options_.startUrl.empty() && tabs_.size() == 1 && tabs_[0]->pendingUrl.empty() &&
+                            !tabs_[0]->agent && IsNewTabPageUrl(tabs_[0]->url));
   if (replaceFirst) {
     // 已建好的控件关掉；还在建的那个回来时找不到标签，会自己关掉
-    if (tabs_[0]->controller) tabs_[0]->controller->Close();
+    if (!tabs_.empty() && tabs_[0]->controller) tabs_[0]->controller->Close();
     tabs_.clear();
     for (auto& tab : restored) tabs_.push_back(std::move(tab));
     active_ = 0;

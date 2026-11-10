@@ -90,8 +90,10 @@ constexpr UINT kMenuReopenClosed = 1010;
 constexpr UINT kMenuDownloads = 1011;
 constexpr UINT kMenuSettings = 1012;
 constexpr UINT kMenuPageBase = 1100;
+constexpr UINT kMenuTabListBase = 5000;
 constexpr UINT_PTR kTimerControllers = 14;
 constexpr UINT_PTR kTimerSuggestions = 15;
+constexpr UINT_PTR kTimerProfile = 16;
 constexpr UINT kMenuOpen = 2001;
 constexpr UINT kMenuOpenNewTab = 2002;
 constexpr UINT kMenuEdit = 2003;
@@ -251,7 +253,7 @@ DWORD WINAPI BrowserWindow::ProfileThreadMain(void* param) {
     Metrics::Get().Mark("profileReady");
     return 0;
   }
-  self->LoadSettings();
+  // 设置已在建窗前读入；后台只写专用暂存对象，不触碰 UI 正在使用的数据。
   // 上次没有正常退出（崩溃、被结束、关机重启）：记下当时开着的标签，首帧前恢复
   if (self->profile_->sessionWanted) {
     std::string text;
@@ -260,13 +262,14 @@ DWORD WINAPI BrowserWindow::ProfileThreadMain(void* param) {
       for (const auto& item : root["closed"].Items()) {
         auto url = FromUtf8(item["url"].AsString());
         if (IsWebUrl(url) && !IsInternalPage(url)) url = HistoryStore::SafeUrl(url);
-        if (url.empty() || url.size() > 16384 || self->profile_->closedTabs.size() >= 25) continue;
-        self->profile_->closedTabs.push_back({url, TruncateUtf16(FromUtf8(item["title"].AsString()),512),
+        if (url.empty() || url.size() > 16384 || self->loadingClosed_.size() >= 25) continue;
+        self->loadingClosed_.push_back({url, TruncateUtf16(FromUtf8(item["title"].AsString()),512),
             static_cast<size_t>(std::clamp(item["index"].AsNumber(),0.0,500.0)), item["pinned"].AsBool(), item["muted"].AsBool()});
       }
       for (const json::Value& item : root["tabs"].Items()) {
         if (root["clean"].AsBool(true) && !self->settings_.continueSession) break;
         SessionTab tab;
+        tab.window = static_cast<uint32_t>(std::clamp(item["window"].AsNumber(), 0.0, 10000.0));
         tab.url = FromUtf8(item["url"].AsString());
         if (tab.url.empty() || tab.url.size() > 16384) continue;
         tab.title = TruncateUtf16(FromUtf8(item["title"].AsString()), 512);
@@ -276,13 +279,12 @@ DWORD WINAPI BrowserWindow::ProfileThreadMain(void* param) {
         tab.lastUsed = static_cast<uint64_t>(std::max(0.0, item["lastUsed"].AsNumber()));
         if (IsWebUrl(tab.url) && !IsInternalPage(tab.url)) tab.url = HistoryStore::SafeUrl(tab.url);
         if (tab.url.empty()) continue;
-        self->profile_->restoreTabs.push_back(std::move(tab));
-        if (self->profile_->restoreTabs.size() >= 500) break;
+        self->loadingRestore_.push_back(std::move(tab));
       }
     }
   }
   if (!self->profileDir_.empty()) {
-    self->bookmarks_.Load(self->profileDir_ + L"\\Bookmarks");
+    self->loadingBookmarks_->Load(self->profileDir_ + L"\\Bookmarks");
     // 导入由用户在书签管理页主动发起，不在首帧前扫描其他浏览器。
   }
   Metrics::Get().Mark("profileReady");
@@ -306,8 +308,13 @@ bool BrowserWindow::Create(HINSTANCE instance) {
   }
   // 书签与设置在后台读，和建窗、预热并行；首帧前汇合
   if (root_ == this) {
-    profileThread_ = CreateThread(nullptr, 0, &BrowserWindow::ProfileThreadMain, this, 0, nullptr);
-    if (!profileThread_) ProfileThreadMain(this);
+    if (options_.appMode) { ProfileThreadMain(this); profileLoaded_ = true; }
+    else {
+      LoadSettings();
+      loadingBookmarks_ = std::make_unique<BookmarkStore>();
+      profileThread_ = CreateThread(nullptr, 0, &BrowserWindow::ProfileThreadMain, this, 0, nullptr);
+      if (!profileThread_) { ProfileThreadMain(this); FinishProfileLoad(); }
+    }
   }
 
   WNDCLASSEXW windowClass{};
@@ -376,15 +383,33 @@ bool BrowserWindow::Create(HINSTANCE instance) {
   return true;
 }
 
+void BrowserWindow::FinishProfileLoad() {
+  if (profileLoaded_) return;
+  auto* loader = root_;
+  if (loader->profileLoaded_) { profileLoaded_ = true; return; }
+  if (loader->profileThread_ && WaitForSingleObject(loader->profileThread_, 0) != WAIT_OBJECT_0) return;
+  if (!loader->loadingBookmarks_) return;
+  loader->bookmarks_ = std::move(*loader->loadingBookmarks_);
+  loader->loadingBookmarks_.reset();
+  profile_->restoreTabs = std::move(loader->loadingRestore_);
+  profile_->closedTabs = std::move(loader->loadingClosed_);
+  loader->profileLoaded_ = true;
+  Metrics::Get().Mark("profileJoined");
+  for (auto* window : liveWindows_) if (window->profile_ == profile_) {
+    window->profileLoaded_ = true; KillTimer(window->hwnd_, kTimerProfile);
+    if (window->revealed_) window->RestoreSession();
+    window->Relayout(); window->PlaceAllTabs(); window->InvalidateChrome(); window->BroadcastBookmarks();
+  }
+  if (loader->revealed_ && !loader->destroyed_) loader->ScheduleSessionSave();
+}
+
 void BrowserWindow::ShowFirstFrame(int showCmd) {
   Metrics& metrics = Metrics::Get();
   warmup_.WaitReady();
   metrics.Mark("warmupJoined");
-  if (profileThread_) {
-    WaitForSingleObject(profileThread_, INFINITE);
-  }
-  profileLoaded_ = true;
-  metrics.Mark("profileJoined");
+  FinishProfileLoad();
+  if (!profileLoaded_) SetTimer(hwnd_, kTimerProfile, 50, nullptr);
+  if (!profileLoaded_) metrics.Mark("profileDeferred");
   if (options_.background && !revealRequested_) {
     // 后台启动：窗口先不显示（不画首帧、不恢复会话、不套用上次位置）。进程、托盘和智能体桥照常工作，
     // 智能体页面在屏幕外宿主里执行；用户打开浏览器、点托盘或智能体请求交接时才显示（RevealWindow）
@@ -480,7 +505,8 @@ void BrowserWindow::StartEnvironment() {
   const HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
       nullptr, userDataFolder, environmentOptions.Get(),
       Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-          [this, generation](HRESULT result, ICoreWebView2Environment* environment) -> HRESULT {
+          [this, generation, alive = std::weak_ptr<int>(alive_)](HRESULT result, ICoreWebView2Environment* environment) -> HRESULT {
+            if (alive.expired()) return S_OK;
             if (generation == envGeneration_) {
               OnEnvironmentCreated(result, environment);
             }
@@ -598,7 +624,8 @@ void BrowserWindow::CreateController(Tab& tab) {
   const uint32_t id = tab.id;
   const uint32_t generation = envGeneration_;
   auto handler = Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-      [this, id, generation, attempt](HRESULT result, ICoreWebView2Controller* controller) -> HRESULT {
+      [this, id, generation, attempt, alive = std::weak_ptr<int>(alive_)](HRESULT result, ICoreWebView2Controller* controller) -> HRESULT {
+        if (alive.expired()) { if (controller) controller->Close(); return S_OK; }
         const Tab* current = destroyed_ ? nullptr : FindTab(id);
         if (!current || current->createAttempt != attempt || generation != envGeneration_) {  // 环境已重建：旧环境的控件不要
           if (controller) controller->Close();
@@ -930,7 +957,6 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
             self->UpdateWindowTitle();
           }
           self->InvalidateChrome();
-          if (!t->agent) self->ScheduleSessionSave();
         }
         return S_OK;
       }).Get(),
@@ -1027,7 +1053,7 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
                 if (self->IsActive(*t)) self->Relayout();
               }
               if (t->media && target != L"https://newtab.jisu.example/player.html") self->StopMedia(*t);
-              if (t->mediaTarget && target != t->url) { if (auto* mediaTab=self->FindTab(t->mediaTarget)) mediaTab->mediaSource=0; t->mediaTarget=0; }
+              if (t->mediaTarget && target != t->url) { if (auto* mediaTab=self->FindRelatedTab(t->mediaTarget)) mediaTab->mediaSource=0; t->mediaTarget=0; }
               if (self->fullscreenTab_ == id) self->ExitContentFullscreen();
               t->loading = true;
               self->InvalidateChrome();
@@ -2032,6 +2058,7 @@ void BrowserWindow::NewTab(const std::wstring& url, bool activate, size_t at) {
     newTabMeasureId_ = tab->id;
   }
   tab->lastUsed = UseStamp();
+  if (const Tab* opener = ActiveTab()) tab->openedBy = opener->id;
   const size_t index = InsertTab(std::move(tab), at);
   Relayout();
   if (activate) {
@@ -2073,7 +2100,7 @@ void BrowserWindow::CloseTab(size_t index) {
   CancelTabDrag(false);
   if (fullscreenTab_ == tabs_[index]->id) ExitContentFullscreen();
   StopMedia(*tabs_[index]);
-  if(auto* target=FindTab(tabs_[index]->mediaTarget))target->mediaSource=0;
+  if(auto* target=FindRelatedTab(tabs_[index]->mediaTarget))target->mediaSource=0;
   RememberClosedTab(*tabs_[index]);  // Ctrl+Shift+T 重新打开
   const bool wasActive = index == active_;
   std::unique_ptr<Tab> closing = std::move(tabs_[index]);
@@ -2263,11 +2290,12 @@ BrowserWindow::Tab* BrowserWindow::FindTab(uint32_t id) {
   if (spare_ && spare_->id == id) {
     return spare_.get();
   }
-  // Native media/source links survive moving either tab into a sibling window.
-  for (auto* window : liveWindows_) {
-    if (window == this || window->profile_ != profile_) continue;
-    for (auto& tab : window->tabs_) if (tab->id == id) return tab.get();
-  }
+  return nullptr;
+}
+
+BrowserWindow::Tab* BrowserWindow::FindRelatedTab(uint32_t id) {
+  for (auto* window : liveWindows_) if (window->profile_ == profile_)
+    if (Tab* tab = window->FindTab(id)) return tab;
   return nullptr;
 }
 
@@ -2600,7 +2628,7 @@ void BrowserWindow::ExecuteCommand(WPARAM command, LPARAM arg) {
       }
       break;
     case kCmdToggleBookmark:
-      ToggleBookmark(true);
+      ToggleBookmark();
       break;
     case kCmdToggleBookmarkBar:
       settings_.bookmarkBar = !settings_.bookmarkBar;
@@ -2705,7 +2733,8 @@ void BrowserWindow::OpenUrl(const std::wstring& url, bool newTab) {
 // ---------------------------------------------------------------------------
 // 书签
 
-void BrowserWindow::ToggleBookmark(bool fromKeyboard) {
+void BrowserWindow::ToggleBookmark() {
+  if (!profileLoaded_) { ShowNotice(L"书签仍在加载，请稍后重试。"); return; }
   Tab* tab = ActiveTab();
   if (!tab || !profileLoaded_ || !IsStarrable(tab->url)) {
     return;
@@ -2754,6 +2783,7 @@ void BrowserWindow::FillBookmarkMenu(HMENU menu, const std::vector<BookmarkNode*
   size_t added = 0;
   for (BookmarkNode* node : nodes) {
     if (added++ >= kMenuItemLimit || state.urls.size() >= kMenuOpenAllBase - kMenuItemBase) {
+      AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"更多项目请在书签管理器中查看");
       break;
     }
     if (node->folder) {
@@ -2789,6 +2819,7 @@ void BrowserWindow::ShowBookmarkMenu(const std::vector<BookmarkNode*>& nodes, Bo
   const UINT command = static_cast<UINT>(TrackPopupMenuEx(menu, flags, screen.x, screen.y, hwnd_, nullptr));
   bookmarkMenu_ = previous;
   DestroyMenu(menu);
+  if (destroyed_ || !IsWindow(hwnd_)) return;
   if (command >= kMenuOpenAllBase && command - kMenuOpenAllBase < state.openAll.size()) {
     if (BookmarkNode* folder = bookmarks_.FindById(state.openAll[command - kMenuOpenAllBase]); folder && folder->folder) {
       std::vector<std::wstring> urls;
@@ -2890,6 +2921,14 @@ void BrowserWindow::ShowBookmarkContextMenu(BookmarkNode& node, POINT screen) {
 
 void BrowserWindow::ShowMainMenu(POINT screen) {
   HMENU menu = CreatePopupMenu();
+  HMENU tabList = CreatePopupMenu();
+  std::vector<uint32_t> tabIds;
+  for (const auto& tab : tabs_) {
+    tabIds.push_back(tab->id);
+    AppendMenuW(tabList, MF_STRING | (IsActive(*tab) ? MF_CHECKED : 0), kMenuTabListBase + tabIds.size() - 1,
+                MenuText(tab->title.empty() ? tab->url : tab->title).c_str());
+  }
+  AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(tabList), L"标签列表");
   AppendMenuW(menu, MF_STRING, kMenuNewTab, L"新建标签页\tCtrl+T");
   AppendMenuW(menu, MF_STRING, kMenuDownloads, L"下载管理\tCtrl+J");
   AppendMenuW(menu, MF_STRING, kMenuSettings, L"设置 / 清除浏览数据");
@@ -2914,6 +2953,10 @@ void BrowserWindow::ShowMainMenu(POINT screen) {
       menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTALIGN | TPM_TOPALIGN, screen.x, screen.y, hwnd_, nullptr));
   DestroyMenu(menu);
   if (destroyed_ || !IsWindow(hwnd_)) return;
+  if (command >= kMenuTabListBase && command - kMenuTabListBase < tabIds.size()) {
+    if (Tab* tab = FindTab(tabIds[command - kMenuTabListBase]); tab && IndexOf(*tab) < tabs_.size()) Activate(IndexOf(*tab));
+    return;
+  }
   if (command >= kMenuPageBase && command < kMenuPageBase + 8) { PageAction(command - kMenuPageBase); return; }
   switch (command) {
     case kMenuDownloads: OpenDownloads(); break;
@@ -3507,6 +3550,20 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_RBUTTONUP:
       OnRButtonUp(PointFromLParam(lParam));
       return 0;
+    case WM_MENURBUTTONUP:
+      if (bookmarkMenu_) {
+        const HMENU menu = reinterpret_cast<HMENU>(lParam);
+        const UINT command = GetMenuItemID(menu, static_cast<int>(wParam));
+        int64_t id = 0;
+        if (command >= kMenuItemBase && command - kMenuItemBase < bookmarkMenu_->urls.size()) id = bookmarkMenu_->urls[command - kMenuItemBase];
+        else if (const auto sub = GetSubMenu(menu, static_cast<int>(wParam)); sub && bookmarkMenu_->folders.contains(sub)) id = bookmarkMenu_->folders[sub];
+        if (id) {
+          POINT screen{}; GetCursorPos(&screen); EndMenu();
+          PostTask([this, id, screen] { if (auto* node = bookmarks_.FindById(id)) ShowBookmarkContextMenu(*node, screen); });
+        }
+        return 0;
+      }
+      break;
     case WM_INITMENUPOPUP:
       // 书签子菜单展开时才填内容、解码图标
       if (bookmarkMenu_) {
@@ -3585,6 +3642,7 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       }
       return FALSE;
     case WM_TIMER:
+      if (wParam == kTimerProfile) { FinishProfileLoad(); return 0; }
       if (wParam == kTimerControllers) { WatchControllers(); return 0; }
       if (wParam == kTimerSuggestions) { KillTimer(hwnd_, kTimerSuggestions); ShowSuggestions(); return 0; }
       if (wParam == kTimerMedia) { PollMedia(); return 0; }
@@ -3830,6 +3888,10 @@ void BrowserWindow::OnDestroy() {
       if (!primary->environment_ && !primary->options_.appMode) primary->ScheduleEnvironmentRecovery();
     }
     liveWindows_.front()->ScheduleSessionSave();  // 剩下的窗口接着记会话
+    BrowserWindow* owner = root_;
+    liveWindows_.front()->PostTask([owner] {
+      std::erase_if(owner->detachedWindows_, [](const auto& window) { return window->destroyed_; });
+    });
   }
 }
 
@@ -4253,7 +4315,7 @@ void BrowserWindow::OnLButtonUp(POINT point) {
       ExecuteCommand(kCmdStopOrReload);
       break;
     case ChromeHit::kStar:
-      ToggleBookmark(false);
+      ToggleBookmark();
       break;
     case ChromeHit::kPopupBlocked:
       ShowPopupBlockedMenu(below(layout_.popupBlocked, false));

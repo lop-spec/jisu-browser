@@ -106,6 +106,15 @@ void BrowserWindow::FinishTabDrag(POINT point) {
   if (!tab || tab->agent || !tab->controller || tab->creating) return;
   POINT screen = point;
   ClientToScreen(hwnd_, &screen);
+  for (auto* destination : liveWindows_) {
+    if (destination == this || destination->destroyed_ || destination->profile_ != profile_ ||
+        !IsWindowVisible(destination->hwnd_) || IsIconic(destination->hwnd_)) continue;
+    POINT local = screen; ScreenToClient(destination->hwnd_, &local);
+    if (local.x >= 0 && local.x < (destination->layout_.width - 138) * destination->layout_.scale &&
+        local.y >= 0 && local.y < destination->layout_.tabStripHeight * destination->layout_.scale) {
+      MoveTabTo(id, *destination); return;
+    }
+  }
   RECT bounds{};
   GetWindowRect(hwnd_, &bounds);
   if (tabs_.size() == 1) {

@@ -139,6 +139,7 @@ class BrowserWindow : public AgentHost {
 
   // 会话里的一个标签：非正常退出（崩溃、被结束、关机）后下次启动恢复
   struct SessionTab {
+    uint32_t window = 0;
     std::wstring url;
     std::wstring title;
     bool active = false;
@@ -172,6 +173,7 @@ class BrowserWindow : public AgentHost {
   bool TabDownloading(uint32_t id) const;
   void OpenSettings();
   void PageAction(UINT action);
+  BrowserWindow* CreatePeerWindow();
   void ShowSuggestions();
   void HideSuggestions();
   void AcceptSuggestion();
@@ -284,6 +286,7 @@ class BrowserWindow : public AgentHost {
   void SuspendIdleAgentTabs();
   void SetTabVisible(Tab& tab, bool visible);
   Tab* FindTab(uint32_t id);
+  Tab* FindRelatedTab(uint32_t id);
   size_t IndexOf(const Tab& tab) const;
   Tab* ActiveTab();
   const Tab* ActiveTab() const;
@@ -303,7 +306,7 @@ class BrowserWindow : public AgentHost {
   void OpenUrl(const std::wstring& url, bool newTab);
 
   // 书签
-  void ToggleBookmark(bool fromKeyboard);
+  void ToggleBookmark();
   void EditBookmark(BookmarkNode* node, const std::wstring& title, const std::wstring& url);
   void CancelBookmarkDrag();
   void UpdateBookmarkDrop(POINT point);
@@ -339,6 +342,7 @@ class BrowserWindow : public AgentHost {
   void ScheduleSessionSave();
   void SaveSession(bool clean, bool durable);
   void RestoreSession();
+  void RestoreSessionItems(std::vector<SessionTab> items);
   std::wstring SessionFile() const;
   void OnProcessFailed(uint32_t id, COREWEBVIEW2_PROCESS_FAILED_KIND kind, ICoreWebView2* sender);
   void ScheduleEnvironmentRecovery();
@@ -518,6 +522,10 @@ class BrowserWindow : public AgentHost {
   ComPtr<ICoreWebView2Profile7> extensionProfile_;
   std::shared_ptr<int> alive_ = std::make_shared<int>(0);
   Settings& settings_;
+  void FinishProfileLoad();
+  std::unique_ptr<BookmarkStore> loadingBookmarks_;
+  std::vector<SessionTab> loadingRestore_;
+  std::vector<ClosedTab> loadingClosed_;
   HANDLE profileThread_ = nullptr;
   std::wstring profileDir_;     // 用户数据目录（书签、设置文件所在）
   bool profileLoaded_ = false;
