@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(jisu_browser VERSION 0.5.1 LANGUAGES CXX RC)
+project(jisu_browser VERSION 0.5.2 LANGUAGES CXX RC)
 
 if(NOT MSVC)
   message(FATAL_ERROR "只支持 MSVC 构建（GitHub Actions windows-latest）")
@@ -141,6 +141,8 @@ add_test(NAME native-private-profile COMMAND powershell.exe -NoProfile -NonInter
 set_tests_properties(native-private-profile PROPERTIES TIMEOUT 150)
 add_test(NAME native-accessibility COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/accessibility-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
 set_tests_properties(native-accessibility PROPERTIES TIMEOUT 150)
+add_test(NAME native-caption-buttons COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/caption-buttons-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
+set_tests_properties(native-caption-buttons PROPERTIES TIMEOUT 90)
 add_test(NAME native-app-download COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/app-download-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
 set_tests_properties(native-app-download PROPERTIES TIMEOUT 120)
 add_test(NAME native-omnibox-input COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/omnibox-input-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")

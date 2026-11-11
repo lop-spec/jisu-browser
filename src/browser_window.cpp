@@ -3574,12 +3574,33 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       return HTCLIENT;
     }
     case WM_NCMOUSEMOVE: {
-      POINT point=PointFromLParam(lParam);ScreenToClient(hwnd_,&point);
-      if(wParam==HTMAXBUTTON)OnMouseMove(point);
-      break;
+      POINT point = PointFromLParam(lParam); ScreenToClient(hwnd_, &point);
+      if (wParam == HTMAXBUTTON) {
+        OnMouseMove(point);
+        TRACKMOUSEEVENT track{sizeof(TRACKMOUSEEVENT), TME_LEAVE | TME_NONCLIENT, hwnd_, 0};
+        TrackMouseEvent(&track);
+      }
+      break;  // Keep default non-client hover handling for Windows snap layouts.
     }
     case WM_NCMOUSELEAVE:
-      hover_={};InvalidateChrome(false);break;
+      hover_ = {}; InvalidateChrome(false); break;
+    case WM_NCLBUTTONDOWN:
+    case WM_NCLBUTTONDBLCLK:
+      if (!options_.appMode && wParam == HTMAXBUTTON) {
+        // HTMAXBUTTON enables snap layouts, but Windows cannot track our custom-drawn caption rectangle.
+        POINT point = PointFromLParam(lParam); ScreenToClient(hwnd_, &point);
+        OnLButtonDown(point);
+        if (pressed_.kind == ChromeHit::kMaximize) SetCapture(hwnd_);
+        return 0;
+      }
+      break;
+    case WM_NCLBUTTONUP:
+      if (!options_.appMode && wParam == HTMAXBUTTON) {
+        POINT point = PointFromLParam(lParam); ScreenToClient(hwnd_, &point);
+        OnLButtonUp(point);
+        return 0;
+      }
+      break;
     case WM_SYSCOMMAND:
       // 单按 Alt / F10：没有菜单栏，进了看不见的系统菜单模式后接下来的按键都被吞掉；Alt+空格的系统菜单照常
       if ((wParam & 0xFFF0) == SC_KEYMENU && lParam == 0 && !options_.appMode) return 0;
@@ -3715,6 +3736,11 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       return 0;
     case WM_CAPTURECHANGED:
     case WM_CANCELMODE:
+      if (pressed_.kind == ChromeHit::kMaximize) {
+        pressed_ = {}; hover_ = {};
+        if (GetCapture() == hwnd_) ReleaseCapture();
+        InvalidateChrome(false);
+      }
       CancelTabDrag();
       CancelBookmarkDrag();
       break;
@@ -4517,6 +4543,7 @@ void BrowserWindow::OnLButtonUp(POINT point) {
   const ChromeHit hit = HitTest(point);
   const ChromeHit pressed = pressed_;
   pressed_ = {};
+  if (pressed.kind == ChromeHit::kMaximize && GetCapture() == hwnd_) ReleaseCapture();
   if (hit != pressed) {
     return;
   }
