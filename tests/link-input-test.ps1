@@ -30,12 +30,13 @@ public static class LinkInputTest {
 '@
 $root=Join-Path $env:TEMP ('jisu-link-input-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $root|Out-Null
 $port=Get-Random -Minimum 23000 -Maximum 44000
-$server=New-Object Net.HttpListener;$server.Prefixes.Add("http://localhost:$port/");$server.Start();$script:pending=$server.GetContextAsync();$script:inputs=@{};$script:opened=@{}
+$server=New-Object Net.HttpListener;$server.Prefixes.Add("http://localhost:$port/");$server.Start();$script:pending=$server.GetContextAsync();$script:inputs=@{};$script:opened=@{};$script:ready=@{}
 function Pump([int]$ms){$until=(Get-Date).AddMilliseconds($ms);do{if($script:pending.Wait(20)){
  $x=$script:pending.Result;$script:pending=$server.GetContextAsync();$path=$x.Request.Url.AbsolutePath;$case=$x.Request.QueryString['case']
  if($path -eq '/input'){$script:inputs[$case]=@{button=$x.Request.QueryString['button'];ctrl=$x.Request.QueryString['ctrl']};$text='ok'}
+ elseif($path -eq '/ready'){$script:ready[$case]=$true;$text='ok'}
  elseif($path -eq '/opened'){$script:opened[$case]=$true;$text='<!doctype html><title>opened</title>'}
- else{$text='<!doctype html><title>source</title><body style="margin:0"><a target="_blank" href="/opened?case='+$case+'" style="display:block;padding:30px">open</a><script>addEventListener("pointerdown",e=>fetch("/input?case='+$case+'&button="+e.button+"&ctrl="+(e.ctrlKey?1:0)),true)</script>'}
+ else{$text='<!doctype html><title>source</title><body style="margin:0"><a target="_blank" href="/opened?case='+$case+'" style="display:block;padding:30px">open</a><script>addEventListener("pointerdown",e=>fetch("/input?case='+$case+'&button="+e.button+"&ctrl="+(e.ctrlKey?1:0)),true);requestAnimationFrame(()=>requestAnimationFrame(()=>fetch("/ready?case='+$case+'")))</script>'}
  $bytes=[Text.Encoding]::UTF8.GetBytes($text);$x.Response.ContentType='text/html';try{$x.Response.OutputStream.Write($bytes,0,$bytes.Length);$x.Response.Close()}catch{}
 }}while((Get-Date)-lt $until)}
 $process=$null
@@ -44,11 +45,12 @@ try{
   $udf=Join-Path $root $case;New-Item -ItemType Directory -Path $udf|Out-Null
   [IO.File]::WriteAllText((Join-Path $udf 'jisu-settings.json'),'{"bookmarkBar":false,"importedDefaultBrowser":true}')
   $process=Start-Process -FilePath $Exe -ArgumentList @('--udf',('"'+$udf+'"'),'--no-agent','--no-activate','--no-spare','--bounds','-3000,0,1024,768',"http://localhost:$port/source?case=$case") -PassThru
-  $deadline=(Get-Date).AddSeconds(35);do{Pump 100;$process.Refresh()}while($process.MainWindowTitle -notlike 'source*' -and (Get-Date)-lt $deadline -and -not $process.HasExited)
-  if($process.MainWindowTitle -notlike 'source*'){throw 'source page did not load'}
+  # TitleChanged can precede the first rendered/hit-testable frame. Wait for the actual fixture's two-frame barrier.
+  $deadline=(Get-Date).AddSeconds(35);do{Pump 100;$process.Refresh()}while(($process.MainWindowTitle -notlike 'source*' -or -not $script:ready.ContainsKey($case)) -and (Get-Date)-lt $deadline -and -not $process.HasExited)
+  if($process.MainWindowTitle -notlike 'source*' -or -not $script:ready.ContainsKey($case)){throw 'source page did not become input-ready'}
   [LinkInputTest]::Click($process.MainWindowHandle,($case -eq 'ctrl'),($case -eq 'middle'))
   $deadline=(Get-Date).AddSeconds(8);do{Pump 100}while(-not $script:opened.ContainsKey($case) -and (Get-Date)-lt $deadline)
-  if(-not $script:opened.ContainsKey($case)){throw ($case+' platform gesture did not open a link')}
+  if(-not $script:opened.ContainsKey($case)){throw ($case+' platform gesture did not open a link; fixtureReady='+$script:ready.ContainsKey($case)+'; DOMInput='+($script:inputs[$case]|ConvertTo-Json -Compress))}
   $input=$script:inputs[$case]
   if(-not $input -or ($case -eq 'middle' -and $input.button -ne '1') -or ($case -eq 'ctrl' -and $input.ctrl -ne '1')){throw ($case+' DOM trusted-input positive control failed')}
   Pump 1900;$session=Get-Content -LiteralPath (Join-Path $udf 'Session.json') -Raw -Encoding UTF8|ConvertFrom-Json
