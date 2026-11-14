@@ -121,15 +121,28 @@ struct ProxyBinding::State : std::enable_shared_from_this<ProxyBinding::State> {
   std::thread worker;
   std::mutex routeMutex;
   ProxyRoute route;
+  bool poolMode = false;
   std::string lastStatus;
   void Status(const char* error = "") {
-    std::string text = "{\"mode\":\"latest-system-address\",\"ignoresSystemSwitch\":true,\"listen\":\"127.0.0.1:" + std::to_string(port) + "\",\"ownerPid\":" + std::to_string(GetCurrentProcessId()) + ",\"http\":";
+    std::string text = "{\"mode\":\"" + std::string(poolMode ? "v2ray-pool" : "latest-system-address") + "\",\"ignoresSystemSwitch\":true,\"listen\":\"127.0.0.1:" + std::to_string(port) + "\",\"ownerPid\":" + std::to_string(GetCurrentProcessId()) + ",\"http\":";
     json::AppendQuoted(text, ToUtf8(route.http)); text += ",\"https\":"; json::AppendQuoted(text, ToUtf8(route.https));
     text += ",\"error\":"; json::AppendQuoted(text, error); text += "}";
     if (text != lastStatus) { EnsureDirectory(profile); WriteFileAtomic(profile + L"\\proxy-binding-status.json", text, false); lastStatus = text; }
   }
   void Refresh() {
-    auto next = ParseLocalProxyRoute(ReadProxy(registryKey));
+    ProxyRoute next;
+    const bool modeBefore = poolMode;
+    std::string bindingText; json::Value binding;
+    const std::wstring bindingPath = profile + L"\\proxy-binding-upstream.json";
+    const bool configured = ReadFileBytes(bindingPath, bindingText);
+    if (configured && json::Parse(bindingText, binding) && binding["mode"].AsString() == "v2ray-pool") {
+      next = ParseLocalProxyRoute(L"http=" + FromUtf8(binding["http"].AsString()) + L";https=" + FromUtf8(binding["https"].AsString()));
+      if (!next.Valid()) { if (!poolMode) route = {}; poolMode = true; Status("pool-binding-unreadable"); return; }
+      poolMode = true;
+    } else if (configured || poolMode) {
+      if (!poolMode) { poolMode = true; route = {}; }
+      Status("pool-binding-unreadable"); return; // Never silently fall back to system proxies after opting in.
+    } else next = ParseLocalProxyRoute(ReadProxy(registryKey));
     // Clearing/disabling system proxy must NOT turn this browser into a direct client.
     if (!next.Valid()) return;
     const auto self = L"127.0.0.1:" + std::to_wstring(port);
@@ -137,9 +150,9 @@ struct ProxyBinding::State : std::enable_shared_from_this<ProxyBinding::State> {
     if (next.http == self || next.https == self || next.http == localSelf || next.https == localSelf ||
         next.http == L"[::1]:" + std::to_wstring(port) || next.https == L"[::1]:" + std::to_wstring(port)) return;
     std::lock_guard lock(routeMutex);
-    if (route == next) return;
+    if (route == next && poolMode == modeBefore) { Status(); return; }
     route = std::move(next);
-    std::string cache = "{\"http\":"; json::AppendQuoted(cache, ToUtf8(route.http)); cache += ",\"https\":"; json::AppendQuoted(cache, ToUtf8(route.https)); cache += "}";
+    std::string cache = "{\"poolMode\":" + std::string(poolMode ? "true" : "false") + ",\"http\":"; json::AppendQuoted(cache, ToUtf8(route.http)); cache += ",\"https\":"; json::AppendQuoted(cache, ToUtf8(route.https)); cache += "}";
     EnsureDirectory(profile); WriteFileAtomic(profile + L"\\proxy-binding-last.json", cache, false);
     Status();
   }
@@ -198,6 +211,7 @@ struct ProxyBinding::State : std::enable_shared_from_this<ProxyBinding::State> {
       if (ReadFileBytes(profile + L"\\proxy-binding-last.json", cache) && json::Parse(cache, saved)) {
         std::lock_guard lock(routeMutex);
         route = ParseLocalProxyRoute(L"http=" + FromUtf8(saved["http"].AsString()) + L";https=" + FromUtf8(saved["https"].AsString()));
+        poolMode = saved["poolMode"].AsBool(false);
       }
       Refresh(); Status(route.Valid() ? "" : "no-valid-local-proxy");
       ULONGLONG refreshed = GetTickCount64();

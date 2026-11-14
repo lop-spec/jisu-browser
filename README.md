@@ -65,6 +65,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\run-on-hidden-desktop.
 
 正常日常窗口与 PiWeb 应用窗口共用内置回环代理入口：WebView2 固定连浏览器自己的 `127.0.0.1:38000–55999`（按资料目录确定端口），不再依赖 Windows 的 `ProxyEnable`。
 
+两机日常配置启用三出口模式：既有 `JisuBrowser-ModelBroker` 宿主内置 HTTP/CONNECT 网关 `127.0.0.1:18775`，只读复用各机 PiWeb 已批准的 v2ray 三出口配置。宿主就绪后原子写资料目录 `proxy-binding-upstream.json`：`{"mode":"v2ray-pool","http":"127.0.0.1:18775","https":"127.0.0.1:18775"}`。浏览器在一秒内固定转向它，此后系统代理地址与开关都不再影响浏览器。
+
+- 浏览器整体（含各网页的子资源域名）保持同一出口，不按 TCP 连接轮询或竞速；首次优先当前 v2ray 选择，保存的上次出口可复用。浏览器完全无隧道且静默超过60秒，才允许跟随手动新选择。
+- 仅在 CONNECT 隧道建立失败、尚未发送目标站请求时切备用；并发失败由一个恢复者选路，其他连接跟随其结果。目标站策略拒绝不轮换出口。三个出口均失败返回502，不直连。
+- 已提交的 POST、TLS 和 WebSocket 断开只关闭，不重放、不换线续传；已有流不中断，新隧道才使用备用。故障切换仍可能改变站点观察到的 IP，不能承诺免验证。
+- 不修改 v2ray 当前节点或系统代理。代理认证只在各机宿主内存中使用，对目标 TLS 不解密，不记录网页地址/正文/凭据；固定入口只监听回环，拒绝把内网/元数据目标再送上游。
+- 固定网关配置临时损坏或消失时保留最后固定网关，不静默回退到系统代理。状态在 `proxy-pool-status.json`（脱敏路由键、计数、宿主 PID）。回滚须停用该模式并同时恢复 `proxy-binding-upstream.json` 与 `proxy-binding-last.json` 的备份，不能只删一个文件。
+
+没有固定网关配置的普通安装仍支持以下旧地址跟随方式：
+
 - 每秒只读当前用户 Internet Settings 的 `ProxyServer`，最新有效地址在下一次连接使用；支持本机 HTTP/混合代理的 `127.0.0.1:端口`、`localhost:端口`、`[::1]:端口` 及 `http=...;https=...`。不读取订阅、节点密码、Cookie 或代理认证。
 - 关闭系统代理、地址暂时清空或写入无效值，都保留最后有效地址（本机 `proxy-binding-last.json`，重开也保留）。不切代理节点、不写系统代理；没有有效地址或上游故障时返回 502，不偷偷直连外网。
 - 地址改变只影响新 TCP 连接，已有模型长回答、TLS 和 WebSocket 不迁移、不重放、不解密；已复用的连接仍用原出口直到自然关闭。
@@ -72,7 +82,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\run-on-hidden-desktop.
 - 不新增进程。相同资料目录的窗口使用同一个入口；宿主退出后其余窗口自动接管。端口被不相关程序占用时明确失败，不改端口去接管其他服务。
 - 状态在资料目录的 `proxy-binding-status.json`，只有入口、HTTP/HTTPS 上游地址、宿主 PID 和错误码，不含网址、请求正文或凭据。测量/预热运行不启用；显式 `--browser-args` 中的 `--proxy-*` 或 `--no-proxy-server` 优先。
 
-`native-dynamic-proxy-binding` 使用独立测试注册表键与两个本机假代理验证关闭开关仍可转发、地址热切换、旧 CONNECT 流不中断、清空/重启保留、宿主接管、分协议转发与失败关闭；不修改真实系统代理。
+`native-dynamic-proxy-binding` 使用独立测试注册表键与两个本机假代理验证关闭开关仍可转发、地址热切换、旧 CONNECT 流不中断、清空/重启保留、宿主接管、分协议转发、失败关闭与固定网关优先；不修改真实系统代理。后台 `browser-egress.test.mjs` 覆盖并发选路收敛、出口稳定、故障切换、策略拒绝、HTTP/CONNECT 不重放和内网拒绝。
 
 ## 书签
 

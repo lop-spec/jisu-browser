@@ -109,7 +109,14 @@ int main() {
   int size = sizeof(address); getsockname(reserved, reinterpret_cast<sockaddr*>(&address), &size);
   Set(L"127.0.0.1:" + std::to_wstring(ntohs(address.sin_port))); Sleep(1250);
   Check(Request(port).starts_with("HTTP/1.1 502"), "fail-closed-no-direct-fallback"); closesocket(reserved);
+  const auto bindingFile = profile + L"\\proxy-binding-upstream.json";
+  const auto endpoint = ToUtf8(b.Endpoint());
+  Check(WriteFileAtomic(bindingFile, "{\"mode\":\"v2ray-pool\",\"http\":\"" + endpoint + "\",\"https\":\"" + endpoint + "\"}"), "pool-mode-config");
+  AwaitMarker(port, 'B', "pool-mode-hot-binding");
+  Set(a.Endpoint()); Sleep(1250); AwaitMarker(port, 'B', "system-address-cannot-override-pool");
+  Check(WriteFileAtomic(bindingFile, "invalid"), "invalid-pool-config"); Sleep(1250); AwaitMarker(port, 'B', "pool-config-corrupt-keeps-gateway");
+  DeleteFileW(bindingFile.c_str()); Sleep(1250); AwaitMarker(port, 'B', "pool-config-missing-never-falls-back-to-system");
   RegCloseKey(registry); RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());
-  std::cout << "PASS proxy binding: switch independent, dynamic address, CONNECT stream, cache, takeover, per-protocol, fail-closed, no system writes" << std::endl;
+  std::cout << "PASS proxy binding: switch independent, dynamic address, CONNECT stream, cache, takeover, per-protocol, fail-closed, no system writes, fixed-pool-priority" << std::endl;
   return 0;
 }
