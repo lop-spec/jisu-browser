@@ -137,10 +137,10 @@ struct ProxyBinding::State : std::enable_shared_from_this<ProxyBinding::State> {
     const bool configured = ReadFileBytes(bindingPath, bindingText);
     if (configured && json::Parse(bindingText, binding) && binding["mode"].AsString() == "v2ray-pool") {
       next = ParseLocalProxyRoute(L"http=" + FromUtf8(binding["http"].AsString()) + L";https=" + FromUtf8(binding["https"].AsString()));
-      if (!next.Valid()) { if (!poolMode) route = {}; poolMode = true; Status("pool-binding-unreadable"); return; }
+      if (!next.Valid()) { if (!poolMode) { std::lock_guard lock(routeMutex); route = {}; } poolMode = true; Status("pool-binding-unreadable"); return; }
       poolMode = true;
     } else if (configured || poolMode) {
-      if (!poolMode) { poolMode = true; route = {}; }
+      if (!poolMode) { std::lock_guard lock(routeMutex); poolMode = true; route = {}; }
       Status("pool-binding-unreadable"); return; // Never silently fall back to system proxies after opting in.
     } else next = ParseLocalProxyRoute(ReadProxy(registryKey));
     // Clearing/disabling system proxy must NOT turn this browser into a direct client.
