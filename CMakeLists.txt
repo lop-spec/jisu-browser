@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(jisu_browser VERSION 0.5.2 LANGUAGES CXX RC)
+project(jisu_browser VERSION 0.5.3 LANGUAGES CXX RC)
 
 if(NOT MSVC)
   message(FATAL_ERROR "只支持 MSVC 构建（GitHub Actions windows-latest）")
@@ -47,6 +47,7 @@ add_executable(jisu-browser WIN32
   src/graphics.cpp
   src/json.cpp
   src/net.cpp
+  src/proxy_binding.cpp
   src/bookmarks.cpp
   src/agent_bridge.cpp
   src/browser_window.cpp
@@ -97,7 +98,7 @@ target_compile_options(jisu-browser PRIVATE /W4 /permissive- /utf-8 /Zc:__cplusp
 
 target_link_libraries(jisu-browser PRIVATE
   "${WEBVIEW2_NATIVE}/${WEBVIEW2_ARCH}/WebView2LoaderStatic.lib"
-  version d2d1 dwrite d3d11 dwmapi winhttp shell32 ole32 advapi32 delayimp windowscodecs comctl32 comdlg32 oleacc oleaut32 crypt32 cryptui uiautomationcore)
+  ws2_32 version d2d1 dwrite d3d11 dwmapi winhttp shell32 ole32 advapi32 delayimp windowscodecs comctl32 comdlg32 oleacc oleaut32 crypt32 cryptui uiautomationcore)
 
 # 首帧路径之外的 DLL 延迟到第一次调用才加载：D2D/DWrite/D3D 由后台预热线程触发，与建窗并行；
 # WinHTTP（智能体桥）在内核就绪后才用，shell32 只在菜单「设为默认浏览器」时用。
@@ -124,6 +125,13 @@ add_custom_command(TARGET jisu-media POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_directory "${MPV_DIR}/shaders" "$<TARGET_FILE_DIR:jisu-media>/media/shaders")
 
 enable_testing()
+add_executable(proxy-binding-test tests/proxy-binding-test.cpp src/proxy_binding.cpp src/common.cpp src/json.cpp)
+target_include_directories(proxy-binding-test PRIVATE src)
+target_compile_definitions(proxy-binding-test PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+target_compile_options(proxy-binding-test PRIVATE /W4 /utf-8 /EHsc)
+target_link_libraries(proxy-binding-test PRIVATE ws2_32 advapi32 ole32)
+add_test(NAME native-dynamic-proxy-binding COMMAND proxy-binding-test)
+set_tests_properties(native-dynamic-proxy-binding PROPERTIES TIMEOUT 60)
 add_executable(url-drop-test tests/url-drop-test.cpp src/url_drop.cpp src/common.cpp)
 target_include_directories(url-drop-test PRIVATE src)
 target_compile_definitions(url-drop-test PRIVATE UNICODE _UNICODE NOMINMAX)

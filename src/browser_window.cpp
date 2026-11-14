@@ -9,6 +9,7 @@
 #include "extension_toolbar.h"
 #include "ntp_html.h"
 
+#include "proxy_binding.h"
 #include <WebView2EnvironmentOptions.h>
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -502,8 +503,10 @@ void BrowserWindow::StartEnvironment() {
   metrics.Mark("envBegin");
   auto environmentOptions = Make<CoreWebView2EnvironmentOptions>();
   environmentOptions->put_AreBrowserExtensionsEnabled(TRUE);
-  if (!options_.browserArgs.empty()) {
-    environmentOptions->put_AdditionalBrowserArguments(options_.browserArgs.c_str());
+  const auto browserArguments = BrowserProxyArguments(options_.userDataFolder, options_.browserArgs,
+      options_.metricsPath.empty() && options_.preheatSeconds == 0);
+  if (!browserArguments.empty()) {
+    environmentOptions->put_AdditionalBrowserArguments(browserArguments.c_str());
   }
   if (!options_.trackingPrevention) {
     environmentOptions->put_EnableTrackingPrevention(FALSE);

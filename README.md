@@ -61,6 +61,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\run-on-hidden-desktop.
 
 日常实例运行期间常驻 Windows 托盘图标（系统可能收进右下角 `^`）：悬停显示版本、提交与「运行中」，单击恢复窗口，右键可打开浏览器、新建标签页或「彻底退出」。主菜单也有「彻底退出」；它与窗口 `×` 均正常关闭所有标签、扩展弹层和智能体桥，不是隐藏到托盘。退出后主动移除托盘图标；Explorer 重启后自动重新注册。测量与预热运行不创建托盘图标。
 
+## 浏览器独立代理
+
+正常日常窗口与 PiWeb 应用窗口共用内置回环代理入口：WebView2 固定连浏览器自己的 `127.0.0.1:38000–55999`（按资料目录确定端口），不再依赖 Windows 的 `ProxyEnable`。
+
+- 每秒只读当前用户 Internet Settings 的 `ProxyServer`，最新有效地址在下一次连接使用；支持本机 HTTP/混合代理的 `127.0.0.1:端口`、`localhost:端口`、`[::1]:端口` 及 `http=...;https=...`。不读取订阅、节点密码、Cookie 或代理认证。
+- 关闭系统代理、地址暂时清空或写入无效值，都保留最后有效地址（本机 `proxy-binding-last.json`，重开也保留）。不切代理节点、不写系统代理；没有有效地址或上游故障时返回 502，不偷偷直连外网。
+- 地址改变只影响新 TCP 连接，已有模型长回答、TLS 和 WebSocket 不迁移、不重放、不解密；已复用的连接仍用原出口直到自然关闭。
+- localhost、IPv4/IPv6 回环、RFC1918 内网、Tailscale 的 `100.64.0.0/10` 与无点主机名保持直连；PiWeb、broker 和本机服务不绕外部代理。
+- 不新增进程。相同资料目录的窗口使用同一个入口；宿主退出后其余窗口自动接管。端口被不相关程序占用时明确失败，不改端口去接管其他服务。
+- 状态在资料目录的 `proxy-binding-status.json`，只有入口、HTTP/HTTPS 上游地址、宿主 PID 和错误码，不含网址、请求正文或凭据。测量/预热运行不启用；显式 `--browser-args` 中的 `--proxy-*` 或 `--no-proxy-server` 优先。
+
+`native-dynamic-proxy-binding` 使用独立测试注册表键与两个本机假代理验证关闭开关仍可转发、地址热切换、旧 CONNECT 流不中断、清空/重启保留、宿主接管、分协议转发与失败关闭；不修改真实系统代理。
+
 ## 书签
 
 与 Chromium 的 `Bookmarks` 文件同一格式，存放在用户数据目录下，其他 Chromium 系浏览器可以直接读。保存保留 date_last_used、meta_info、未知字段和未知根/子节点；导入按网址去重，只接收 http(s)。
