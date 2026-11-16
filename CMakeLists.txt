@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(jisu_browser VERSION 0.5.5 LANGUAGES CXX RC)
+project(jisu_browser VERSION 0.5.6 LANGUAGES CXX RC)
 
 if(NOT MSVC)
   message(FATAL_ERROR "只支持 MSVC 构建（GitHub Actions windows-latest）")
@@ -37,6 +37,11 @@ file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/ntp_html.h"
      CONTENT "#pragma once\n// 由 CMake 从 ntp/index.html 生成，不要手改。\ninline constexpr char kNtpHtml[] = R\"JISU_NTP(@JISU_NTP_HTML@)JISU_NTP\";\n"
      @ONLY)
 
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/ntp/translation.js" JISU_TRANSLATION_SCRIPT)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/ntp/translation.js")
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/translation_script.h"
+     CONTENT "#pragma once\ninline constexpr char kTranslationScript[] = R\"JISU_JS(@JISU_TRANSLATION_SCRIPT@)JISU_JS\";\n" @ONLY)
+
 add_executable(jisu-browser WIN32
   src/main.cpp
   src/common.cpp
@@ -57,6 +62,7 @@ add_executable(jisu-browser WIN32
   src/browser_cookies.cpp
   src/browser_history.cpp
   src/browser_utilities.cpp
+  src/browser_translation.cpp
   src/browser_private.cpp
   src/browser_import.cpp
   src/browser_input.cpp
@@ -125,6 +131,7 @@ add_custom_command(TARGET jisu-media POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_directory "${MPV_DIR}/shaders" "$<TARGET_FILE_DIR:jisu-media>/media/shaders")
 
 enable_testing()
+add_test(NAME native-translation-script COMMAND node "${CMAKE_CURRENT_SOURCE_DIR}/tests/translation-script-test.mjs")
 add_executable(proxy-binding-test tests/proxy-binding-test.cpp src/proxy_binding.cpp src/common.cpp src/json.cpp)
 target_include_directories(proxy-binding-test PRIVATE src)
 target_compile_definitions(proxy-binding-test PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)

@@ -49,6 +49,7 @@ void BrowserWindow::WatchControllers() {
     ++t->createAttempt; t->creating = false;
     OnControllerFailed(*t, HRESULT_FROM_WIN32(ERROR_TIMEOUT));
   }
+  if (auto* tab = ActiveTab()) ContinuePageTranslation(*tab);
   const bool failed = profile_->writer.Failed();
   if (failed != writerError_) {
     writerError_ = failed; UpdateWindowTitle();
@@ -391,6 +392,7 @@ BrowserWindow* BrowserWindow::CreatePeerWindow() {
   auto* target = window.get(); root_->detachedWindows_.push_back(std::move(window)); return target;
 }
 void BrowserWindow::PageAction(UINT action) {
+  if (action == 12) { TogglePageTranslation(); return; }
   if (action == 8) { OpenPrivateWindow(); return; }
   if (action == 11) { POINT point{static_cast<LONG>(layout_.omnibox.left*layout_.scale),static_cast<LONG>(layout_.omnibox.bottom*layout_.scale)};ClientToScreen(hwnd_,&point);ShowSiteInfo(point);return; }
   if (action == 0) {

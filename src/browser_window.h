@@ -92,6 +92,9 @@ class BrowserWindow : public AgentHost {
     bool loading = false;
     bool canBack = false;
     bool canForward = false;
+    bool translationEnabled = false, translationBusy = false, translationFailed = false;
+    uint64_t translationGeneration = 0;
+    unsigned translationBatches = 0;
     std::unique_ptr<MediaSession> media;
     HWND mediaSurface = nullptr;
     uint32_t mediaSource = 0;
@@ -195,6 +198,8 @@ class BrowserWindow : public AgentHost {
   void ReleaseDownloadSources();
   void OpenSettings();
   void PageAction(UINT action);
+  void TogglePageTranslation();
+  void ContinuePageTranslation(Tab& tab);
   BrowserWindow* CreatePeerWindow();
   void OpenPrivateWindow();
   void ShowSuggestions();

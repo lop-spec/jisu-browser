@@ -1081,6 +1081,7 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
                 }
               }
               t->allowInternal = false;
+              t->translationEnabled = false; t->translationBusy = false; ++t->translationGeneration;
               t->gesture.at = 0;
               t->securityOrigin=FaviconOrigin(target);t->securityState=0;t->certificateError=false;
               // 图标缓存只给书签管理页（它显示书签图标），别的页面拿不到
@@ -2610,6 +2611,8 @@ bool BrowserWindow::DispatchShortcut(UINT key, bool repeat) {
     }
   } else if (alt && !ctrl) {
     switch (key) {
+      case 'T':
+        if(!repeat)PostTask([this]{TogglePageTranslation();});return true;
       case VK_LEFT:
         command = kCmdBack;
         break;
@@ -3072,6 +3075,9 @@ void BrowserWindow::ShowMainMenu(POINT screen) {
   AppendMenuW(menu, MF_STRING, kMenuNewTab, L"新建标签页\tCtrl+T");
   AppendMenuW(menu, MF_STRING, kMenuDownloads, L"下载管理\tCtrl+J");
   AppendMenuW(menu, MF_STRING, kMenuSettings, L"设置 / 清除浏览数据");
+  const auto* translationTab = ActiveTab();
+  AppendMenuW(menu, MF_STRING, kMenuPageBase + 12,
+      translationTab && translationTab->translationEnabled ? L"恢复原文\tAlt+T" : L"翻译成中文\tAlt+T");
   double zoom = 1;
   if (const Tab* tab = ActiveTab(); tab && tab->controller) tab->controller->get_ZoomFactor(&zoom);
   const auto zoomLabel = L"当前缩放：" + std::to_wstring(static_cast<int>(std::lround(zoom * 100))) + L"%";
@@ -3101,7 +3107,7 @@ void BrowserWindow::ShowMainMenu(POINT screen) {
     if (Tab* tab = FindTab(tabIds[command - kMenuTabListBase]); tab && IndexOf(*tab) < tabs_.size()) Activate(IndexOf(*tab));
     return;
   }
-  if (command >= kMenuPageBase && command < kMenuPageBase + 12) { PageAction(command - kMenuPageBase); return; }
+  if (command >= kMenuPageBase && command < kMenuPageBase + 13) { PageAction(command - kMenuPageBase); return; }
   switch (command) {
     case kMenuDownloads: OpenDownloads(); break;
     case kMenuSettings: OpenSettings(); break;
