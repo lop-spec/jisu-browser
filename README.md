@@ -66,13 +66,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\run-on-hidden-desktop.
 
 正常日常窗口与 PiWeb 应用窗口共用内置回环代理入口：WebView2 固定连浏览器自己的 `127.0.0.1:38000–55999`（按资料目录确定端口），不再依赖 Windows 的 `ProxyEnable`。
 
-两机日常配置启用三出口模式：既有 `JisuBrowser-ModelBroker` 宿主内置 HTTP/CONNECT 网关 `127.0.0.1:18775`，只读复用各机 PiWeb 已批准的 v2ray 三出口配置。宿主就绪后原子写资料目录 `proxy-binding-upstream.json`：`{"mode":"v2ray-pool","http":"127.0.0.1:18775","https":"127.0.0.1:18775"}`。浏览器在一秒内固定转向它，此后系统代理地址与开关都不再影响浏览器。
+两机日常配置固定交给本机 v2rayN 的 `127.0.0.1:10808` 按现有规则分流。既有 `JisuBrowser-ModelBroker` 宿主检查该入口后写入资料目录 `proxy-binding-upstream.json`：`{"mode":"v2ray-pool","routing":"v2ray-rules","http":"127.0.0.1:10808","https":"127.0.0.1:10808"}`。其中 `v2ray-pool` 只为兼容已安装外壳的固定上游格式，不表示启用旧三出口网关。
 
-- 浏览器整体（含各网页的子资源域名）保持同一出口，不按 TCP 连接轮询或竞速；首次优先当前 v2ray 选择，保存的上次出口可复用。浏览器完全无隧道且静默超过60秒，才允许跟随手动新选择。
-- 仅在 CONNECT 隧道建立失败、尚未发送目标站请求时切备用；并发失败由一个恢复者选路，其他连接跟随其结果。目标站策略拒绝不轮换出口。三个出口均失败返回502，不直连。
-- 已提交的 POST、TLS 和 WebSocket 断开只关闭，不重放、不换线续传；已有流不中断，新隧道才使用备用。故障切换仍可能改变站点观察到的 IP，不能承诺免验证。
-- 不修改 v2ray 当前节点或系统代理。代理认证只在各机宿主内存中使用，对目标 TLS 不解密，不记录网页地址/正文/凭据；固定入口只监听回环，拒绝把内网/元数据目标再送上游。
-- 固定网关配置临时损坏或消失时保留最后固定网关，不静默回退到系统代理。状态在 `proxy-pool-status.json`（脱敏路由键、计数、宿主 PID）。回滚须停用该模式并同时恢复 `proxy-binding-upstream.json` 与 `proxy-binding-last.json` 的备份，不能只删一个文件。
+- 国内、私网直连和境外代理由 v2rayN 当前规则决定；极速不另复制或显示一份规则，也不修改系统代理开关、节点或 v2rayN 规则。
+- 不再经 `18775` 直接拨三个出口：旧方法绕过 v2rayN 的域名/IP 分流，不能用作当前日常入口。
+- 外壳每秒读绑定，新 TCP 连接使用新上游；已有 POST、TLS、WebSocket 不迁移、不重放，不为切换重启浏览器或代理。
+- `10808` 不可用时明确失败，不偷偷绕规则直连或换三出口。固定绑定损坏/消失时保持最后已知上游，不退回系统地址。
+- 当前绑定看 `proxy-binding-status.json` 的 `http`/`https` 和实际连接；旧 `proxy-pool-status.json` 可残留，不能据此认定仍在使用三出口。后台实现位于独立的 `pi-chatgpt-web/src/browser-egress.mjs` 和 `tools/jisu-broker-host.mjs`，合并浏览器主仓并不包含这两个外部文件。
 
 没有固定网关配置的普通安装仍支持以下旧地址跟随方式：
 
