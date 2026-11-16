@@ -37,6 +37,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\run-on-hidden-desktop.
 | `--metrics <文件>` | 写启动时间线 JSON（各时间点为距进程创建的毫秒数）；测量运行默认不开智能体桥、不导入书签 |
 | `--exit-after-metrics` | 写完时间线即退出 |
 | `--no-activate` | 显示窗口但不激活 |
+| `--no-password-autosave` | 用官方 WebView2 Profile API 禁止该资料的原生保存/更新密码提示，供独立后台服务使用；不读取或删除已有密码，不改变日常实例默认值 |
 | `--background` | 后台启动，不显示窗口（隐含 `--no-activate`）：进程、托盘、智能体桥照常工作，智能体页面在屏幕外宿主里执行；用户再次打开浏览器、点托盘或智能体请求交接时才显示窗口（此时才恢复会话、套用上次位置）。给自动化为智能体桥拉起浏览器用 |
 | `--bounds x,y,w,h` | 窗口位置与大小（物理像素） |
 | `--rt sw\|hw` | Direct2D 软件 / 硬件渲染目标，默认 sw（硬件路径建 D3D 设备太慢，首帧过不了 70ms） |

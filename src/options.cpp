@@ -137,6 +137,8 @@ Options ParseOptions(const wchar_t* commandLine) {
       options.exitAfterMetrics = true;
     } else if (arg == L"--no-activate") {
       options.noActivate = true;
+    } else if (arg == L"--no-password-autosave") {
+      options.passwordAutosave = false;
     } else if (arg == L"--background") {
       options.background = true;
       options.noActivate = true;

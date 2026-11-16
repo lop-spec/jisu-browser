@@ -76,6 +76,14 @@ int main() {
   const Options visible = ParseOptions(L"jisu.exe --no-activate");
   Check(!visible.background && visible.noActivate, "--no-activate alone still shows the window");
 
+  const Options service = ParseOptions(L"jisu.exe --udf D:\\aipass --background --no-password-autosave");
+  Check(service.background && service.noActivate && !service.passwordAutosave && !service.defaultUserData,
+        "service profile disables native password-save UI without changing daily defaults");
+  Check(background.passwordAutosave && visible.passwordAutosave,
+        "ordinary background/daily launch retains password-save default");
+  const Options noInjectedAutosave = ParseOptions(L"jisu.exe --single-argument https://example.com/ --no-password-autosave");
+  Check(noInjectedAutosave.passwordAutosave, "URL argument cannot change password-save policy");
+
   // 截断不切开代理对
   const std::wstring emoji = L"ab\U0001F600cd";
   Check(TruncateUtf16(emoji, 3) == L"ab", "truncate before surrogate pair");

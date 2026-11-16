@@ -14,7 +14,8 @@ void BrowserWindow::ConfigureProfile(Tab& tab) {
   profileConfigured_ = true;
   ComPtr<ICoreWebView2Profile6> autofill;
   if (SUCCEEDED(profile.As(&autofill))) {
-    autofill->put_IsPasswordAutosaveEnabled(options_.inPrivate ? FALSE : TRUE);
+    // 官方 Profile API 同时禁止保存和更新提示；不靠易变的 Chromium 内部参数或事后隐藏窗口。
+    autofill->put_IsPasswordAutosaveEnabled(!options_.inPrivate && options_.passwordAutosave ? TRUE : FALSE);
     autofill->put_IsGeneralAutofillEnabled(options_.inPrivate ? FALSE : TRUE);
   }
   if (options_.inPrivate || !options_.metricsPath.empty() || options_.preheatSeconds > 0) return;
