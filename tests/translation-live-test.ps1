@@ -23,6 +23,9 @@ public static class TranslationLive {
 $root=Join-Path $env:TEMP ('jisu-translate-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root|Out-Null
 [IO.File]::WriteAllText((Join-Path $root 'jisu-settings.json'),'{"bookmarkBar":false,"importedDefaultBrowser":true}')
+# Use the same machine-local approved browser egress, not a possibly stale system-proxy route. No login data is read.
+$upstream=Join-Path $env:LOCALAPPDATA 'JisuBrowser\User Data\proxy-binding-upstream.json'
+if(Test-Path -LiteralPath $upstream){Copy-Item -LiteralPath $upstream -Destination (Join-Path $root 'proxy-binding-upstream.json')}
 $port=Get-Random -Minimum 24000 -Maximum 44000
 $server=New-Object Net.HttpListener;$server.Prefixes.Add("http://localhost:$port/");$server.Start();$script:pending=$server.GetContextAsync();$script:metric=$null
 $html=@'
@@ -35,7 +38,7 @@ setInterval(()=>{if(!added&&/[\u4e00-\u9fff]/.test(heading.textContent)){added=t
 fetch('/metric?value='+encodeURIComponent(JSON.stringify({h:heading.textContent,p:text.textContent,link:link.getAttribute('href'),input:document.querySelector('input').value,code:document.querySelector('pre').textContent,d:dynamic.textContent,status:document.getElementById('jisu-translation')?.shadowRoot.querySelector('span').textContent||''}))).catch(()=>{});},200);
 </script>
 '@
-function Pump([int]$ms){$until=(Get-Date).AddMilliseconds($ms);do{if($script:pending.Wait(20)){$x=$script:pending.Result;$script:pending=$server.GetContextAsync();if($x.Request.Url.AbsolutePath -eq '/metric'){$script:metric=$x.Request.QueryString['value']|ConvertFrom-Json;$text='ok'}else{$text=$html};$bytes=[Text.Encoding]::UTF8.GetBytes($text);$x.Response.ContentType='text/html; charset=utf-8';try{$x.Response.OutputStream.Write($bytes,0,$bytes.Length);$x.Response.Close()}catch{}}}while((Get-Date)-lt $until)}
+function Pump([int]$ms){$until=(Get-Date).AddMilliseconds($ms);do{if($script:pending.Wait(20)){$x=$script:pending.Result;$script:pending=$server.GetContextAsync();if($x.Request.Url.AbsolutePath -eq '/metric'){$script:metric=[Uri]::UnescapeDataString($x.Request.Url.Query.Substring(7))|ConvertFrom-Json;$text='ok'}else{$text=$html};$bytes=[Text.Encoding]::UTF8.GetBytes($text);$x.Response.ContentType='text/html; charset=utf-8';try{$x.Response.OutputStream.Write($bytes,0,$bytes.Length);$x.Response.Close()}catch{}}}while((Get-Date)-lt $until)}
 $p=$null
 try{
  $p=Start-Process -FilePath $Exe -ArgumentList @('--udf',('"'+$root+'"'),'--no-agent','--no-activate','--no-spare','--bounds','0,0,1024,768',"http://localhost:$port/") -PassThru
