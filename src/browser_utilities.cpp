@@ -413,12 +413,8 @@ void BrowserWindow::PageAction(UINT action) {
     double zoom = 1; tab->controller->get_ZoomFactor(&zoom);
     const auto wanted = action == 4 ? 1 : std::clamp(zoom + (action == 2 ? 0.1 : -0.1), 0.25, 5.0);
     hr = tab->controller->put_ZoomFactor(wanted);
-    if (SUCCEEDED(hr) && IsStarrable(tab->url)) {
-      const auto origin = FaviconOrigin(tab->url);
-      if (wanted == 1) settings_.siteZoom.erase(origin);
-      else if (settings_.siteZoom.size() < 500 || settings_.siteZoom.contains(origin)) settings_.siteZoom[origin] = wanted;
-      SaveSettings();
-    }
+    double applied = 1.0;
+    if (SUCCEEDED(hr) && SUCCEEDED(tab->controller->get_ZoomFactor(&applied))) RememberPageZoom(applied);
   } else if (action == 5) {
     ComPtr<ICoreWebView2_16> view;
     if (SUCCEEDED(tab->webview.As(&view))) hr = view->ShowPrintUI(COREWEBVIEW2_PRINT_DIALOG_KIND_BROWSER);

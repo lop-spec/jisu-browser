@@ -721,6 +721,7 @@ void BrowserWindow::OnControllerCreated(uint32_t id, HRESULT result, ICoreWebVie
     return;
   }
   tab->error.clear();
+  if (!options_.appMode && !tab->agent) controller->put_ZoomFactor(settings_.pageZoom);
   ConfigureWebView(*tab);
   UpdateMemoryTarget(*tab);
   if (options_.appMode) {
@@ -1012,13 +1013,6 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
                 if ((t->crashPage||(t->creating&&t->url.starts_with(L"view-source:"))) && source.Str() == L"about:blank") return S_OK;
                 t->crashPage = false;
                 t->url = ReportedNavigationUrl(t->url,source.Str());
-              }
-              if (t->controller && IsStarrable(t->url)) {
-                const auto origin = FaviconOrigin(t->url);
-                const auto saved = self->settings_.siteZoom.find(origin);
-                const double wanted = saved == self->settings_.siteZoom.end() ? 1 : saved->second;
-                double actual = 1; t->controller->get_ZoomFactor(&actual);
-                if (std::abs(actual - wanted) > 0.001) t->controller->put_ZoomFactor(wanted);
               }
               BOOL newDocument = TRUE; args->get_IsNewDocument(&newDocument);
               if (!newDocument) self->RecordVisit(*t);
@@ -1324,15 +1318,12 @@ void BrowserWindow::ConfigureWebView(Tab& tab) {
   tab.controller->add_ZoomFactorChanged(Callback<ICoreWebView2ZoomFactorChangedEventHandler>(
       [owner, id](ICoreWebView2Controller* controller, IUnknown*) -> HRESULT {
         auto* self = *owner;
-        if (!self || self->destroyed_ || self->options_.appMode) return S_OK;
-        const Tab* tab = self->FindTab(id); double factor = 1;
-        if (!tab || !IsStarrable(tab->url) || FAILED(controller->get_ZoomFactor(&factor))) return S_OK;
-        const auto origin = FaviconOrigin(tab->url);
-        const auto previous = self->settings_.siteZoom.find(origin);
-        if (previous != self->settings_.siteZoom.end() && std::abs(previous->second - factor) < 0.001) return S_OK;
-        if (std::abs(factor - 1) < 0.001) { if (previous == self->settings_.siteZoom.end()) return S_OK; self->settings_.siteZoom.erase(previous); }
-        else if (self->settings_.siteZoom.size() < 500 || previous != self->settings_.siteZoom.end()) self->settings_.siteZoom[origin] = factor;
-        self->SaveSettings(); return S_OK;
+        if (!self || self->destroyed_) return S_OK;
+        const Tab* tab = self->FindTab(id);
+        double factor = 1.0;
+        if (tab && (!tab->agent || tab->presented) && self->IsActive(*tab) && tab->controller.Get() == controller &&
+            SUCCEEDED(controller->get_ZoomFactor(&factor))) self->RememberPageZoom(factor);
+        return S_OK;
       }).Get(), &token);
   tab.controller->add_MoveFocusRequested(Callback<ICoreWebView2MoveFocusRequestedEventHandler>(
       [owner,id](ICoreWebView2Controller*,ICoreWebView2MoveFocusRequestedEventArgs* args)->HRESULT {
@@ -1885,6 +1876,7 @@ void BrowserWindow::PresentAgentTab(uint32_t tabId) {
     std::unique_ptr<Tab> holder = std::move(*it);
     agentTabs_.erase(it);
     holder->presented = true;
+    if (holder->controller) holder->controller->put_ZoomFactor(settings_.pageZoom);
     index = InsertTab(std::move(holder), tabs_.size());
     Relayout();
   }
@@ -3227,11 +3219,8 @@ void BrowserWindow::LoadSettings() {
     settings_.askDownload = root["askDownload"].AsBool();
     settings_.downloadDirectory = FromUtf8(root["downloadDirectory"].AsString());
     if (root["searchEngine"].IsString()) settings_.searchEngine = FromUtf8(root["searchEngine"].AsString());
-    for (const auto& [origin, value] : root["siteZoom"].Members()) {
-      const auto site = FromUtf8(origin);
-      if (settings_.siteZoom.size() < 500 && site == FaviconOrigin(site) && !site.empty())
-        settings_.siteZoom[site] = std::clamp(value.AsNumber(1), 0.25, 5.0);
-    }
+    const double zoom = root["pageZoom"].AsNumber(1.0);
+    if (std::isfinite(zoom)) settings_.pageZoom = std::clamp(zoom, 0.25, 5.0);
     settings_.bookmarkFolder = static_cast<int64_t>(root["bookmarkFolder"].AsNumber(1));
     settings_.maxRegularTabs = static_cast<int>(std::clamp(root["maxRegularTabs"].AsNumber(10), 1.0, 99.0));
     settings_.bookmarkBar = root["bookmarkBar"].AsBool(true);
@@ -3284,10 +3273,26 @@ void BrowserWindow::SaveSettings() {
   merged.Set("askDownload", json::Value::Bool(settings_.askDownload));
   merged.Set("downloadDirectory", json::Value::String(ToUtf8(settings_.downloadDirectory)));
   merged.Set("searchEngine", json::Value::String(ToUtf8(settings_.searchEngine)));
-  auto zoom = json::Value::MakeObject();
-  for (const auto& [origin, factor] : settings_.siteZoom) zoom.Set(ToUtf8(origin), json::Value::Number(factor));
-  merged.Set("siteZoom", std::move(zoom));
+  if (!options_.inPrivate) merged.Set("pageZoom", json::Value::Number(settings_.pageZoom));
   profile_->writer.Write(profileDir_ + L"\\jisu-settings.json", json::Serialize(merged), true);
+}
+
+void BrowserWindow::RememberPageZoom(double factor) {
+  if (options_.appMode || !std::isfinite(factor) || factor < 0.25 || factor > 5.0 ||
+      std::abs(settings_.pageZoom - factor) < 0.001) return;
+  settings_.pageZoom = factor;
+  // Host-applied zoom becomes the controller's default across navigations, unlike native user zoom.
+  auto apply = [factor](Tab& tab) {
+    if (tab.controller && (!tab.agent || tab.presented)) tab.controller->put_ZoomFactor(factor);
+  };
+  auto update = [&](BrowserWindow& window) {
+    if (window.destroyed_) return;
+    for (auto& tab : window.tabs_) apply(*tab);
+    if (window.spare_) apply(*window.spare_);
+  };
+  update(*root_);
+  for (auto& window : root_->detachedWindows_) update(*window);
+  if (!options_.inPrivate) SaveSettings();
 }
 
 std::wstring BrowserWindow::AppPlacementFile() const {

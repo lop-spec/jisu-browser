@@ -22,6 +22,7 @@ public static class KeyboardActionsTest {
  [DllImport("user32.dll",CharSet=CharSet.Unicode)]public static extern IntPtr GetPropW(IntPtr h,string name);
  public static IntPtr Edit(IntPtr root){IntPtr found=IntPtr.Zero;EnumChildWindows(root,(h,l)=>{var b=new StringBuilder(128);GetClassNameW(h,b,128);if(b.ToString().Equals("Edit",StringComparison.OrdinalIgnoreCase))found=h;return true;},IntPtr.Zero);return found;}
  public static string Address(IntPtr root){var text=new StringBuilder(32768);SendMessageW(Edit(root),0xD,(IntPtr)text.Capacity,text);return text.ToString();}
+ public static void Navigate(IntPtr root,string url){var edit=Edit(root);if(SendMessageW(edit,0xC,IntPtr.Zero,new StringBuilder(url))==IntPtr.Zero || !PostMessageW(edit,0x100,(IntPtr)13,(IntPtr)1))throw new Exception("address input failed");}
  static uint targetThread,sourceThread;static bool attached,active;static byte[] saved;
  public static void End(){if(!active)return;SetKeyboardState(saved);if(attached)AttachThreadInput(sourceThread,targetThread,false);active=attached=false;}
  public static void Key(IntPtr root,int key,bool ctrl,bool shift,bool alt){End();uint pid;targetThread=GetWindowThreadProcessId(root,out pid);sourceThread=GetCurrentThreadId();saved=new byte[256];try{if(targetThread!=sourceThread){attached=AttachThreadInput(sourceThread,targetThread,true);if(!attached)throw new Exception("input queue attach failed");}GetKeyboardState(saved);active=true;var state=new byte[256];if(ctrl)state[0x11]=0x80;if(shift)state[0x10]=0x80;if(alt)state[0x12]=0x80;SetKeyboardState(state);if(!PostMessageW(Edit(root),alt?0x104u:0x100u,(IntPtr)key,(IntPtr)1))throw new Exception("key post failed");}catch{End();throw;}}
@@ -31,9 +32,14 @@ public static class KeyboardActionsTest {
 '@
 $root=Join-Path $env:TEMP ('jisu-keyboard-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $root|Out-Null
 [IO.File]::WriteAllText((Join-Path $root 'jisu-settings.json'),'{"bookmarkBar":false,"importedDefaultBrowser":true}')
-$port=Get-Random -Minimum 23000 -Maximum 44000;$script:dpr=0.0
-$server=New-Object Net.HttpListener;$server.Prefixes.Add("http://localhost:$port/");$server.Start();$script:pending=$server.GetContextAsync()
-function Pump([int]$ms){$until=(Get-Date).AddMilliseconds($ms);do{if($script:pending.Wait(20)){$x=$script:pending.Result;$script:pending=$server.GetContextAsync();if($x.Request.Url.AbsolutePath -eq '/metric'){$script:dpr=[double]::Parse($x.Request.QueryString['dpr'],[Globalization.CultureInfo]::InvariantCulture);$text='ok'}else{$text='<!doctype html><title>keyboard-source</title><body>find-fixture-word<script>setInterval(()=>fetch("/metric?dpr="+devicePixelRatio),100)</script>'};$bytes=[Text.Encoding]::UTF8.GetBytes($text);$x.Response.ContentType='text/html';try{$x.Response.OutputStream.Write($bytes,0,$bytes.Length);$x.Response.Close()}catch{}}}while((Get-Date)-lt $until)}
+$port=Get-Random -Minimum 23000 -Maximum 44000;$script:dpr=0.0;$script:metrics=@{}
+$server=New-Object Net.HttpListener;$server.Prefixes.Add("http://localhost:$port/");$server.Prefixes.Add("http://127.0.0.1:$port/");$server.Start();$script:pending=$server.GetContextAsync()
+function Pump([int]$ms){$until=(Get-Date).AddMilliseconds($ms);do{if($script:pending.Wait(20)){$x=$script:pending.Result;$script:pending=$server.GetContextAsync();if($x.Request.Url.AbsolutePath -eq '/metric'){$script:dpr=[double]::Parse($x.Request.QueryString['dpr'],[Globalization.CultureInfo]::InvariantCulture);$script:metrics[$x.Request.Url.Host+$x.Request.QueryString['page']]=$script:dpr;$text='ok'}else{$text='<!doctype html><title>keyboard-source</title><body>find-fixture-word<script>setInterval(()=>fetch("/metric?dpr="+devicePixelRatio+"&page="+encodeURIComponent(location.pathname)),100)</script>'};$bytes=[Text.Encoding]::UTF8.GetBytes($text);$x.Response.ContentType='text/html';try{$x.Response.OutputStream.Write($bytes,0,$bytes.Length);$x.Response.Close()}catch{}}}while((Get-Date)-lt $until)}
+function Assert-Zoom([string]$page,[double]$expected){
+ $deadline=(Get-Date).AddSeconds(15)
+ do{Pump 100;$actual=$script:metrics[$page]}until(($null -ne $actual -and [Math]::Abs($actual-$expected) -le 0.02) -or (Get-Date)-ge $deadline)
+ if($null -eq $actual -or [Math]::Abs($actual-$expected) -gt 0.02){throw "Zoom on ${page}: expected DPR $expected, got $actual"}
+}
 function Family { [uint32[]]@($p.Id)+[uint32[]]@(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'"|Where-Object {$_.CommandLine -and $_.CommandLine.Contains($root)}|ForEach-Object {$_.ProcessId}) }
 function New-Windows($before){$ids=Family;@([KeyboardActionsTest]::Windows($ids)|Where-Object {$_ -ne $p.MainWindowHandle -and $_ -notin $before})}
 function Close-New($before){foreach($window in (New-Windows $before)){[KeyboardActionsTest]::PostMessageW($window,0x10,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null};Pump 300}
@@ -44,7 +50,19 @@ try{
  $h=$p.MainWindowHandle;$baseline=$script:dpr
  [KeyboardActionsTest]::Key($h,187,$true,$false,$false);Pump 600;if($script:dpr -le $baseline*1.05){throw 'Ctrl+plus did not change actual page DPR'}
  [KeyboardActionsTest]::Key($h,189,$true,$false,$false);Pump 600;if([Math]::Abs($script:dpr-$baseline) -gt 0.02){throw 'Ctrl+minus did not restore actual page DPR'}
- [KeyboardActionsTest]::Key($h,187,$true,$false,$false);Pump 400;[KeyboardActionsTest]::Key($h,48,$true,$false,$false);Pump 600;if([Math]::Abs($script:dpr-$baseline) -gt 0.02){throw 'Ctrl+0 failed'}
+ [KeyboardActionsTest]::Key($h,187,$true,$false,$false);Assert-Zoom 'localhost/' ($baseline*1.1)
+ [KeyboardActionsTest]::End();[KeyboardActionsTest]::Navigate($h,"http://127.0.0.1:$port/other-origin")
+ Assert-Zoom '127.0.0.1/other-origin' ($baseline*1.1)
+ [KeyboardActionsTest]::Key($h,84,$true,$false,$false);Pump 500;[KeyboardActionsTest]::End()
+ [KeyboardActionsTest]::Navigate($h,"http://localhost:$port/new-tab")
+ Assert-Zoom 'localhost/new-tab' ($baseline*1.1)
+ [KeyboardActionsTest]::PostMessageW($h,0x10,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+ if(-not $p.WaitForExit(15000)){throw 'fixture did not close for zoom restart test'}
+ $p=Start-Process -FilePath $Exe -ArgumentList @('--udf',('"'+$root+'"'),'--no-agent','--no-activate','--no-spare','--bounds','-3000,0,1024,768',"http://localhost:$port/restarted") -PassThru
+ Assert-Zoom 'localhost/restarted' ($baseline*1.1)
+ $p.Refresh();$h=$p.MainWindowHandle
+ [KeyboardActionsTest]::Key($h,48,$true,$false,$false);Assert-Zoom 'localhost/restarted' $baseline
+ 'PASS page DPR: one zoom across origins, new tabs and restart; Ctrl+0 restores 100%'
  $element=[System.Windows.Automation.AutomationElement]::FromHandle($h);$scope=[System.Windows.Automation.TreeScope]::Descendants;$condition=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::Edit)
  $beforeFind=@([KeyboardActionsTest]::Windows((Family)));$beforeEdits=0;foreach($window in $beforeFind){$view=[System.Windows.Automation.AutomationElement]::FromHandle($window);$beforeEdits+=$view.FindAll($scope,$condition).Count}
  [KeyboardActionsTest]::Key($h,70,$true,$false,$false);Pump 500;$afterEdits=0;foreach($window in [KeyboardActionsTest]::Windows((Family))){$view=[System.Windows.Automation.AutomationElement]::FromHandle($window);$afterEdits+=$view.FindAll($scope,$condition).Count}

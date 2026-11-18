@@ -143,7 +143,7 @@ class BrowserWindow : public AgentHost {
     bool askDownload = false;
     std::wstring downloadDirectory;
     std::wstring searchEngine = L"bing";
-    std::map<std::wstring, double> siteZoom;
+    double pageZoom = 1.0;
     bool importedDefaultBrowser = false;
     int maxRegularTabs = 10;
     int64_t bookmarkFolder = 1;
@@ -366,6 +366,7 @@ class BrowserWindow : public AgentHost {
   void BroadcastBookmarks();
   void LoadSettings();
   void SaveSettings();
+  void RememberPageZoom(double factor);
   void RegisterAsDefaultBrowser();
   void ShowAbout();
   LRESULT OnCopyData(const COPYDATASTRUCT& data);
