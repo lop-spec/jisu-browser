@@ -241,6 +241,18 @@ try{
  if($s.Strip -ne 1 -or $s.StripAgents -ne 0 -or $s.Hidden -ne 1){throw "Agent tab leaked into the strip: strip=$($s.Strip) stripAgents=$($s.StripAgents) hidden=$($s.Hidden)"}
  'PASS --background: the agent leased a tab and navigated it with no visible window and nothing in the tab strip'
 
+ Command 30 $tab 'Network.enable' | Out-Null
+ Command 31 $tab 'Page.navigate' ('{"url":"http://localhost:'+$pagePort+'/agent-perf-probe"}') | Out-Null
+ Wait-For {$script:pages -contains '/agent-perf-probe'} 'network probe request'
+ Wait-For {@($script:inbox | Where-Object {$_ -match '"Network.loadingFinished"'}).Count -gt 0} 'network completion event'
+ if (@($script:inbox | Where-Object {$_ -match '"Network.dataReceived"'}).Count -ne 0) { throw 'Unused per-chunk network events reached the relay' }
+ $probeResult = Command 32 $tab 'Runtime.evaluate' '{"expression":"document.title","returnByValue":true}'
+ if ($probeResult.result.result.value -ne 'agent-page') { throw 'Hidden evaluation did not read the page' }
+ $image = Command 33 $tab 'Page.captureScreenshot' '{"format":"png","clip":{"x":0,"y":0,"width":20,"height":20,"scale":1}}'
+ if ($image.result.data -notlike 'iVBOR*') { throw 'Screenshot did not wake the hidden agent page' }
+ 'PASS hidden evaluation, network completion, zero unused per-chunk events, and on-demand screenshot'
+
+
  Command 50 $tab 'Page.navigate' ('{"url":"http://localhost:'+$pagePort+'/agent-download"}')|Out-Null
  Wait-For {$script:pages -contains '/agent-download'} 'agent download response'
  Pump 1500

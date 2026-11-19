@@ -1778,6 +1778,10 @@ void BrowserWindow::ReturnAgentTab(uint32_t tabId) {
   if (Tab* tab = FindTab(tabId)) {
     tab->leased = false;
     tab->agentAwake = false;
+    tab->hiddenSince = GetTickCount64();
+    if (agentConfig_.poolSuspendMs > 0 && !freezeTimerRunning_) {
+      freezeTimerRunning_ = SetTimer(hwnd_, kTimerAgentFreeze, 1000, nullptr) != 0;
+    }
     if (tab->presented) {
       FinishPresentation(*tab);  // 交接过的页面：用户还在看就归他，否则退回隐藏的池
       InvalidateChrome();
@@ -1999,7 +2003,12 @@ void BrowserWindow::SuspendIdleAgentTabs() {
         !tab.webview) {
       continue;
     }
-    if (now - tab.hiddenSince < agentConfig_.freezeMs) {
+    DWORD delay = agentConfig_.freezeMs;
+    if (!tab.leased && agentConfig_.poolSuspendMs > 0) {
+      delay = delay == 0 ? agentConfig_.poolSuspendMs : (std::min)(delay, agentConfig_.poolSuspendMs);
+    }
+    if (delay == 0) continue;
+    if (now - tab.hiddenSince < delay) {
       waiting = true;
       continue;
     }

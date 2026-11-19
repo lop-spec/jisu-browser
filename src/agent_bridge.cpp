@@ -232,6 +232,10 @@ AgentBridgeConfig LoadAgentBridgeConfig(const std::wstring& file, std::string* e
   config.blockAutoplay = root["blockAutoplay"].AsBool(config.blockAutoplay);
   config.blockImages = root["blockImages"].AsBool(config.blockImages);
   config.renderOnDemand = root["renderOnDemand"].AsBool(config.renderOnDemand);
+  config.cdpFullNetworkEvents = root["cdpFullNetworkEvents"].AsBool(config.cdpFullNetworkEvents);
+  if (root["poolSuspendMs"].IsNumber()) {
+    config.poolSuspendMs = root["poolSuspendMs"].AsNumber() <= 0 ? 0 : ClampMs(root["poolSuspendMs"].AsNumber(), 2000, 3600000);
+  }
   if (root["pageFreezeMs"].IsNumber()) {
     config.pageFreezeMs = root["pageFreezeMs"].AsNumber() <= 0 ? 0 : ClampMs(root["pageFreezeMs"].AsNumber(), 100, 3600000);
   }
@@ -661,6 +665,13 @@ void AgentBridge::Forward(Connection& connection, const std::string& idJson, con
       Fail(connection, idJson, "Navigation protocol is blocked by browser safety policy"); return;
     }
   }
+  if (method == "Network.streamResourceContent" && !connection.networkDataSubscribed) {
+    SubscribeNetworkData(connection);
+    if (!connection.networkDataSubscribed) {
+      Fail(connection, idJson, "Unable to subscribe to Network.dataReceived");
+      return;
+    }
+  }
   Execute(connection, idJson, session, method, paramsJson);
   if (method == "Network.enable") {
     // 同一会话上按顺序执行：网址拦截紧跟在开启网络域之后生效（iframe 子会话各自开启，各自补上）
@@ -736,7 +747,7 @@ void AgentBridge::Attach(Connection& connection, const std::string& idJson) {
   // A running target is required for CDP attachment. Resume/show only the already leased
   // off-screen control; never activate a native window or borrow a user page.
   host_.ResumeAgentTab(connection.tabId);
-  Wake(connection);
+  if (!config_.renderOnDemand) Wake(connection);
   Subscribe(connection);  // 先订阅：附加成功后的第一批事件不能丢
   const uint32_t connectionId = connection.id;
   std::weak_ptr<int> alive = alive_;
@@ -1020,30 +1031,34 @@ void AgentBridge::Subscribe(Connection& connection) {
   if (!connection.subscriptions.empty() || !connection.webview) {
     return;
   }
+  for (const wchar_t* name : kCdpEvents) {
+    if (std::wstring_view(name) != L"Network.dataReceived") SubscribeEvent(connection, name);
+  }
+  if (config_.cdpFullNetworkEvents) SubscribeNetworkData(connection);
+}
+
+void AgentBridge::SubscribeNetworkData(Connection& connection) {
+  connection.networkDataSubscribed = SubscribeEvent(connection, L"Network.dataReceived");
+}
+
+bool AgentBridge::SubscribeEvent(Connection& connection, const wchar_t* name) {
+  ComPtr<ICoreWebView2DevToolsProtocolEventReceiver> receiver;
+  if (!connection.webview || FAILED(connection.webview->GetDevToolsProtocolEventReceiver(name, receiver.GetAddressOf()))) {
+    return false;
+  }
   const uint32_t connectionId = connection.id;
   std::weak_ptr<int> alive = alive_;
-  for (const wchar_t* name : kCdpEvents) {
-    ComPtr<ICoreWebView2DevToolsProtocolEventReceiver> receiver;
-    if (FAILED(connection.webview->GetDevToolsProtocolEventReceiver(name, receiver.GetAddressOf()))) {
-      continue;
-    }
-    const std::string method = ToUtf8(name);
-    EventRegistrationToken token{};
-    const HRESULT hr = receiver->add_DevToolsProtocolEventReceived(
-        Callback<ICoreWebView2DevToolsProtocolEventReceivedEventHandler>(
-            [this, alive, connectionId, method](ICoreWebView2*,
-                                                ICoreWebView2DevToolsProtocolEventReceivedEventArgs* args) -> HRESULT {
-              if (!alive.expired()) {
-                OnCdpEvent(connectionId, method, args);
-              }
-              return S_OK;
-            })
-            .Get(),
-        &token);
-    if (SUCCEEDED(hr)) {
-      connection.subscriptions.emplace_back(receiver, token);
-    }
-  }
+  const std::string method = ToUtf8(name);
+  EventRegistrationToken token{};
+  const HRESULT hr = receiver->add_DevToolsProtocolEventReceived(
+      Callback<ICoreWebView2DevToolsProtocolEventReceivedEventHandler>(
+          [this, alive, connectionId, method](ICoreWebView2*, ICoreWebView2DevToolsProtocolEventReceivedEventArgs* args) -> HRESULT {
+            if (!alive.expired()) OnCdpEvent(connectionId, method, args);
+            return S_OK;
+          }).Get(), &token);
+  if (FAILED(hr)) return false;
+  connection.subscriptions.emplace_back(receiver, token);
+  return true;
 }
 
 void AgentBridge::Unsubscribe(Connection& connection) {
@@ -1051,6 +1066,7 @@ void AgentBridge::Unsubscribe(Connection& connection) {
     receiver->remove_DevToolsProtocolEventReceived(token);
   }
   connection.subscriptions.clear();
+  connection.networkDataSubscribed = false;
 }
 
 void AgentBridge::OnCdpEvent(uint32_t connectionId, const std::string& method,

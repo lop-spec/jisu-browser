@@ -193,7 +193,9 @@ Pi 的 `browser` 工具走 Playwright MCP 的扩展模式：MCP 起一个本机 
 | `graceMs`（400） | 最后一条命令完成后保持可见多久，之后关焦点模拟并隐藏 |
 | `freezeMs`（30000） | 隐藏后再过多久挂起页面（定时器、脚本全停），下一条命令到达时先恢复；每次挂起约有 150–400ms 的 CPU 尖峰，只在长间隔里划算；0 关闭 |
 | `pageFreezeMs`（1000） | 隐藏后再过多久用 CDP 冻结页面（`Page.setWebLifecycleState frozen`，同 Chrome 冻结后台标签：脚本、定时器停住，网络照收），下一条命令前先解冻；比 `freezeMs` 的 TrySuspend 便宜；0 关闭 |
-| `renderOnDemand`（false） | 按需出帧：只在截图、输入事件前唤醒；导航、读页面、快照在隐藏状态下执行（同后台标签），等待 Promise 的 evaluate 超过 `renderWaitMs`（200）仍未返回才唤醒 |
+| `renderOnDemand`（true） | 按需出帧：导航、读页面、快照在隐藏状态下执行；截图、输入、录屏和等待渲染的 Promise 才唤醒；`false` 恢复旧行为 |
+| `poolSuspendMs`（15000） | 只挂起已归还且隐藏的标签；重租即恢复，不清理页面和登录态。不影响持有租约的持续回答。`0` 关闭此档 |
+| `cdpFullNetworkEvents`（false） | 默认不订阅逐块 `Network.dataReceived`；显式调用 `Network.streamResourceContent` 时在发命令之前订阅。若自定义客户端需要无条件收取逐块事件，设为 `true`。请求、响应、失败和 WebSocket 事件不变 |
 | `rasterScale`（1.0） | 在宿主里的光栅化比例：CSS 视口不变、像素更少，`srcset` 也会挑小图；0 跟随显示器 |
 | `blockAutoplay`（true） | 媒体不自动播放：`play()` 像被浏览器自动播放策略拒绝一样返回 `NotAllowedError` |
 | `blockImages`（false） | 不加载图片；用户点开这个标签看时不拦 |

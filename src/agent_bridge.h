@@ -46,8 +46,10 @@ struct AgentBridgeConfig {
   bool blockImages = false;   // 不加载图片（用户点开这个标签看时不拦）
   // 按需出帧：只在截图、输入等确实要出帧的命令前唤醒；导航、读页面、快照在隐藏状态下执行（同后台标签），
   // 等待 Promise 的 evaluate 超过 renderWaitMs 仍未返回（可能在等 rAF）才唤醒
-  bool renderOnDemand = false;
+  bool renderOnDemand = true;
   DWORD renderWaitMs = 200;
+  DWORD poolSuspendMs = 15000;  // 只挂起已归还的隐藏标签；0 = 不启用此档
+  bool cdpFullNetworkEvents = false;  // 兼容需要逐块网络事件的自定义 CDP 客户端
   // 隐藏后再过多久用 CDP 冻结页面（Page.setWebLifecycleState frozen：脚本、定时器停住，网络照收），
   // 下一条命令前先解冻并等页面把积下的任务跑完；0 = 不冻结。比 TrySuspend 便宜（不回收内存）
   DWORD pageFreezeMs = 1000;
@@ -122,6 +124,7 @@ class AgentBridge {
     std::string rootSession;                 // 本连接自己的页面会话
     std::set<std::string> childSessions;     // 自动附加的 iframe / worker 会话
     std::vector<std::pair<ComPtr<ICoreWebView2DevToolsProtocolEventReceiver>, EventRegistrationToken>> subscriptions;
+    bool networkDataSubscribed = false;
     // 唤醒 / 休眠
     int pending = 0;
     ULONGLONG lastActivity = 0;
@@ -173,6 +176,8 @@ class AgentBridge {
   void OnCdpEvent(uint32_t connectionId, const std::string& method,
                   ICoreWebView2DevToolsProtocolEventReceivedEventArgs* args);
   void Subscribe(Connection& connection);
+  bool SubscribeEvent(Connection& connection, const wchar_t* name);
+  void SubscribeNetworkData(Connection& connection);
   void Unsubscribe(Connection& connection);
   void ReleaseSession(Connection& connection);
   void Reply(Connection& connection, const std::string& idJson, const std::string& resultJson);
