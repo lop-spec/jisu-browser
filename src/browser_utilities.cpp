@@ -158,15 +158,20 @@ void BrowserWindow::ConfigureDownloads(Tab& tab) {
   if (FAILED(tab.webview.As(&view))) return;
   const auto owner = tab.owner; const auto id = tab.id;
   EventRegistrationToken token{};
-  if(options_.appMode){
-    ComPtr<ICoreWebView2_9> dialog;
-    if(SUCCEEDED(tab.webview.As(&dialog)))dialog->add_IsDefaultDownloadDialogOpenChanged(
-      Callback<ICoreWebView2IsDefaultDownloadDialogOpenChangedEventHandler>([owner](ICoreWebView2* sender,IUnknown*)->HRESULT{
-        auto* self=*owner;ComPtr<ICoreWebView2_9> view;BOOL open=FALSE;
-        if(self&&!self->destroyed_&&SUCCEEDED(sender->QueryInterface(IID_PPV_ARGS(view.GetAddressOf())))&&SUCCEEDED(view->get_IsDefaultDownloadDialogOpen(&open))&&open)
-          SetPropW(self->hwnd_,L"JisuBrowser.DownloadDialogSeen",reinterpret_cast<HANDLE>(1));
-        return S_OK;
-      }).Get(),&token);
+  ComPtr<ICoreWebView2_9> dialog;
+  if (SUCCEEDED(tab.webview.As(&dialog))) {
+    dialog->put_DefaultDownloadDialogCornerAlignment(COREWEBVIEW2_DEFAULT_DOWNLOAD_DIALOG_CORNER_ALIGNMENT_TOP_RIGHT);
+    dialog->add_IsDefaultDownloadDialogOpenChanged(
+        Callback<ICoreWebView2IsDefaultDownloadDialogOpenChangedEventHandler>([owner, id](ICoreWebView2* sender, IUnknown*) -> HRESULT {
+          auto* self = *owner;
+          const auto* tab = self && !self->destroyed_ ? self->FindTab(id) : nullptr;
+          ComPtr<ICoreWebView2_9> view;
+          BOOL open = FALSE;
+          if (tab && tab->visible && SUCCEEDED(sender->QueryInterface(IID_PPV_ARGS(view.GetAddressOf()))) &&
+              SUCCEEDED(view->get_IsDefaultDownloadDialogOpen(&open)) && open)
+            SetPropW(self->hwnd_, L"JisuBrowser.DownloadDialogSeen", reinterpret_cast<HANDLE>(1));
+          return S_OK;
+        }).Get(), &token);
   }
   view->add_DownloadStarting(Callback<ICoreWebView2DownloadStartingEventHandler>(
       [owner, id](ICoreWebView2*, ICoreWebView2DownloadStartingEventArgs* args) -> HRESULT {
@@ -208,15 +213,17 @@ void BrowserWindow::ConfigureDownloads(Tab& tab) {
         }
         if (suffix >= 10000) { retained->put_Cancel(TRUE); deferral->Complete(); return; }
       }
-      retained->put_Handled(self->options_.appMode ? FALSE : TRUE);
+      // A hidden WebView's popup is hidden too; use the visible tab in that case.
+      const auto* source = self->FindTab(id);
+      if (!source) { retained->put_Cancel(TRUE); deferral->Complete(); return; }
+      const bool showOnActive = !self->options_.appMode && !self->options_.inPrivate && !source->visible;
+      retained->put_Handled(self->options_.inPrivate || showOnActive ? TRUE : FALSE);
       if (FAILED(retained->put_ResultFilePath(d->path.c_str()))) { retained->put_Cancel(TRUE); deferral->Complete(); return; }
       d->id = self->profile_->nextDownload++; d->tabId = id; d->started = GetTickCount64();
       d->url = HistoryStore::SafeUrl(uri.Str());
       // Do not turn a sanitized signed/token URL into a different retry request.
       if (d->url != uri.Str()) d->url.clear();
       d->operation->get_TotalBytesToReceive(&d->total);
-      const auto* source = self->FindTab(id);
-      if (!source) { retained->put_Cancel(TRUE); deferral->Complete(); return; }
       self->profile_->downloads.insert(self->profile_->downloads.begin(), d);
       if (self->profile_->downloads.size() > 500) {
         auto& rows = self->profile_->downloads;
@@ -249,7 +256,13 @@ void BrowserWindow::ConfigureDownloads(Tab& tab) {
           Tab* tab = current->FindTab(id); CoTaskString sourceUrl;
           if (!tab || !tab->webview || !tab->scriptOpened || !tab->title.empty()) return;
           tab->webview->get_Source(sourceUrl.Put());
-          if (sourceUrl.Str() == L"about:blank" && current->IndexOf(*tab) < current->tabs_.size()) current->CloseTab(current->IndexOf(*tab));
+          if (sourceUrl.Str() == L"about:blank" && current->IndexOf(*tab) < current->tabs_.size()) {
+            ComPtr<ICoreWebView2_9> dialog;
+            BOOL open = FALSE;
+            if (current->IsActive(*tab) && SUCCEEDED(tab->webview.As(&dialog))) dialog->get_IsDefaultDownloadDialogOpen(&open);
+            current->CloseTab(current->IndexOf(*tab));
+            if (open) current->ShowDownloadProgress();
+          }
         });
         BOOL canResume = FALSE;
         const bool terminal = item->state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED ||
@@ -264,9 +277,17 @@ void BrowserWindow::ConfigureDownloads(Tab& tab) {
       d->operation->add_BytesReceivedChanged(Callback<ICoreWebView2BytesReceivedChangedEventHandler>(update).Get(), &event);
       d->operation->add_StateChanged(Callback<ICoreWebView2StateChangedEventHandler>(update).Get(), &event);
       self->SaveDownloads(); deferral->Complete();
+      if (showOnActive) self->PostTask([self] { self->ShowDownloadProgress(); });
     });
     return S_OK;
   }).Get(), &token);
+}
+
+void BrowserWindow::ShowDownloadProgress() {
+  if (destroyed_ || !revealed_ || !IsWindowVisible(hwnd_) || IsIconic(hwnd_)) return;
+  const auto* tab = ActiveTab();
+  ComPtr<ICoreWebView2_9> dialog;
+  if (tab && tab->visible && tab->webview && SUCCEEDED(tab->webview.As(&dialog))) dialog->OpenDefaultDownloadDialog();
 }
 void BrowserWindow::OpenDownloads() {
   LoadDownloads();

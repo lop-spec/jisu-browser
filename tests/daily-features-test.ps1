@@ -88,6 +88,7 @@ try{
   Write-Host ('DOWNLOAD-STATE '+(Get-Content -LiteralPath $record -Raw -Encoding UTF8))
   $rows=(Get-Content -LiteralPath $record -Raw -Encoding UTF8|ConvertFrom-Json).rows
   if(-not @($rows|Where-Object {$_.state -eq 2 -and (Test-Path -LiteralPath $_.path)}).Count){throw 'real download did not complete'}
+  if(-not $CloseDownloadProbe -and [DailyTest]::GetPropW($h,'JisuBrowser.DownloadDialogSeen').ToInt64() -ne 1){throw 'daily WebView native download progress popup did not open'}
   [DailyTest]::Open($h,'jisu://downloads');Pump 2000;$process.Refresh()
   if($process.MainWindowTitle -notlike '*downloads*' -and $process.MainWindowTitle -notlike ('*'+[char]0x4E0B+[char]0x8F7D+'*')){throw 'downloads internal page failed'}
   'PASS native right-of-current order, real target-blank download, persisted record, internal download page'

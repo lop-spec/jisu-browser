@@ -187,6 +187,7 @@ class BrowserWindow : public AgentHost {
     bool paused = false;
   };
   void ConfigureDownloads(Tab& tab);
+  void ShowDownloadProgress();
   void OpenDownloads();
   bool HandleUtilityMessage(Tab& tab, const std::string& text);
   void SaveDownloads();
@@ -545,7 +546,18 @@ class BrowserWindow : public AgentHost {
     std::set<HMENU> filled;
     std::vector<int64_t> urls;
     std::vector<int64_t> openAll;
+    std::map<HMENU, std::vector<int64_t>> rows;
+    std::vector<HMENU> visibleMenus;
+    HMENU dragMenu = nullptr;
+    int64_t dragged = 0, target = 0;
+    POINT start{};
+    bool dragging = false, after = false;
+    HWND marker = nullptr;
   };
+  static thread_local BrowserWindow* bookmarkMenuInput_;
+  static LRESULT CALLBACK BookmarkMenuFilter(int code, WPARAM wParam, LPARAM lParam);
+  bool OnBookmarkMenuInput(const MSG& msg);
+  void CommitBookmarkMenuDrop(const BookmarkMenuState& state);
   BookmarkMenuState* bookmarkMenu_ = nullptr;
   void FillBookmarkMenu(HMENU menu, const std::vector<BookmarkNode*>& nodes, BookmarkNode* owner);
   // 当前页是否已收藏：按网址与书签版本缓存，重绘不再整树查找

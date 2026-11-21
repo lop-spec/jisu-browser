@@ -80,20 +80,11 @@ constexpr wchar_t kAgentMediaScript[] =
 constexpr int kAddressBarId = 100;
 
 // 弹出菜单命令号
-constexpr UINT kMenuNewTab = 1001;
 constexpr UINT kMenuBookmarkManager = 1002;
-constexpr UINT kMenuToggleBar = 1003;
-constexpr UINT kMenuImport = 1004;
 constexpr UINT kMenuDefaultBrowser = 1005;
-constexpr UINT kMenuAbout = 1006;
-constexpr UINT kMenuExtensions = 1007;
 constexpr UINT kMenuHistory = 1008;
-constexpr UINT kMenuMedia = 1009;
-constexpr UINT kMenuReopenClosed = 1010;
 constexpr UINT kMenuDownloads = 1011;
 constexpr UINT kMenuSettings = 1012;
-constexpr UINT kMenuPageBase = 1100;
-constexpr UINT kMenuTabListBase = 5000;
 constexpr UINT_PTR kTimerControllers = 14;
 constexpr UINT_PTR kTimerSuggestions = 15;
 constexpr UINT_PTR kTimerProfile = 16;
@@ -2528,6 +2519,10 @@ bool BrowserWindow::DispatchShortcut(UINT key, bool repeat) {
   const bool alt = GetKeyState(VK_MENU) < 0;
   // App windows have one page: let Pi handle its own shortcuts, without browser tab/omnibox commands.
   if (options_.appMode && ((ctrl && key != 'R' && key != 'W' && key != VK_F4) || (alt && key == 'D') || key == VK_F6)) return false;
+  if (!options_.appMode && key == VK_ESCAPE && shift && !ctrl && !alt) {
+    if (!repeat) PostTask([this] { PageAction(7); });
+    return true;
+  }
   WPARAM command = kCmdNone;
   LPARAM arg = 0;
   bool once = false;  // 按住不连发
@@ -2925,11 +2920,13 @@ void BrowserWindow::FillBookmarkMenu(HMENU menu, const std::vector<BookmarkNode*
     return;
   }
   size_t added = 0;
+  auto& rows = state.rows[menu];
   for (BookmarkNode* node : nodes) {
     if (added++ >= kMenuItemLimit || state.urls.size() >= kMenuOpenAllBase - kMenuItemBase) {
       AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"更多项目请在书签管理器中查看");
       break;
     }
+    rows.push_back(node->id);
     if (node->folder) {
       HMENU sub = CreatePopupMenu();
       state.folders[sub] = node->id;
@@ -2957,13 +2954,22 @@ void BrowserWindow::ShowBookmarkMenu(const std::vector<BookmarkNode*>& nodes, Bo
   BookmarkMenuState* previous = bookmarkMenu_;
   bookmarkMenu_ = &state;
   HMENU menu = CreatePopupMenu();
+  if (!menu) { bookmarkMenu_ = previous; return; }
   FillBookmarkMenu(menu, nodes, openAllFolder);
+  state.visibleMenus.push_back(menu);
+  auto* previousInput = bookmarkMenuInput_;
+  bookmarkMenuInput_ = this;
+  const HHOOK hook = previousInput ? nullptr : SetWindowsHookExW(WH_MSGFILTER, BookmarkMenuFilter, nullptr, GetCurrentThreadId());
   // 不加 TPM_NONOTIFY：子菜单要靠 WM_INITMENUPOPUP 展开时现填
   const UINT flags = TPM_RETURNCMD | TPM_TOPALIGN | (alignRight ? TPM_RIGHTALIGN : TPM_LEFTALIGN);
   const UINT command = static_cast<UINT>(TrackPopupMenuEx(menu, flags, screen.x, screen.y, hwnd_, nullptr));
+  if (hook) UnhookWindowsHookEx(hook);
+  bookmarkMenuInput_ = previousInput;
   bookmarkMenu_ = previous;
+  if (state.marker) DestroyWindow(state.marker);
   DestroyMenu(menu);
   if (destroyed_ || !IsWindow(hwnd_)) return;
+  if (state.dragging) { CommitBookmarkMenuDrop(state); return; }
   if (command >= kMenuOpenAllBase && command - kMenuOpenAllBase < state.openAll.size()) {
     if (BookmarkNode* folder = bookmarks_.FindById(state.openAll[command - kMenuOpenAllBase]); folder && folder->folder) {
       std::vector<std::wstring> urls;
@@ -3065,88 +3071,23 @@ void BrowserWindow::ShowBookmarkContextMenu(BookmarkNode& node, POINT screen) {
 
 void BrowserWindow::ShowMainMenu(POINT screen) {
   HMENU menu = CreatePopupMenu();
-  HMENU tabList = CreatePopupMenu();
-  std::vector<uint32_t> tabIds;
-  for (const auto& tab : tabs_) {
-    tabIds.push_back(tab->id);
-    AppendMenuW(tabList, MF_STRING | (IsActive(*tab) ? MF_CHECKED : 0), kMenuTabListBase + tabIds.size() - 1,
-                MenuText(tab->title.empty() ? tab->url : tab->title).c_str());
-  }
-  AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(tabList), L"标签列表");
-  AppendMenuW(menu, MF_STRING, kMenuNewTab, L"新建标签页\tCtrl+T");
-  AppendMenuW(menu, MF_STRING, kMenuDownloads, L"下载管理\tCtrl+J");
-  AppendMenuW(menu, MF_STRING, kMenuSettings, L"设置 / 清除浏览数据");
-  const auto* translationTab = ActiveTab();
-  AppendMenuW(menu, MF_STRING, kMenuPageBase + 12,
-      translationTab && translationTab->translationEnabled ? L"恢复原文\tAlt+T" : L"翻译成中文\tAlt+T");
-  double zoom = 1;
-  if (const Tab* tab = ActiveTab(); tab && tab->controller) tab->controller->get_ZoomFactor(&zoom);
-  const auto zoomLabel = L"当前缩放：" + std::to_wstring(static_cast<int>(std::lround(zoom * 100))) + L"%";
-  AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, zoomLabel.c_str());
-  const wchar_t* actions[] = {L"新建窗口\tCtrl+N", L"页面查找\tCtrl+F", L"放大\tCtrl++", L"缩小\tCtrl+-",
-                             L"重置缩放\tCtrl+0", L"打印\tCtrl+P", L"开发者工具\tF12", L"任务管理器", L"新建无痕窗口\tCtrl+Shift+N", L"查看网页源码\tCtrl+U", L"保存网页\tCtrl+S", L"站点信息"};
-  for (UINT i = 0; i < ARRAYSIZE(actions); ++i) AppendMenuW(menu, MF_STRING, kMenuPageBase + i, actions[i]);
-  AppendMenuW(menu, MF_STRING | (profile_->closedTabs.empty() ? MF_GRAYED : 0), kMenuReopenClosed,
-              L"重新打开关闭的标签页\tCtrl+Shift+T");
-  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  if (!menu) return;
   AppendMenuW(menu, MF_STRING, kMenuBookmarkManager, L"书签管理器\tCtrl+Shift+O");
-  AppendMenuW(menu, MF_STRING | (settings_.bookmarkBar ? MF_CHECKED : 0), kMenuToggleBar, L"显示书签栏\tCtrl+Shift+B");
-  AppendMenuW(menu, MF_STRING, kMenuImport, L"导入书签…");
-  AppendMenuW(menu, MF_STRING, kMenuExtensions, L"扩展管理");
+  AppendMenuW(menu, MF_STRING, kMenuDownloads, L"下载管理\tCtrl+J");
   AppendMenuW(menu, MF_STRING, kMenuHistory, L"历史记录\tCtrl+H");
-  AppendMenuW(menu, MF_STRING, kMenuMedia, L"极速播放器\tCtrl+Shift+M");
-  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING, kMenuSettings, L"设置");
   AppendMenuW(menu, MF_STRING, kMenuDefaultBrowser, L"设为默认浏览器…");
-  AppendMenuW(menu, MF_STRING, kMenuAbout, L"关于极速浏览器");
-  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(menu, MF_STRING, TrayIcon::kExit, L"彻底退出");
   const UINT command = static_cast<UINT>(TrackPopupMenuEx(
       menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTALIGN | TPM_TOPALIGN, screen.x, screen.y, hwnd_, nullptr));
   DestroyMenu(menu);
   if (destroyed_ || !IsWindow(hwnd_)) return;
-  if (command >= kMenuTabListBase && command - kMenuTabListBase < tabIds.size()) {
-    if (Tab* tab = FindTab(tabIds[command - kMenuTabListBase]); tab && IndexOf(*tab) < tabs_.size()) Activate(IndexOf(*tab));
-    return;
-  }
-  if (command >= kMenuPageBase && command < kMenuPageBase + 13) { PageAction(command - kMenuPageBase); return; }
   switch (command) {
+    case kMenuBookmarkManager: OpenBookmarkManager(L""); break;
     case kMenuDownloads: OpenDownloads(); break;
+    case kMenuHistory: OpenHistory(); break;
     case kMenuSettings: OpenSettings(); break;
-    case kMenuNewTab:
-      NewTab(L"");
-      break;
-    case kMenuReopenClosed:
-      ReopenClosedTab();
-      break;
-    case kMenuBookmarkManager:
-      OpenBookmarkManager(std::wstring());
-      break;
-    case kMenuToggleBar:
-      ExecuteCommand(kCmdToggleBookmarkBar);
-      break;
-    case kMenuImport:
-      OpenBookmarkManager(L"#import");
-      break;
-    case kMenuExtensions:
-      OpenExtensions();
-      break;
-    case kMenuHistory:
-      OpenHistory();
-      break;
-    case kMenuMedia:
-      OpenMedia();
-      break;
-    case kMenuDefaultBrowser:
-      RegisterAsDefaultBrowser();
-      break;
-    case kMenuAbout:
-      ShowAbout();
-      break;
-    case TrayIcon::kExit:
-      ExecuteTrayCommand(TrayIcon::kExit);
-      break;
-    default:
-      break;
+    case kMenuDefaultBrowser: RegisterAsDefaultBrowser(); break;
+    default: break;
   }
 }
 
@@ -3827,16 +3768,23 @@ LRESULT BrowserWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
       if (bookmarkMenu_) {
         const HMENU menu = reinterpret_cast<HMENU>(wParam);
         const auto folder = bookmarkMenu_->folders.find(menu);
-        if (folder != bookmarkMenu_->folders.end() && bookmarkMenu_->filled.insert(menu).second) {
-          std::vector<BookmarkNode*> children;
-          BookmarkNode* node = bookmarks_.FindById(folder->second);
-          if (node && node->folder) {
-            for (auto& child : node->children) children.push_back(child.get());
+        if (folder != bookmarkMenu_->folders.end()) {
+          std::erase(bookmarkMenu_->visibleMenus, menu);
+          bookmarkMenu_->visibleMenus.push_back(menu);
+          if (bookmarkMenu_->filled.insert(menu).second) {
+            std::vector<BookmarkNode*> children;
+            BookmarkNode* node = bookmarks_.FindById(folder->second);
+            if (node && node->folder) {
+              for (auto& child : node->children) children.push_back(child.get());
+            }
+            FillBookmarkMenu(menu, children, node && node->folder ? node : nullptr);
           }
-          FillBookmarkMenu(menu, children, node && node->folder ? node : nullptr);
         }
         return 0;
       }
+      break;
+    case WM_UNINITMENUPOPUP:
+      if (bookmarkMenu_) std::erase(bookmarkMenu_->visibleMenus, reinterpret_cast<HMENU>(wParam));
       break;
     case WM_CTLCOLOREDIT:
       if (reinterpret_cast<HWND>(lParam) == edit_) {

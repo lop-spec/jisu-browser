@@ -74,4 +74,83 @@ void BrowserWindow::FinishBookmarkDrag(POINT point) {
   CancelBookmarkDrag();
   if (id && parent && bookmarks_.Move(id,parent,index)) OnBookmarksChanged();
 }
+
+thread_local BrowserWindow* BrowserWindow::bookmarkMenuInput_ = nullptr;
+
+LRESULT CALLBACK BrowserWindow::BookmarkMenuFilter(int code, WPARAM wParam, LPARAM lParam) {
+  if (code == MSGF_MENU && bookmarkMenuInput_ && bookmarkMenuInput_->OnBookmarkMenuInput(*reinterpret_cast<const MSG*>(lParam)))
+    return 1;
+  return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+bool BrowserWindow::OnBookmarkMenuInput(const MSG& msg) {
+  if (!bookmarkMenu_ || destroyed_) return false;
+  auto& state = *bookmarkMenu_;
+  const auto rowAt = [&](HMENU menu, RECT* rect = nullptr) -> int64_t {
+    const auto rows = state.rows.find(menu);
+    if (rows == state.rows.end()) return 0;
+    const int row = MenuItemFromPoint(nullptr, menu, msg.pt);
+    if (row < 0 || static_cast<size_t>(row) >= rows->second.size()) return 0;
+    if (rect && !GetMenuItemRect(nullptr, menu, row, rect)) return 0;
+    return rows->second[row];
+  };
+  switch (msg.message) {
+    case WM_KEYDOWN:
+      if (msg.wParam == VK_ESCAPE && state.dragging) { EndMenu(); return true; }
+      return false;
+    case WM_LBUTTONDOWN:
+    case WM_NCLBUTTONDOWN:
+      state.dragged = 0;
+      for (auto it = state.visibleMenus.rbegin(); it != state.visibleMenus.rend(); ++it) {
+        if (const auto id = rowAt(*it)) {
+          state.dragMenu = *it; state.dragged = id; state.start = msg.pt;
+          break;
+        }
+      }
+      return false;  // Windows still owns click, keyboard and submenu behavior.
+    case WM_MOUSEMOVE:
+    case WM_NCMOUSEMOVE:
+    case WM_LBUTTONUP:
+    case WM_NCLBUTTONUP: {
+      const bool release = msg.message == WM_LBUTTONUP || msg.message == WM_NCLBUTTONUP;
+      if (!state.dragged) return false;
+      if (!state.dragging && !release) {
+        state.dragging = std::abs(msg.pt.x - state.start.x) >= GetSystemMetricsForDpi(SM_CXDRAG, dpi_) ||
+                         std::abs(msg.pt.y - state.start.y) >= GetSystemMetricsForDpi(SM_CYDRAG, dpi_);
+      }
+      if (!state.dragging) { if (release) state.dragged = 0; return false; }
+      RECT rect{};
+      const auto target = rowAt(state.dragMenu, &rect);
+      state.after = msg.pt.y >= (rect.top + rect.bottom) / 2;
+      if (release) {
+        state.target = target != state.dragged ? target : 0;
+        EndMenu();
+        return true;
+      }
+      if (target && target != state.dragged) {
+        if (!state.marker) state.marker = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
+            L"STATIC", nullptr, WS_POPUP | WS_DISABLED | SS_BLACKRECT, 0, 0, 0, 0, hwnd_, nullptr, instance_, nullptr);
+        if (state.marker) {
+          const int h = std::max(2, MulDiv(2, dpi_, 96));
+          SetWindowPos(state.marker, HWND_TOPMOST, rect.left + 4, (state.after ? rect.bottom : rect.top) - h / 2,
+                       std::max(1L, rect.right - rect.left - 8), h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+      } else if (state.marker) ShowWindow(state.marker, SW_HIDE);
+      return true;  // Do not open another submenu while dragging.
+    }
+    default:
+      return false;
+  }
+}
+
+void BrowserWindow::CommitBookmarkMenuDrop(const BookmarkMenuState& state) {
+  const auto* source = bookmarks_.FindById(state.dragged);
+  const auto* target = bookmarks_.FindById(state.target);
+  if (!source || !target || !target->parent || source->parent != target->parent) return;
+  const auto& siblings = target->parent->children;
+  const auto at = std::find_if(siblings.begin(), siblings.end(), [target](const auto& sibling) { return sibling.get() == target; });
+  if (at == siblings.end()) return;
+  const size_t slot = static_cast<size_t>(at - siblings.begin()) + (state.after ? 1 : 0);
+  if (bookmarks_.Move(source->id, target->parent->id, slot)) OnBookmarksChanged();
+}
 }  // namespace jisu
