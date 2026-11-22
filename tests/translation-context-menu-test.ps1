@@ -21,7 +21,7 @@ public static class TranslationMenuTest {
  [DllImport("user32.dll")]static extern bool AttachThreadInput(uint source,uint target,bool attach);
  [DllImport("user32.dll")]static extern IntPtr SetFocus(IntPtr h);
  public static void RightClick(IntPtr root){IntPtr render=IntPtr.Zero;EnumChildWindows(root,(h,l)=>{var b=new StringBuilder(128);GetClassNameW(h,b,128);if(b.ToString()=="Chrome_RenderWidgetHostHWND"){RECT r;GetClientRect(h,out r);Console.WriteLine("RENDER "+h+" visible="+IsWindowVisible(h)+" size="+r.right+"x"+r.bottom);if(IsWindowVisible(h)&&r.right>35&&r.bottom>35)render=h;}return true;},IntPtr.Zero);if(render==IntPtr.Zero)throw new Exception("render input HWND missing");uint pid;var target=GetWindowThreadProcessId(render,out pid);var source=GetCurrentThreadId();bool attached=target!=source&&AttachThreadInput(source,target,true);try{SetFocus(render);var p=(IntPtr)((35<<16)|35);PostMessageW(render,0x200,IntPtr.Zero,p);PostMessageW(render,0x204,(IntPtr)2,p);Thread.Sleep(80);PostMessageW(render,0x205,IntPtr.Zero,p);Thread.Sleep(80);}finally{if(attached)AttachThreadInput(source,target,false);}}
- public static IntPtr[] Windows(){var result=new List<IntPtr>();EnumWindows((h,l)=>{if(IsWindowVisible(h))result.Add(h);return true;},IntPtr.Zero);return result.ToArray();}
+ public static IntPtr[] Windows(){var result=new List<IntPtr>();EnumWindows((h,l)=>{var cls=new StringBuilder(128);GetClassNameW(h,cls,128);if(IsWindowVisible(h)&&(cls.ToString()=="JisuBrowserWindow"||cls.ToString().StartsWith("Chrome_WidgetWin_")))result.Add(h);return true;},IntPtr.Zero);return result.ToArray();}
 }
 '@
 $root=Join-Path $env:TEMP ('jisu-context-translation-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $root|Out-Null
@@ -35,8 +35,9 @@ function Select-TranslationMenu([string]$name){
  [TranslationMenuTest]::RightClick($p.MainWindowHandle)
  $deadline=(Get-Date).AddSeconds(8);$found=$null;$names=@()
  do{Pump 100;foreach($window in [TranslationMenuTest]::Windows()){
-  try{$element=[System.Windows.Automation.AutomationElement]::FromHandle($window);$items=$element.FindAll([System.Windows.Automation.TreeScope]::Subtree,(New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,[System.Windows.Automation.ControlType]::MenuItem)))
-   foreach($item in $items){$label=$item.Current.Name;$names+=$label;if($label.Replace('&','').Split("`t")[0] -eq $name){$found=$item;break}}
+  try{$element=[System.Windows.Automation.AutomationElement]::FromHandle($window);$items=$element.FindAll([System.Windows.Automation.TreeScope]::Subtree,[System.Windows.Automation.Condition]::TrueCondition)
+   # Chromium's UIA provider may omit descendants when FindAll uses a property prefilter. Walk the real tree, then filter.
+   foreach($item in $items){if($item.Current.ControlType -ne [System.Windows.Automation.ControlType]::MenuItem){continue};$label=$item.Current.Name;$names+=$label;if($label.Replace('&','').Split("`t")[0] -eq $name){$found=$item;break}}
   }catch{Write-Output ('UIA read error: '+$_.Exception.Message)}
   if($found){break}
  }}while(-not $found -and (Get-Date)-lt $deadline)
