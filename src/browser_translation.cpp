@@ -50,6 +50,32 @@ std::string Translate(const json::Value& texts,const std::wstring& proxy) {
   return json::Serialize(values);
 }
 }
+void BrowserWindow::AddTranslationContextMenu(Tab& tab, ICoreWebView2ContextMenuItemCollection* items) {
+  if(!items||options_.appMode||tab.agent||!IsActive(tab)||IsInternalPage(tab.url)||
+      !(tab.url.starts_with(L"http://")||tab.url.starts_with(L"https://")))return;
+  ComPtr<ICoreWebView2Environment9> environment;
+  if(FAILED(environment_.As(&environment)))return;
+  ComPtr<ICoreWebView2ContextMenuItem> item;
+  if(FAILED(environment->CreateContextMenuItem(tab.translationEnabled?L"恢复原文":L"翻译成中文",nullptr,
+      COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND,item.GetAddressOf())))return;
+  const auto owner=tab.owner;const auto id=tab.id;const auto url=tab.url;const auto generation=tab.translationGeneration;
+  EventRegistrationToken selected{};
+  if(FAILED(item->add_CustomItemSelected(Callback<ICoreWebView2CustomItemSelectedEventHandler>(
+      [owner,id,url,generation](ICoreWebView2ContextMenuItem*,IUnknown*)->HRESULT{
+    auto* self=*owner;if(!self||self->destroyed_)return S_OK;
+    self->PostTask([owner,id,url,generation]{
+      auto* self=*owner;if(!self||self->destroyed_)return;auto* tab=self->FindTab(id);
+      // The menu may outlive a navigation, tab switch or translation toggle.
+      if(!tab||tab->agent||!self->IsActive(*tab)||tab->url!=url||tab->translationGeneration!=generation)return;
+      self->TogglePageTranslation();
+    });return S_OK;
+  }).Get(),&selected)))return;
+  UINT32 count=0;if(FAILED(items->get_Count(&count)))return;
+  ComPtr<ICoreWebView2ContextMenuItem> separator;
+  if(count&&SUCCEEDED(environment->CreateContextMenuItem(L"",nullptr,COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR,separator.GetAddressOf()))&&
+      SUCCEEDED(items->InsertValueAtIndex(count,separator.Get())))++count;
+  items->InsertValueAtIndex(count,item.Get());
+}
 void BrowserWindow::TogglePageTranslation() {
   Tab* tab=ActiveTab();if(!tab||!tab->webview)return;
   if(tab->translationEnabled){

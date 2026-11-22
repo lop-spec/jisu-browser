@@ -200,6 +200,7 @@ class BrowserWindow : public AgentHost {
   void OpenSettings();
   void PageAction(UINT action);
   void TogglePageTranslation();
+  void AddTranslationContextMenu(Tab& tab, ICoreWebView2ContextMenuItemCollection* items);
   void ContinuePageTranslation(Tab& tab);
   BrowserWindow* CreatePeerWindow();
   void OpenPrivateWindow();

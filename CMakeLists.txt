@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(jisu_browser VERSION 0.5.9 LANGUAGES CXX RC)
+project(jisu_browser VERSION 0.5.10 LANGUAGES CXX RC)
 
 if(NOT MSVC)
   message(FATAL_ERROR "只支持 MSVC 构建（GitHub Actions windows-latest）")
@@ -132,6 +132,8 @@ add_custom_command(TARGET jisu-media POST_BUILD
 
 enable_testing()
 add_test(NAME native-translation-script COMMAND node "${CMAKE_CURRENT_SOURCE_DIR}/tests/translation-script-test.mjs")
+add_test(NAME native-translation-context-menu COMMAND powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/translation-context-menu-test.ps1" -Exe "$<TARGET_FILE:jisu-browser>")
+set_tests_properties(native-translation-context-menu PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE)
 add_executable(proxy-binding-test tests/proxy-binding-test.cpp src/proxy_binding.cpp src/common.cpp src/json.cpp)
 target_include_directories(proxy-binding-test PRIVATE src)
 target_compile_definitions(proxy-binding-test PRIVATE UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)

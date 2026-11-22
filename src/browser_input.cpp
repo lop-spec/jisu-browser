@@ -40,7 +40,9 @@ void BrowserWindow::ConfigureLinkInput(Tab& tab,bool firstNavigation) {
       [owner,id](ICoreWebView2*,ICoreWebView2ContextMenuRequestedEventArgs* args)->HRESULT{
         auto* self=*owner;if(!self||self->destroyed_)return S_OK;
         ComPtr<ICoreWebView2ContextMenuTarget> target;ComPtr<ICoreWebView2ContextMenuItemCollection> items;CoTaskString link;
-        if(FAILED(args->get_ContextMenuTarget(target.GetAddressOf()))||FAILED(target->get_LinkUri(link.Put()))||!IsWebUrl(link.Str())||FAILED(args->get_MenuItems(items.GetAddressOf())))return S_OK;
+        if(FAILED(args->get_MenuItems(items.GetAddressOf())))return S_OK;
+        if(auto* tab=self->FindTab(id))self->AddTranslationContextMenu(*tab,items.Get());
+        if(FAILED(args->get_ContextMenuTarget(target.GetAddressOf()))||FAILED(target->get_LinkUri(link.Put()))||!IsWebUrl(link.Str()))return S_OK;
         ComPtr<ICoreWebView2Environment9> environment;if(FAILED(self->environment_.As(&environment)))return S_OK;
         UINT32 count=0;items->get_Count(&count);
         for(UINT32 i=0;i<count;++i){ComPtr<ICoreWebView2ContextMenuItem> item;CoTaskString name;
